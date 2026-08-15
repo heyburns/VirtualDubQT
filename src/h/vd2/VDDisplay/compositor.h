@@ -1,0 +1,22 @@
+// VirtualDub - Video processing and capture application
+
+// A/V interface library
+//
+// Copyright (C) 2013 Avery Lee
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+
+#ifndef f_VD2_VDDISPLAY_COMPOSITOR_H
+#define f_VD2_VDDISPLAY_COMPOSITOR_H
+
+#include <vd2/system/refcount.h>
+
+class IVDDisplayRenderer;
+
+class VDINTERFACE IVDDisplayCompositor : public IVDRefCount {
+public:
+	virtual void Composite(IVDDisplayRenderer& r) = 0;
+};
+
+#endif

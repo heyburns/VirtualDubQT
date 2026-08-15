@@ -1,0 +1,43 @@
+# Build Directories
+build/
+bin/
+out/
+cmake-build-*/
+
+# Compiled Objects and Libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Executables
+VirtualDub_Port
+VirtualDubQt
+test_all_codecs_suite
+
+# Qt Autogen Files
+*.moc
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qmlc
+*.jsc
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.user
+*.user.*
+CMakeLists.txt.user
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary & Test files
+/tmp/
+*.log

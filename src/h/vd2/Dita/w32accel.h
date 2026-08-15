@@ -1,0 +1,21 @@
+// VirtualDub - Video processing and capture application
+//
+// Copyright (C) 2013 Avery Lee
+// Copyright (C) 2015 Anton Shekhovtsov
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+
+#ifndef f_VD2_DITA_W32ACCEL_H
+#define f_VD2_DITA_W32ACCEL_H
+
+#include <vd2/system/win32/miniwindows.h>
+#include <vd2/Dita/accel.h>
+
+void VDUIExtractAcceleratorTableW32(VDAccelTableDefinition& dst, HACCEL haccel, const VDAccelToCommandEntry *pCommands, uint32 nCommands);
+void VDUIMergeAcceleratorTableW32(VDAccelTableDefinition& dst, HACCEL haccel, const int *pCommands, uint32 nCommands, VDAccelTableDefinition& src);
+
+HACCEL VDUIBuildAcceleratorTableW32(const VDAccelTableDefinition& def);
+void VDUIUpdateMenuAcceleratorsW32(HMENU hmenu, const VDAccelTableDefinition& def);
+
+#endif

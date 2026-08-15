@@ -1,0 +1,117 @@
+// VirtualDub - Video processing and capture application
+//
+// Copyright (C) 1998-2001 Avery Lee
+// Copyright (C) 2016-2020 Anton Shekhovtsov
+// Copyright (C) 2025 v0lt
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+
+#ifndef f_POSITIONCONTROL_H
+#define f_POSITIONCONTROL_H
+
+#include <windows.h>
+#include <commctrl.h>
+#include <vd2/system/refcount.h>
+#include <vd2/system/event.h>
+
+#define POSITIONCONTROLCLASS (szPositionControlName)
+
+#ifndef f_POSITIONCONTROL_CPP
+extern const wchar_t szPositionControlName[];
+#endif
+
+typedef char (*PosCtlFTCallback)(HWND hwnd, void *data, long pos);
+
+class VDFraction;
+class VDTimeline;
+
+class IVDPositionControlCallback {
+public:
+	virtual bool		GetFrameString(wchar_t *buf, size_t buflen, VDPosition frame) = 0;
+};
+
+struct VDPositionControlEventData {
+	enum EventType {
+		kEventNone,
+		kEventJump,
+		kEventJumpToStart,
+		kEventJumpToPrev,
+		kEventJumpToNext,
+		kEventJumpToPrevPage,
+		kEventJumpToNextPage,
+		kEventJumpToPrevKey,
+		kEventJumpToNextKey,
+		kEventJumpToEnd,
+		kEventTracking,
+		kEventCount
+	};
+
+	VDPosition	mPosition;
+	EventType	mEventType;
+};
+
+class IVDPositionControl : public IVDRefCount {
+public:
+	virtual int			GetNiceHeight() = 0;
+
+	virtual void		SetFrameTypeCallback(IVDPositionControlCallback *pCB) = 0;
+	virtual void		SetRange(VDPosition lo, VDPosition hi, bool updateNow = true) = 0;
+	virtual void		SetRangeZoom(bool v, bool updateNow = true) = 0;
+	virtual VDPosition	GetRangeBegin() = 0;
+	virtual VDPosition	GetRangeEnd() = 0;
+	virtual VDPosition	GetPosition() = 0;
+	virtual void		SetPosition(VDPosition pos) = 0;
+	virtual void		SetDisplayedPosition(VDPosition pos) = 0;
+	virtual bool		GetSelection(VDPosition& start, VDPosition& end) = 0;
+	virtual void		SetSelection(VDPosition start, VDPosition end, bool updateNow = true) = 0;
+	virtual bool		GetSelection2(VDPosition& start, VDPosition& end) = 0;
+	virtual void		SetSelection2(VDPosition start, VDPosition end, bool updateNow = true) = 0;
+	virtual void		SetTimeline(VDTimeline& t) = 0;
+	virtual void		SetFrameRate(const VDFraction& frameRate) = 0;
+	virtual void		SetAutoPositionUpdate(bool autoUpdate) = 0;
+	virtual void		SetAutoStep(bool autoStep) = 0;
+
+	virtual void		ResetShuttle() = 0;
+
+	virtual VDEvent<IVDPositionControl, VDPositionControlEventData>&	PositionUpdated() = 0;
+	virtual void		SetMessage(const wchar_t* s) = 0;
+};
+
+IVDPositionControl *VDGetIPositionControl(VDGUIHandle h);
+
+#define PCS_PLAYBACK			(0x00000001L)
+#define PCS_MARK				(0x00000002L)
+#define	PCS_SCENE				(0x00000004L)
+#define	PCS_XNAV				(0x00000008L)
+#define	PCS_FILTER			(0x00000010L)
+
+#define PCN_THUMBTRACK			(NM_FIRST+0)
+#define PCN_THUMBPOSITION		(NM_FIRST+1)
+#define PCN_THUMBPOSITIONPREV	(NM_FIRST+2)
+#define PCN_THUMBPOSITIONNEXT	(NM_FIRST+3)
+#define PCN_PAGELEFT			(NM_FIRST+4)
+#define PCN_PAGERIGHT			(NM_FIRST+5)
+#define PCN_BEGINTRACK			(NM_FIRST+6)
+#define PCN_ENDTRACK			(NM_FIRST+7)
+#define PCN_FORMAT				(NM_FIRST+8)
+
+#define PCN_STOP				(0)
+#define PCN_PLAY				(1)
+#define	PCN_PLAYPREVIEW			(10)
+#define PCN_MARKIN				(2)
+#define PCN_MARKOUT				(3)
+#define PCN_START				(4)
+#define PCN_BACKWARD			(5)
+#define PCN_FORWARD				(6)
+#define PCN_END					(7)
+#define PCN_KEYPREV				(8)
+#define PCN_KEYNEXT				(9)
+#define	PCN_SCENEREV			(11)
+#define	PCN_SCENEFWD			(12)
+#define	PCN_SCENESTOP			(13)
+#define	PCN_JUMPTO				(14)
+
+ATOM RegisterPositionControl();
+
+#endif

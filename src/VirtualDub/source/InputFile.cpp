@@ -1,0 +1,579 @@
+// VirtualDub - Video processing and capture application
+//
+// Copyright (C) 1998-2003 Avery Lee
+// Copyright (C) 2016-2020 Anton Shekhovtsov
+// Copyright (C) 2025-2026 v0lt
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+
+#include "stdafx.h"
+
+#include <windows.h>
+#include "InputFile.h"
+#include "plugins.h"
+#include <vd2/plugin/vdplugin.h>
+#include <vd2/plugin/vdinputdriver.h>
+#include <vd2/system/error.h>
+#include <vd2/system/VDString.h>
+#include <vd2/system/file.h>
+#include <vd2/system/filesys.h>
+#include <vd2/system/registry.h>
+
+extern const wchar_t g_szError[];
+extern const wchar_t fileFiltersAppendAll[];
+
+MyFileError::MyFileError(int error, const wchar_t* format, ...) {
+	va_list val;
+
+	va_start(val, format);
+	vsetf(format, val);
+	va_end(val);
+	this->error = error;
+}
+
+/////////////////////////////////////////////////////////////////////
+
+InputFileOptions::~InputFileOptions() {
+}
+
+/////////////////////////////////////////////////////////////////////
+
+InputFilenameNode::InputFilenameNode(const wchar_t *_n, int flags) : name(_wcsdup(_n)), flags(flags) {
+	if (!name)
+		throw MyMemoryError();
+}
+
+InputFilenameNode::~InputFilenameNode() {
+	free((char *)name);
+}
+
+/////////////////////////////////////////////////////////////////////
+
+InputFile::~InputFile() {
+	InputFilenameNode *ifn;
+
+	while(ifn = listFiles.RemoveTail())
+		delete ifn;
+}
+
+void InputFile::AddFilename(const wchar_t *lpszFile, int flags) {
+	InputFilenameNode *ifn = new InputFilenameNode(lpszFile, flags);
+
+	if (ifn)
+		listFiles.AddTail(ifn);
+}
+
+bool InputFile::Append(const wchar_t *szFile, uint32 flags) {
+	return false;
+}
+
+void InputFile::getAppendFilters(wchar_t *filters, int filters_max) {
+	const wchar_t* s = fileFiltersAppendAll;
+	const wchar_t* p = s;
+	while(1){
+		p += wcslen(p);
+		p++;
+		if(!*p) break;
+	}
+	memcpy(filters,s,(p-s+1)*2);
+}
+
+void InputFile::setOptions(InputFileOptions *) {
+}
+
+InputFileOptions *InputFile::promptForOptions(VDGUIHandle) {
+	return NULL;
+}
+
+InputFileOptions *InputFile::createOptions(const void *buf, uint32 len) {
+	return NULL;
+}
+
+void InputFile::InfoDialog(VDGUIHandle hwndParent) {
+	MessageBoxW((HWND)hwndParent, L"No file information is available for the current video file.", g_szError, MB_OK);
+}
+
+void InputFile::GetTextInfo(tFileTextInfo& info) {
+	info.clear();
+}
+
+bool InputFile::isOptimizedForRealtime() {
+	return false;
+}
+
+bool InputFile::isStreaming() {
+	return false;
+}
+
+bool InputFile::GetVideoSource(int index, IVDVideoSource **ppSrc) {
+	return false;
+}
+
+bool InputFile::GetAudioSource(int index, AudioSource **ppSrc) {
+	return false;
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+static tVDInputDrivers g_VDInputDrivers;
+static tVDInputDrivers g_VDInputDriversByLegacyIndex;
+
+extern IVDInputDriver *VDCreateInputDriverAVI1();
+extern IVDInputDriver *VDCreateInputDriverAVI2();
+extern IVDInputDriver *VDCreateInputDriverMPEG();
+extern IVDInputDriver *VDCreateInputDriverImages();
+extern IVDInputDriver *VDCreateInputDriverASF();
+extern IVDInputDriver *VDCreateInputDriverANIM();
+extern IVDInputDriver *VDCreateInputDriverFLM();
+extern IVDInputDriver *VDCreateInputDriverGIF();
+extern IVDInputDriver *VDCreateInputDriverAPNG();
+extern IVDInputDriver *VDCreateInputDriverWAV();
+extern IVDInputDriver *VDCreateInputDriverMP3();
+extern IVDInputDriver *VDCreateInputDriverRawVideo();
+extern IVDInputDriver *VDCreateInputDriverPlugin(VDPluginDescription *);
+
+namespace {
+	struct SortByRevPriority {
+		bool operator()(IVDInputDriver *p1, IVDInputDriver *p2) const {
+			return p1->GetDefaultPriority() > p2->GetDefaultPriority();
+		}
+	};
+}
+
+void VDInitInputDrivers() {
+	// Note that we re-call this if a plugin has been loaded from the command line.
+	g_VDInputDriversByLegacyIndex.clear();
+	g_VDInputDriversByLegacyIndex.reserve(9);
+
+	g_VDInputDriversByLegacyIndex.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverAVI1()));
+	g_VDInputDriversByLegacyIndex.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverAVI2()));
+	g_VDInputDriversByLegacyIndex.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverMPEG()));
+	g_VDInputDriversByLegacyIndex.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverImages()));
+	g_VDInputDriversByLegacyIndex.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverASF()));
+
+	g_VDInputDrivers.clear();
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverAVI1()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverAVI2()));
+	//g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverMPEG()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverImages()));
+	//g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverASF()));
+
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverANIM()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverFLM()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverGIF()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverAPNG()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverWAV()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverMP3()));
+	g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverRawVideo()));
+
+	std::vector<VDPluginDescription *> plugins;
+	VDEnumeratePluginDescriptions(plugins, kVDXPluginType_Input);
+
+	while(!plugins.empty()) {
+		VDPluginDescription *desc = plugins.back();
+		g_VDInputDrivers.push_back(vdrefptr<IVDInputDriver>(VDCreateInputDriverPlugin(desc)));
+		plugins.pop_back();
+	}
+
+	std::sort(g_VDInputDrivers.begin(), g_VDInputDrivers.end(), SortByRevPriority());
+}
+
+void VDShutdownInputDrivers() {
+	g_VDInputDrivers.clear();
+	g_VDInputDriversByLegacyIndex.clear();
+}
+
+void VDGetInputDrivers(tVDInputDrivers& l, uint32 flags) {
+	for (auto it(g_VDInputDrivers.cbegin()), itEnd(g_VDInputDrivers.cend()); it != itEnd; ++it) {
+		if ((*it)->GetFlags() & flags) {
+			l.push_back(*it);
+		}
+	}
+}
+
+IVDInputDriver *VDGetInputDriverByName(const wchar_t *name) {
+	for(auto it(g_VDInputDrivers.cbegin()), itEnd(g_VDInputDrivers.cend()); it!=itEnd; ++it) {
+		IVDInputDriver *pDriver = *it;
+
+		const wchar_t *dvname = pDriver->GetSignatureName();
+
+		if (dvname && !_wcsicmp(name, dvname)) {
+			return pDriver;
+		}
+	}
+
+	return NULL;
+}
+
+IVDInputDriver *VDGetInputDriverForLegacyIndex(int idx) {
+	enum {
+		FILETYPE_AUTODETECT		= 0,
+		FILETYPE_AVI			= 1,
+		FILETYPE_MPEG			= 2,
+		FILETYPE_ASF			= 3,
+		FILETYPE_STRIPEDAVI		= 4,
+		FILETYPE_AVICOMPAT		= 5,
+		FILETYPE_IMAGE			= 6,
+		FILETYPE_AUTODETECT2	= 7,
+	};
+
+	switch(idx) {
+	case FILETYPE_AVICOMPAT:	return g_VDInputDriversByLegacyIndex[0];
+	case FILETYPE_AVI:			return g_VDInputDriversByLegacyIndex[1];
+	case FILETYPE_MPEG:			return g_VDInputDriversByLegacyIndex[2];
+	case FILETYPE_IMAGE:		return g_VDInputDriversByLegacyIndex[3];
+	case FILETYPE_ASF:			return g_VDInputDriversByLegacyIndex[4];
+	}
+
+	return NULL;
+}
+
+void VDGetInputDriverFilePatterns(uint32 flags, vdvector<VDStringW>& patterns) {
+	tVDInputDrivers drivers;
+
+	VDGetInputDrivers(drivers, flags);
+
+	patterns.clear();
+
+	VDStringW pat;
+	while(!drivers.empty()) {
+		const wchar_t *filt = drivers.back()->GetFilenamePattern();
+
+		if (filt) {
+			while(*filt) {
+				// split: descriptive_text '\0' patterns '\0'
+				while(*filt++)
+					;
+
+				VDStringRefW pats(filt);
+				while(*filt++)
+					;
+
+				VDStringRefW token;
+				VDStringW tokenStr;
+				while(!pats.empty()) {
+					if (!pats.split(L';', token)) {
+						token = pats;
+						pats.clear();
+					}
+
+					if (!token.empty()) {
+						tokenStr = token;
+						std::transform(tokenStr.begin(), tokenStr.end(), tokenStr.begin(), towlower);
+
+						vdvector<VDStringW>::iterator it(std::lower_bound(patterns.begin(), patterns.end(), tokenStr));
+
+						if (it == patterns.end() || *it != tokenStr)
+							patterns.insert(it, tokenStr);
+					}
+				}
+			}
+		}
+
+		drivers.pop_back();
+	}
+}
+
+void VDGetInputDriverFileFilters(const tVDInputDrivers& l, vdvector<VDStringW>& list) {
+	list.push_back(VDStringW());
+
+	int nDriver = 0;
+	for(auto it(l.cbegin()), itEnd(l.cend()); it!=itEnd; ++it, ++nDriver) {
+		const wchar_t *filt = (*it)->GetFilenamePattern();
+
+		if (filt) {
+			while(*filt) {
+				list.push_back(VDStringW(filt));
+				const wchar_t *pats = filt;
+				while(*pats++);
+				const wchar_t *end = pats;
+				while(*end++);
+				filt = end;
+			}
+		}
+	}
+
+	list.push_back(VDStringW());
+}
+
+VDStringW VDMakeInputDriverFileFilter(const tVDInputDrivers& l, std::vector<int>& xlat) {
+	VDStringW filter;
+	VDStringW allspecs;
+
+	xlat.push_back(-1);
+
+	int nDriver = 0;
+	for(auto it(l.cbegin()), itEnd(l.cend()); it!=itEnd; ++it, ++nDriver) {
+		const wchar_t *filt = (*it)->GetFilenamePattern();
+
+		if (filt) {
+			while(*filt) {
+				const wchar_t *pats = filt;
+				while(*pats++);
+				const wchar_t *end = pats;
+				while(*end++);
+
+				if (!allspecs.empty())
+					allspecs += L';';
+
+				filter.append(filt, end - filt);
+				allspecs += pats;
+
+				filt = end;
+
+				xlat.push_back(nDriver);
+			}
+		}
+	}
+
+	xlat.push_back(-1);
+	VDStringW finalfilter(L"All media types (");
+
+	VDStringW::size_type p = 0;
+	int n = 0;
+	while(p<allspecs.length()){
+		VDStringW::size_type p1 = allspecs.length();
+		VDStringW::size_type p2 = allspecs.find(';',p);
+		if (p2!=VDStringW::npos && p2<p1) p1 = p2;
+		VDStringW pat = allspecs.subspan(p,p1-p);
+		const wchar_t* x = wcsstr(allspecs.c_str(),pat.c_str());
+		if (x-allspecs.c_str()==p) {
+			if (n<15) {
+				if (n>0) finalfilter += ',';
+				finalfilter += pat;
+			}
+			n++;
+		}
+		p = p1+1;
+	}
+
+	if (n>15) {
+		int d = n-15;
+		finalfilter += VDswprintf(L", ... more %d",1,&d);
+	}
+
+	finalfilter += L')';
+	finalfilter += L'\0';
+	finalfilter += allspecs;
+	finalfilter += L'\0';
+	finalfilter += filter;
+
+	static const wchar_t alltypes[]=L"All types (*.*)";
+	finalfilter += alltypes;
+	finalfilter += L'\0';
+	finalfilter += L"*.*";
+	finalfilter += L'\0';
+
+	return finalfilter;
+}
+
+IVDInputDriver::DetectionConfidence VDTestInputDriverForFile(VDXMediaInfo& info, const wchar_t *fn, IVDInputDriver *pDriver) {
+	char buf[1024];
+	char endbuf[64];
+	int dwBegin;
+	int dwEnd;
+
+	memset(buf, 0, sizeof buf);
+	memset(endbuf, 0, sizeof endbuf);
+
+	VDFile file(fn);
+
+	dwBegin = file.readData(buf, sizeof buf);
+
+	if (dwBegin < sizeof endbuf) {
+		dwEnd = dwBegin;
+		memcpy(endbuf, buf, dwEnd);
+	} else {
+		dwEnd = sizeof endbuf;
+		file.seek(-dwEnd, nsVDFile::kSeekEnd);
+		file.read(endbuf, dwEnd);
+	}
+
+	sint64 fileSize = file.size();
+
+	// The Avisynth script:
+	//
+	//	Version
+	//
+	// is only 9 bytes...
+
+	if (!dwBegin) {
+		throw MyError(L"Can't open \"%s\": The file is empty.", fn);
+	}
+
+	file.closeNT();
+
+	// attempt detection
+
+	IVDInputDriver::DetectionConfidence result = pDriver->DetectBySignature3(info, buf, dwBegin, endbuf, dwEnd, fileSize, fn);
+
+	if (result == IVDInputDriver::kDC_None && pDriver->DetectByFilename(fn)) {
+		result = IVDInputDriver::kDC_Low;
+		if (pDriver->GetFlags() & IVDInputDriver::kF_ForceByName)
+			result = IVDInputDriver::kDC_High;
+	}
+
+	return result;
+}
+
+int VDAutoselectInputDriverForFile(const wchar_t *fn, uint32 flags, tVDInputDrivers& list) {
+	char buf[1024];
+	char endbuf[64];
+	int dwBegin;
+	int dwEnd;
+
+	memset(buf, 0, sizeof buf);
+	memset(endbuf, 0, sizeof endbuf);
+
+	VDFile file(fn);
+
+	dwBegin = file.readData(buf, sizeof buf);
+
+	if (dwBegin < sizeof endbuf) {
+		dwEnd = dwBegin;
+		memcpy(endbuf, buf, dwEnd);
+	} else {
+		dwEnd = sizeof endbuf;
+		file.seek(-dwEnd, nsVDFile::kSeekEnd);
+		file.read(endbuf, dwEnd);
+	}
+
+	sint64 fileSize = file.size();
+
+	// The Avisynth script:
+	//
+	//	Version
+	//
+	// is only 9 bytes...
+
+	if (!dwBegin) {
+		throw MyError(L"Can't open \"%s\": The file is empty.", fn);
+	}
+
+	file.closeNT();
+
+	// attempt detection
+
+	tVDInputDrivers inputDrivers;
+	VDGetInputDrivers(inputDrivers, flags);
+
+	auto it(inputDrivers.cbegin()), itEnd(inputDrivers.cend());
+
+	IVDInputDriver::DetectionConfidence fitquality = IVDInputDriver::kDC_None;
+	int selectedDriver = -1;
+
+	for(; it!=itEnd; ++it) {
+		IVDInputDriver *pDriver = *it;
+		const wchar_t* name = pDriver->GetSignatureName();
+		if (!name)
+			continue;
+
+		if (pDriver->GetFlags() & IVDInputDriver::kF_Duplicate)
+			continue;
+
+		VDXMediaInfo info;
+		IVDInputDriver::DetectionConfidence result = pDriver->DetectBySignature3(info, buf, dwBegin, endbuf, dwEnd, fileSize, fn);
+		if (result < 0)
+			continue;
+
+		if (result == IVDInputDriver::kDC_None && pDriver->DetectByFilename(fn)) {
+			result = IVDInputDriver::kDC_Low;
+			if (pDriver->GetFlags() & IVDInputDriver::kF_ForceByName)
+				result = IVDInputDriver::kDC_High;
+		}
+
+		if (result == IVDInputDriver::kDC_None)
+			continue;
+
+		if (result > fitquality) {
+			selectedDriver = list.size();
+			fitquality = result;
+		}
+
+		list.push_back(*it);
+	}
+
+	return selectedDriver;
+}
+
+void VDGetInputDriverForFile(uint32 flags, tVDInputDrivers& list) {
+	tVDInputDrivers inputDrivers;
+	VDGetInputDrivers(inputDrivers, flags);
+
+	auto it(inputDrivers.cbegin()), itEnd(inputDrivers.cend());
+
+	for(; it!=itEnd; ++it) {
+		IVDInputDriver *pDriver = *it;
+		const wchar_t* name = pDriver->GetSignatureName();
+		if (!name)
+			continue;
+
+		if (pDriver->GetFlags() & IVDInputDriver::kF_Duplicate)
+			continue;
+
+		VDXMediaInfo info;
+		IVDInputDriver::DetectionConfidence result = pDriver->DetectBySignature3(info, 0, 0, 0, 0, 0, 0);
+		if (result < 0)
+			continue;
+
+		list.push_back(*it);
+	}
+}
+
+IVDInputDriver *VDAutoselectInputDriverForFile(const wchar_t *fn, uint32 flags) {
+	tVDInputDrivers list;
+	int x = VDAutoselectInputDriverForFile(fn,flags,list);
+	if (x==-1) {
+		VDGetInputDriverForFile(flags,list);
+
+		VDStringW force_driver;
+		VDStringA format_id = VDStringA("*")+VDTextWToA(VDFileSplitExt(fn));
+		VDRegistryAppKey key(flags==IVDInputDriver::kF_Audio ? "File formats (audio)" : "File formats");
+		key.getString(format_id.c_str(), force_driver);
+
+		auto it(list.cbegin()), itEnd(list.cend());
+		for(int i=0; it!=itEnd; ++it,i++) {
+			IVDInputDriver *pDriver = *it;
+			if (pDriver->GetSignatureName()==force_driver) {
+				return pDriver;
+			}
+		}
+
+		throw MyFileError(MyFileError::file_type_unknown, L"The file \"%s\" is of an unknown or unsupported file type.", fn);
+	}
+
+	IVDInputDriver* driver = list[x];
+	VDXMediaInfo info;
+	wcsncpy(info.format_name,driver->GetFilenamePattern(),100);
+	VDTestInputDriverForFile(info,fn,driver);
+	VDStringA format_id = VDTextWToA(info.format_name);
+
+	if (!format_id.empty()) {
+		VDStringW force_driver;
+		VDRegistryAppKey key(flags==IVDInputDriver::kF_Audio ? "File formats (audio)" : "File formats");
+		key.getString(format_id.c_str(), force_driver);
+
+		if (!force_driver.empty()) {
+			auto it(list.cbegin()), itEnd(list.cend());
+			for(int i=0; it!=itEnd; ++it,i++) {
+				IVDInputDriver *pDriver = *it;
+				if (pDriver->GetSignatureName()==force_driver) {
+					driver = pDriver;
+					break;
+				}
+			}
+		}
+	}
+
+	return driver;
+}
+
+void VDOpenMediaFile(const wchar_t *filename, uint32 flags, InputFile **pFile) {
+	IVDInputDriver *driver = VDAutoselectInputDriverForFile(filename, IVDInputDriver::kF_Video);
+
+	vdrefptr<InputFile> inputFile(driver->CreateInputFile(flags));
+
+	inputFile->Init(filename);
+	*pFile = inputFile.release();
+}

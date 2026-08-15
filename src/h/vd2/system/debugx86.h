@@ -1,0 +1,20 @@
+// VirtualDub - Video processing and capture application
+// System library component
+//
+// Copyright (C) 1998-2004 Avery Lee, All Rights Reserved.
+//
+// SPDX-License-Identifier: Zlib
+//
+
+enum VDInstructionTypeX86 {
+	kX86InstUnknown,
+	kX86InstP6,
+	kX86InstMMX,
+	kX86InstMMX2,
+	kX86InstSSE,
+	kX86InstSSE2,
+	kX86Inst3DNow
+};
+
+bool VDIsValidCallX86(const char *buf, int len);
+VDInstructionTypeX86 VDGetInstructionTypeX86(const void *p);

@@ -1,0 +1,111 @@
+#ifndef VDQTVIDEODECODER_H
+#define VDQTVIDEODECODER_H
+
+#include <QString>
+#include <QImage>
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
+#include <avisynth/avisynth_c.h>
+}
+
+#include <QCache>
+
+class VDQtVideoDecoder {
+public:
+    VDQtVideoDecoder();
+    ~VDQtVideoDecoder();
+
+    bool openFile(const QString& filePath);
+    void close();
+
+    bool isOpen() const { return mIsOpen; }
+    QString getFilePath() const { return mFilePath; }
+    int getFrameCount() const { return mFrameCount; }
+    double getFps() const { return mFps; }
+    int getWidth() const { return mWidth; }
+    int getHeight() const { return mHeight; }
+    bool isAvsNative() const { return mIsAvsNative; }
+    AVS_Clip* getAvsClip() const { return mAvsClip; }
+    const AVS_VideoInfo* getAvsVi() const { return mAvsVi; }
+    QString getPixFormat() const {
+        if (mIsAvsNative && mAvsVi) {
+            if (avs_is_yv12(mAvsVi)) return "YV12";
+            if (avs_is_yv16(mAvsVi)) return "YV16";
+            if (avs_is_yv24(mAvsVi)) return "YV24";
+            if (avs_is_yuy2(mAvsVi)) return "YUY2";
+            if (avs_is_rgb32(mAvsVi)) return "RGBA32";
+            if (avs_is_rgb24(mAvsVi)) return "RGB24";
+            return "YUV420";
+        }
+        if (mCodecCtx) {
+            const char* name = av_get_pix_fmt_name(mCodecCtx->pix_fmt);
+            if (name) return QString::fromUtf8(name).toUpper();
+        }
+        return "YUV420";
+    }
+
+    QImage getFrameImage(int frameIndex);
+    void clearCache();
+    static QString parseScriptSource(const QString& scriptPath);
+
+    struct VDScanResult {
+        int totalFrames = 0;
+        int badFrames = 0;
+        int maskedFrames = 0;
+        int keyFrames = 0;
+        bool cancelled = false;
+        QString errorMessage;
+    };
+
+    VDScanResult scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr);
+
+    void setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange);
+    QString getForcedFormatName() const { return mForcedFormatName; }
+    int getColorSpaceMode() const { return mColorSpaceMode; }
+    int getComponentRangeMode() const { return mComponentRangeMode; }
+
+    QString getLastError() const { return mLastError; }
+
+private:
+    void setupSwsContext();
+
+    bool mIsOpen;
+    QString mFilePath;
+    QString mLastError;
+    int mWidth;
+    int mHeight;
+    int mFrameCount;
+    double mFps;
+    int mVideoStreamIndex;
+    int64_t mDuration;
+
+    AVFormatContext *mFormatCtx;
+    AVCodecContext *mCodecCtx;
+    SwsContext *mSwsCtx;
+    AVFrame *mFrame;
+    AVFrame *mFrameRGB;
+    uint8_t *mBuffer;
+
+    int mCurrentFrameIndex;
+    bool mIsSyntheticScript = false;
+    bool mIsAvsNative = false;
+
+    QString mForcedFormatName = "Autoselect";
+    int mColorSpaceMode = 0; // 0: No change, 1: Rec.601, 2: Rec.709
+    int mComponentRangeMode = 0; // 0: No change, 1: Limited, 2: Full
+
+    AVS_ScriptEnvironment *mAvsEnv = nullptr;
+    AVS_Clip *mAvsClip = nullptr;
+    const AVS_VideoInfo *mAvsVi = nullptr;
+
+    QCache<int, QImage> mFrameCache;
+
+    QImage generateSyntheticFrame(int frameIndex);
+    QImage renderAvsFrame(int frameIndex);
+};
+
+#endif // VDQTVIDEODECODER_H
