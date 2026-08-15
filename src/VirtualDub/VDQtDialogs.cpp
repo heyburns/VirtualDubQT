@@ -4138,7 +4138,7 @@ VDAboutDialog::VDAboutDialog(QWidget *parent)
         "<p><b>VirtualDub</b> is a powerful video capture and utility software.</p>"
         "<p>Original Authors: Avery Lee, Anton Shekhovtsov, v0lt.</p>"
         "<p>Native Linux C++/Qt6 Architecture Port.</p>"
-        "<p>Licensed under GNU General Public License v2+.</p>"
+        "<p>Licensed under GNU General Public License v3.0 (GPLv3).</p>"
     );
     mainLayout->addWidget(text);
 
