@@ -1,5 +1,9 @@
 # VirtualDubQt (v0.1)
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="VirtualDubQt Screenshot" width="800">
+</p>
+
 > **THIS IS INCOMPLETE AND BUGGY. USE AT YOUR OWN RISK. IF YOU FIND A BUG, PLEASE SUBMIT A REPORT AND/OR A PULL REQUEST.**
 
 **VirtualDubQt** is a modern 64-bit native Linux port of **VirtualDub2**, rewritten in clean C++17 and Qt6. It brings VirtualDub's video filtration, AviSynth+ script hosting, frame-accurate timeline manipulation, and multiformat audio/video transcoding pipelines to modern desktop platforms without emulation or Wine.
