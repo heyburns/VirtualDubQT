@@ -4197,8 +4197,8 @@ void VDLogWindow::appendLog(const QString &text) {
 // -----------------------------------------------------------------------------
 // VDSaveVideoDialog (Matching VirtualDub2 Save File (F7) Screenshot)
 // -----------------------------------------------------------------------------
-VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, QWidget *parent)
-    : QDialog(parent) {
+VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, const QString &defaultDir, const QString &defaultBaseName, QWidget *parent)
+    : QDialog(parent), mDefaultDir(defaultDir), mDefaultBaseName(defaultBaseName) {
     setWindowTitle("Save File");
     resize(640, 420);
     setStyleSheet(kDialogStyle);
@@ -4209,7 +4209,7 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, QWidget *pare
     QFormLayout *formLayout = new QFormLayout();
 
     QHBoxLayout *fileRow = new QHBoxLayout();
-    mFileNameEdit = new QLineEdit("output.mp4", this);
+    mFileNameEdit = new QLineEdit(this);
     mBrowseBtn = new QPushButton("Browse...", this);
     fileRow->addWidget(mFileNameEdit);
     fileRow->addWidget(mBrowseBtn);
@@ -4232,7 +4232,25 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, QWidget *pare
     // Read session settings
     VDSaveVideoSessionConfig vCfg = VDQtCodecSettings::instance().getSaveVideoSessionConfig();
     mFileTypeCombo->setCurrentIndex(std::clamp(vCfg.fileTypeIndex, 0, mFileTypeCombo->count() - 1));
-    mFileNameEdit->setText(vCfg.lastFileName.isEmpty() ? "output.mp4" : vCfg.lastFileName);
+
+    QString typeKey = mFileTypeCombo->currentData().toString();
+    QString ext = "mp4";
+    if (typeKey == "webm") ext = "webm";
+    else if (typeKey == "mkv") ext = "mkv";
+    else if (typeKey == "mov" || typeKey == "mov_faststart") ext = "mov";
+    else if (typeKey == "mp4" || typeKey == "mp4_faststart") ext = "mp4";
+    else if (typeKey == "nut") ext = "nut";
+    else if (typeKey == "avi" || typeKey == "avi_ffmpeg") ext = "avi";
+
+    QString initialName;
+    if (!mDefaultBaseName.isEmpty()) {
+        initialName = mDefaultBaseName + "." + ext;
+    } else if (!vCfg.lastFileName.isEmpty()) {
+        initialName = vCfg.lastFileName;
+    } else {
+        initialName = "output." + ext;
+    }
+    mFileNameEdit->setText(initialName);
 
     formLayout->addRow("Files of type:", mFileTypeCombo);
 
@@ -4311,7 +4329,11 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, QWidget *pare
 
 void VDSaveVideoDialog::onBrowseClicked() {
     QString filter = mFileTypeCombo->currentText();
-    QString path = QFileDialog::getSaveFileName(this, "Save File", mFileNameEdit->text(), filter);
+    QString initial = mFileNameEdit->text();
+    if (!mDefaultDir.isEmpty() && !QFileInfo(initial).isAbsolute()) {
+        initial = QDir(mDefaultDir).filePath(initial);
+    }
+    QString path = QFileDialog::getSaveFileName(this, "Save File", initial, filter);
     if (!path.isEmpty()) {
         mFileNameEdit->setText(path);
     }
@@ -4321,19 +4343,31 @@ void VDSaveVideoDialog::onFileTypeIndexChanged(int index) {
     QString currentName = mFileNameEdit->text();
     QFileInfo fi(currentName);
     QString baseName = fi.completeBaseName();
-    if (baseName.isEmpty()) baseName = "output";
+    if (baseName.isEmpty()) baseName = (!mDefaultBaseName.isEmpty()) ? mDefaultBaseName : "output";
 
     QString typeKey = mFileTypeCombo->currentData().toString();
-    if (typeKey == "webm") mFileNameEdit->setText(baseName + ".webm");
-    else if (typeKey == "mkv") mFileNameEdit->setText(baseName + ".mkv");
-    else if (typeKey == "mov" || typeKey == "mov_faststart") mFileNameEdit->setText(baseName + ".mov");
-    else if (typeKey == "mp4" || typeKey == "mp4_faststart") mFileNameEdit->setText(baseName + ".mp4");
-    else if (typeKey == "nut") mFileNameEdit->setText(baseName + ".nut");
-    else if (typeKey == "avi" || typeKey == "avi_ffmpeg") mFileNameEdit->setText(baseName + ".avi");
+    QString ext = "mp4";
+    if (typeKey == "webm") ext = "webm";
+    else if (typeKey == "mkv") ext = "mkv";
+    else if (typeKey == "mov" || typeKey == "mov_faststart") ext = "mov";
+    else if (typeKey == "mp4" || typeKey == "mp4_faststart") ext = "mp4";
+    else if (typeKey == "nut") ext = "nut";
+    else if (typeKey == "avi" || typeKey == "avi_ffmpeg") ext = "avi";
+
+    if (fi.isAbsolute()) {
+        mFileNameEdit->setText(fi.dir().filePath(baseName + "." + ext));
+    } else {
+        mFileNameEdit->setText(baseName + "." + ext);
+    }
 }
 
 QString VDSaveVideoDialog::getSelectedFilePath() const {
-    return mFileNameEdit->text();
+    QString path = mFileNameEdit->text().trimmed();
+    if (path.isEmpty()) return QString();
+    if (!mDefaultDir.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(mDefaultDir).filePath(path);
+    }
+    return path;
 }
 
 QString VDSaveVideoDialog::getSelectedContainerType() const {

@@ -623,7 +623,7 @@ private:
 class VDSaveVideoDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit VDSaveVideoDialog(int videoMode = 3, int audioMode = 0, QWidget *parent = nullptr);
+    explicit VDSaveVideoDialog(int videoMode = 3, int audioMode = 0, const QString &defaultDir = QString(), const QString &defaultBaseName = QString(), QWidget *parent = nullptr);
 
     QString getSelectedFilePath() const;
     QString getSelectedContainerType() const;
@@ -635,6 +635,8 @@ private Q_SLOTS:
     void onFileTypeIndexChanged(int index);
 
 private:
+    QString mDefaultDir;
+    QString mDefaultBaseName;
     QLineEdit *mFileNameEdit;
     QComboBox *mFileTypeCombo;
     QPushButton *mBrowseBtn;

@@ -756,7 +756,12 @@ void VDQtMainWindow::onFileSaveAVI() {
         return;
     }
 
-    VDSaveVideoDialog dlg(mVideoMode, mAudioMode, this);
+    QFileInfo srcInfo(mVideoDecoder.getFilePath());
+    QString defaultDir = srcInfo.dir().absolutePath();
+    QString baseName = srcInfo.completeBaseName();
+    if (baseName.isEmpty()) baseName = "output";
+
+    VDSaveVideoDialog dlg(mVideoMode, mAudioMode, defaultDir, baseName, this);
     if (dlg.exec() == QDialog::Accepted) {
         QString savePath = dlg.getSelectedFilePath();
         if (savePath.isEmpty()) return;
