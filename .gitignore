@@ -42,3 +42,4 @@ CMakeLists.txt.user
 # Temporary & Test files
 /tmp/
 *.log
+devel/

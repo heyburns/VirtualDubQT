@@ -121,6 +121,15 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
     controlLayout->addWidget(mStatusLabel, 1);
 
     mainLayout->addLayout(controlLayout);
+
+    mScrubTimer.setSingleShot(true);
+    connect(&mScrubTimer, &QTimer::timeout, this, [this]() {
+        if (mPendingScrubPos >= 0) {
+            NotifyEvent(VDPositionControlEventData::kEventJump, mPendingScrubPos);
+            Q_EMIT positionChanged(mPendingScrubPos);
+            mPendingScrubPos = -1;
+        }
+    });
 }
 
 VDQtPositionControlWidget::~VDQtPositionControlWidget() {
@@ -136,7 +145,6 @@ void VDQtPositionControlWidget::SetRange(VDPosition lo, VDPosition hi, bool upda
 void VDQtPositionControlWidget::SetPosition(VDPosition pos) {
     if (mPosition != pos) {
         mPosition = pos;
-        QSignalBlocker blocker(mSlider);
         mSlider->setValue((int)pos);
         UpdateStatusText();
         Q_EMIT positionChanged((int)mPosition);
@@ -171,13 +179,7 @@ void VDQtPositionControlWidget::onSliderValueChanged(int value) {
     mPendingScrubPos = value;
 
     if (!mScrubTimer.isActive()) {
-        mScrubTimer.singleShot(16, this, [this]() {
-            if (mPendingScrubPos >= 0) {
-                NotifyEvent(VDPositionControlEventData::kEventJump, mPendingScrubPos);
-                Q_EMIT positionChanged(mPendingScrubPos);
-                mPendingScrubPos = -1;
-            }
-        });
+        mScrubTimer.start(8); // Limit scrubbing dispatch rate to 120 FPS
     }
 }
 

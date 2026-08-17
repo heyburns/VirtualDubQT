@@ -591,6 +591,8 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         return false;
     }
     newCodecContext->pkt_timebase = videoStream->time_base;
+    newCodecContext->thread_count = 0;
+    newCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
     // Apply the selected policy before opening the codec. setErrorMode() also
     // updates an already-open context for subsequent frames.
@@ -1267,6 +1269,11 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
 
                     int decodedIdx = (currentFrameIndex >= 0) ? currentFrameIndex : (mCurrentFrameIndex + 1);
                     mCurrentFrameIndex = decodedIdx;
+
+                    // FAST PRE-ROLL: Skip sws_scale & image allocation on intermediate pre-roll frames
+                    if (decodedIdx < frameIndex && (currentPts == AV_NOPTS_VALUE || currentPts < targetPts)) {
+                        continue;
+                    }
 
                     if (!ensureConversionResources(mFrame)) {
                         av_packet_unref(packet);
