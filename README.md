@@ -1,7 +1,7 @@
 # VirtualDubQt (v0.1)
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="VirtualDubQt Screenshot" width="800">
+  <img src="https://raw.githubusercontent.com/heyburns/VirtualDubQT/main/docs/screenshot.png" alt="VirtualDubQt Screenshot" width="800">
 </p>
 
 > **THIS IS INCOMPLETE AND BUGGY. USE AT YOUR OWN RISK. IF YOU FIND A BUG, PLEASE SUBMIT A REPORT AND/OR A PULL REQUEST.**
