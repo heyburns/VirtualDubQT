@@ -29,6 +29,11 @@ struct VDFilterInstance {
     QMap<QString, double> params;
 };
 
+struct VDFilterTimingInfo {
+    int outputFramesPerInput = 1;
+    bool sequenceSupported = true;
+};
+
 class VDQtFilterSystem {
 public:
     VDQtFilterSystem();
@@ -51,17 +56,24 @@ public:
     void moveFilterUp(int index);
     void moveFilterDown(int index);
     void clearFilters();
+    void replaceActiveChain(const QList<VDFilterInstance>& chain);
     void setFilterEnabled(int index, bool enabled);
     void updateFilterParams(int index, const QMap<QString, double>& params);
 
-    // Frame Processing
+    // Frame Processing. processFrame() is the legacy one-frame path and
+    // returns the first temporal phase of rate-changing filters. Exporters
+    // and other rate-aware callers must use processFrameSequence().
     QImage processFrame(const QImage& inputFrame);
+    bool processFrameSequence(const QImage& inputFrame, QList<QImage>& outputFrames);
+    VDFilterTimingInfo getTimingInfo() const;
 
     // Persistence across sessions
     void saveSettings();
     void loadSettings();
 
 private:
+    QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask);
+
     QList<VDFilterInstance> mActiveChain;
 };
 

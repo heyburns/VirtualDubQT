@@ -2,7 +2,11 @@
 #define VDQTVIDEODECODER_H
 
 #include <QString>
+#include <QStringList>
 #include <QImage>
+#include <QCache>
+#include <QVector>
+#include <functional>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -12,10 +16,14 @@ extern "C" {
 #include <avisynth/avisynth_c.h>
 }
 
-#include <QCache>
-
 class VDQtVideoDecoder {
 public:
+    enum class FrameCountStatus {
+        Exact,
+        Estimated,
+        Unknown
+    };
+
     VDQtVideoDecoder();
     ~VDQtVideoDecoder();
 
@@ -25,6 +33,15 @@ public:
     bool isOpen() const { return mIsOpen; }
     QString getFilePath() const { return mFilePath; }
     int getFrameCount() const { return mFrameCount; }
+    FrameCountStatus getFrameCountStatus() const { return mFrameCountStatus; }
+    bool isFrameCountExact() const { return mFrameCountStatus == FrameCountStatus::Exact; }
+    bool isKeyFrame(int frameIndex);
+    int getPreviousKeyFrame(int frameIndex);
+    int getNextKeyFrame(int frameIndex);
+    // Returns NaN when timing cannot be established. Values are relative to the
+    // beginning of the video stream, not the container's absolute timestamp.
+    double getFrameTimestampSeconds(int frameIndex);
+    double getFrameDurationSeconds(int frameIndex);
     double getFps() const { return mFps; }
     int getWidth() const { return mWidth; }
     int getHeight() const { return mHeight; }
@@ -50,7 +67,11 @@ public:
 
     QImage getFrameImage(int frameIndex);
     void clearCache();
+    qsizetype getCachedFrameCount() const { return mFrameCache.size(); }
+    qsizetype getCachedFrameCostKiB() const { return mFrameCache.totalCost(); }
+    static constexpr qsizetype getFrameCacheBudgetKiB() { return 64 * 1024; }
     static QString parseScriptSource(const QString& scriptPath);
+    static QStringList parseScriptSources(const QString& scriptPath);
 
     struct VDScanResult {
         int totalFrames = 0;
@@ -67,11 +88,31 @@ public:
     QString getForcedFormatName() const { return mForcedFormatName; }
     int getColorSpaceMode() const { return mColorSpaceMode; }
     int getComponentRangeMode() const { return mComponentRangeMode; }
+    void setErrorMode(int errorMode);
+    int getErrorMode() const { return mErrorMode; }
 
     QString getLastError() const { return mLastError; }
 
 private:
-    void setupSwsContext();
+    struct FrameIndexEntry {
+        int64_t timestamp = AV_NOPTS_VALUE;
+        int64_t duration = 0;
+        bool keyFrame = false;
+    };
+
+    bool setupSwsContext(AVPixelFormat sourceFormat = AV_PIX_FMT_NONE,
+                         int sourceWidth = 0,
+                         int sourceHeight = 0,
+                         AVPixelFormat destinationFormat = AV_PIX_FMT_RGB24);
+    bool ensureConversionResources(const AVFrame *sourceFrame);
+    bool seekToFrame(int frameIndex);
+    bool resetDecoderToStart();
+    bool decodeNextFrame(int *decodeErrors = nullptr);
+    int registerDecodedFrame();
+    int findIndexedFrameByTimestamp(int64_t timestamp, int hint) const;
+    void updateFrameCountAtEndOfStream();
+    void applyErrorMode();
+    void cacheFrame(int frameIndex, const QImage& image);
 
     bool mIsOpen;
     QString mFilePath;
@@ -79,6 +120,7 @@ private:
     int mWidth;
     int mHeight;
     int mFrameCount;
+    FrameCountStatus mFrameCountStatus;
     double mFps;
     int mVideoStreamIndex;
     int64_t mDuration;
@@ -88,9 +130,22 @@ private:
     SwsContext *mSwsCtx;
     AVFrame *mFrame;
     AVFrame *mFrameRGB;
+    AVPacket *mPacket;
     uint8_t *mBuffer;
 
     int mCurrentFrameIndex;
+    int mNextDecodeFrameIndex;
+    int64_t mStreamStartTimestamp;
+    bool mPacketPending;
+    bool mDemuxEof;
+    bool mDrainSent;
+    bool mLastDecodeReachedEof;
+    bool mDiscardUntilKeyFrame;
+    AVPixelFormat mSwsSourceFormat;
+    AVPixelFormat mSwsDestinationFormat;
+    int mSwsSourceWidth;
+    int mSwsSourceHeight;
+    int mErrorMode;
     bool mIsSyntheticScript = false;
     bool mIsAvsNative = false;
 
@@ -103,6 +158,7 @@ private:
     const AVS_VideoInfo *mAvsVi = nullptr;
 
     QCache<int, QImage> mFrameCache;
+    QVector<FrameIndexEntry> mFrameIndex;
 
     QImage generateSyntheticFrame(int frameIndex);
     QImage renderAvsFrame(int frameIndex);

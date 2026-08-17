@@ -275,6 +275,7 @@ inline void TreeView_SelectItem(HWND, HTREEITEM) {}
 inline void TreeView_DeleteItem(HWND, HTREEITEM) {}
 inline void TreeView_Expand(HWND, HTREEITEM, UINT) {}
 
+LRESULT SendMessage(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 BOOL PostMessage(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 
 struct MENUITEMINFOA { UINT cch; };
@@ -434,7 +435,7 @@ typedef DWORD*         LPDWORD;
 #define _ASSERT(x) ((void)0)
 #endif
 
-inline LRESULT SendMessageA(HWND, UINT, WPARAM, LPARAM) { return 0; }
+inline LRESULT SendMessageA(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam) { return SendMessage(hwnd, Msg, wParam, lParam); }
 inline UINT GetDlgItemTextA(HWND, int, char *str, int maxCount) { if (str && maxCount > 0) str[0] = 0; return 0; }
 inline HWND SetFocus(HWND) { return (HWND)1; }
 
@@ -616,8 +617,7 @@ inline LRESULT DefWindowProcW(HWND, UINT, WPARAM, LPARAM) { return 0; }
 #endif
 
 inline LRESULT SendMessageW(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    (void)hwnd; (void)Msg; (void)wParam; (void)lParam;
-    return 0;
+    return SendMessage(hwnd, Msg, wParam, lParam);
 }
 
 #ifndef __asm
@@ -1349,5 +1349,4 @@ inline HANDLE GetCurrentThread() { return (HANDLE)2; }
 inline BOOL SetThreadPriority(HANDLE, int) { return TRUE; }
 
 #endif // VDWIN32_SHIM_H
-
 

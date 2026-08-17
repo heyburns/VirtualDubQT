@@ -2492,6 +2492,16 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
     radNV12 = new QRadioButton("4:2:0 YCbCr (NV12)", this);
     radOther = new QRadioButton("Other...", this);
 
+    const QList<QRadioButton *> unsupportedFormats = {
+        radRGBA32, radRGBA64, radUYVY, radYUY2, radV210, radYV24,
+        radYV24_16, radYV16, radYV16_16, radYV12, radYV12_16,
+        radYVU9, radY8, radY16, radGray, radHDYC, radNV12, radOther
+    };
+    for (QRadioButton *format : unsupportedFormats) {
+        format->setEnabled(false);
+        format->setToolTip("Native output in this pixel format is not implemented yet.");
+    }
+
     grpFormats->addButton(radRGB24);
     grpFormats->addButton(radRGBA32);
     grpFormats->addButton(radRGBA64);
@@ -2593,24 +2603,6 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
 
     // Set initial values
     if (mConfig.formatName == "RGB24") radRGB24->setChecked(true);
-    else if (mConfig.formatName == "RGBA32") radRGBA32->setChecked(true);
-    else if (mConfig.formatName == "RGBA64") radRGBA64->setChecked(true);
-    else if (mConfig.formatName == "UYVY") radUYVY->setChecked(true);
-    else if (mConfig.formatName == "YUY2") radYUY2->setChecked(true);
-    else if (mConfig.formatName == "v210") radV210->setChecked(true);
-    else if (mConfig.formatName == "YV24") radYV24->setChecked(true);
-    else if (mConfig.formatName == "YV24_16") radYV24_16->setChecked(true);
-    else if (mConfig.formatName == "YV16") radYV16->setChecked(true);
-    else if (mConfig.formatName == "YV16_16") radYV16_16->setChecked(true);
-    else if (mConfig.formatName == "YV12") radYV12->setChecked(true);
-    else if (mConfig.formatName == "YV12_16") radYV12_16->setChecked(true);
-    else if (mConfig.formatName == "YVU9") radYVU9->setChecked(true);
-    else if (mConfig.formatName == "Y8") radY8->setChecked(true);
-    else if (mConfig.formatName == "Y16") radY16->setChecked(true);
-    else if (mConfig.formatName == "Gray") radGray->setChecked(true);
-    else if (mConfig.formatName == "HDYC") radHDYC->setChecked(true);
-    else if (mConfig.formatName == "NV12") radNV12->setChecked(true);
-    else if (mConfig.formatName == "Other") radOther->setChecked(true);
     else radAutoselect->setChecked(true);
 
     if (mConfig.colorSpace == 1) radCSRec601->setChecked(true);
@@ -2967,6 +2959,9 @@ VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &d
 
     // Checkbox: Don't run this job now; add it to job queue...
     chkJobQueue = new QCheckBox("Don't run this job now; add it to job queue so I can run it later in batch mode", this);
+    chkJobQueue->setChecked(false);
+    chkJobQueue->setEnabled(false);
+    chkJobQueue->setToolTip("The native Linux job queue is not implemented yet.");
     mainLayout->addWidget(chkJobQueue);
 
     // Buttons
@@ -3024,7 +3019,7 @@ VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &d
     if (sCfg.fileTypeIndex >= 0 && sCfg.fileTypeIndex < cboFileType->count()) {
         cboFileType->setCurrentIndex(sCfg.fileTypeIndex);
     }
-    chkJobQueue->setChecked(sCfg.jobQueue);
+    chkJobQueue->setChecked(false);
 
     onRateControlModeChanged();
 }
@@ -4306,7 +4301,9 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, const QString
     // Checkbox & Buttons
     QHBoxLayout *bottomRow = new QHBoxLayout();
     mJobQueueCheck = new QCheckBox("Add to job queue", this);
-    mJobQueueCheck->setChecked(vCfg.jobQueue);
+    mJobQueueCheck->setChecked(false);
+    mJobQueueCheck->setEnabled(false);
+    mJobQueueCheck->setToolTip("The native Linux job queue is not implemented yet.");
     bottomRow->addWidget(mJobQueueCheck);
 
     QDialogButtonBox *btnBox = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);

@@ -2,8 +2,6 @@
 #define VDQTAUDIOPLAYER_H
 
 #include <QString>
-#include <QByteArray>
-#include <QBuffer>
 #include <QAudioSink>
 #include <QAudioFormat>
 #include <QMediaDevices>
@@ -13,10 +11,10 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
-#include <libswresample/swresample.h>
-#include <libavutil/opt.h>
 #include <avisynth/avisynth_c.h>
 }
+
+class VDQtFFmpegAudioDevice;
 
 class AVSAudioDevice : public QIODevice {
     Q_OBJECT
@@ -26,7 +24,7 @@ public:
     void seekToSample(int64_t sample);
     int64_t getCurrentSample() const { return m_currentSample; }
 
-    bool isSequential() const override { return false; }
+    bool isSequential() const override { return true; }
     qint64 bytesAvailable() const override;
     qint64 size() const override;
 
@@ -55,6 +53,7 @@ public:
     void pause();
     void stop();
     void seekToFrame(int frameIndex, double fps);
+    void seekToTimeSeconds(double timeSeconds);
     double getCurrentAudioTimeSeconds() const;
 
     bool isPlaying() const { return mIsPlaying; }
@@ -63,6 +62,7 @@ public:
     int getChannels() const { return mChannels; }
     int getBitsPerSample() const { return mBitsPerSample; }
     int64_t getTotalSamples() const { return mTotalSamples; }
+    QString getSourcePath() const { return mFilePath; }
 
     QString getAudioLayoutString() const;
     QString getAudioCompressionString() const;
@@ -77,18 +77,19 @@ private:
     int mChannels;
     int mBitsPerSample;
     int64_t mTotalSamples;
+    bool mTotalSamplesExact;
 
     QString mFilePath;
     int mAudioStreamIndex;
 
     AVFormatContext *mFormatCtx;
     AVCodecContext *mCodecCtx;
-    SwrContext *mSwrCtx;
 
     QAudioSink *mAudioSink;
-    QBuffer mAudioBuffer;
-    QByteArray mPcmData;
+    VDQtFFmpegAudioDevice *mFFmpegAudioDevice;
     AVSAudioDevice *mAvsAudioDevice;
+
+    QString mChannelLayoutName;
 
     AVS_Clip *mClip = nullptr;
     const AVS_VideoInfo *mVi = nullptr;

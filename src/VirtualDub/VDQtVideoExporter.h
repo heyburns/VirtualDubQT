@@ -33,6 +33,10 @@ public:
         int startFrame = 0;
         int endFrame = -1;
         double customFps = 0.0;
+        // When true, customFps is a conversion target and source duration is
+        // preserved by timestamp-based frame duplication/drop. When false,
+        // customFps reinterprets the selected frames at the requested rate.
+        bool convertFpsPreserveDuration = false;
         int decimateFactor = 1;
         int videoMode = VideoMode_FullProcessing;
         int audioMode = AudioMode_DirectStreamCopy;

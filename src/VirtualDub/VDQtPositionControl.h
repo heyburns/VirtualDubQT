@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QTimer>
+#include <algorithm>
 #include "PositionControl.h"
 #include <vd2/system/Fraction.h>
 
@@ -41,20 +42,24 @@ public:
     VDPosition GetPosition() override { return mPosition; }
     void SetPosition(VDPosition pos) override;
     void SetPositionSilent(VDPosition pos);
+    void SetCurrentFrameKey(bool keyFrame) { mCurrentFrameIsKey = keyFrame; UpdateStatusText(); }
     void SetDisplayedPosition(VDPosition pos) override { SetPosition(pos); }
     bool GetSelection(VDPosition& start, VDPosition& end) override { start = mSelStart; end = mSelEnd; return mSelStart < mSelEnd; }
     VDPosition GetSelectionStart() const { return mSelStart; }
     VDPosition GetSelectionEnd() const { return mSelEnd; }
     bool hasSelection() const { return mSelStart < mSelEnd; }
     int getEffectiveStartFrame(int totalFrames) const {
+        if (totalFrames <= 0) return 0;
         if (mSelStart < mSelEnd && mSelStart >= 0) {
-            return (int)mSelStart;
+            return std::clamp(static_cast<int>(mSelStart), 0, totalFrames - 1);
         }
         return 0;
     }
     int getEffectiveEndFrame(int totalFrames) const {
+        if (totalFrames <= 0) return 0;
         if (mSelStart < mSelEnd && mSelEnd > 0) {
-            return std::min((int)mSelEnd, totalFrames - 1);
+            // VirtualDub selection end markers are exclusive.
+            return std::min(static_cast<int>(mSelEnd - 1), totalFrames - 1);
         }
         return std::max(0, totalFrames - 1);
     }
@@ -99,6 +104,7 @@ private:
     QLabel *mStatusLabel;
     QTimer mScrubTimer;
     int mPendingScrubPos = -1;
+    bool mCurrentFrameIsKey = false;
 
     QPushButton *btnStart;
     QPushButton *btnPrevKey;

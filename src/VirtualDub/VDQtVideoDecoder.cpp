@@ -7,62 +7,212 @@
 #include <QDir>
 #include <QPainter>
 #include <QFont>
-#include <QThread>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSet>
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <limits>
+
+namespace {
+
+QString avErrorString(int errorCode) {
+    char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(errorCode, buffer, sizeof(buffer));
+    return QString::fromUtf8(buffer);
+}
+
+QString avOperationError(const QString& operation, int errorCode) {
+    return QStringLiteral("%1: %2 (%3)")
+        .arg(operation, avErrorString(errorCode))
+        .arg(errorCode);
+}
+
+bool isUsableFrameRate(AVRational rate) {
+    if (rate.num <= 0 || rate.den <= 0) return false;
+    const double value = av_q2d(rate);
+    return std::isfinite(value) && value > 0.0 && value < 100000.0;
+}
+
+int boundedFrameCount(int64_t count) {
+    if (count <= 0) return 0;
+    return static_cast<int>(std::min<int64_t>(count, std::numeric_limits<int>::max()));
+}
+
+QMutex& aviSynthWorkingDirectoryMutex() {
+    static QMutex mutex;
+    return mutex;
+}
+
+class ScopedCurrentDirectory {
+public:
+    explicit ScopedCurrentDirectory(const QString& directory)
+        : mLocker(&aviSynthWorkingDirectoryMutex()),
+          mOriginalDirectory(QDir::currentPath()),
+          mChanged(QDir::setCurrent(directory)) {
+    }
+
+    ~ScopedCurrentDirectory() {
+        if (mChanged && !QDir::setCurrent(mOriginalDirectory)) {
+            qWarning() << "[VDQtVideoDecoder] Failed to restore process working directory to"
+                       << mOriginalDirectory;
+        }
+    }
+
+    bool isValid() const { return mChanged; }
+
+private:
+    QMutexLocker<QMutex> mLocker;
+    QString mOriginalDirectory;
+    bool mChanged;
+};
+
+bool isScriptDependencyFile(const QString& path) {
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    return suffix == QStringLiteral("avs") || suffix == QStringLiteral("avsi")
+        || suffix == QStringLiteral("vpy") || suffix == QStringLiteral("py");
+}
+
+QStringList resolveScriptPathLiteral(const QString& literal, const QDir& scriptDirectory) {
+    QString path = literal.trimmed();
+    if (path.isEmpty() || path.size() > 4096) return {};
+
+    // Handle the path spellings normally used by AviSynth and Python scripts.
+    path.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+    path.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    if (path.startsWith(QStringLiteral("file://"), Qt::CaseInsensitive))
+        path.remove(0, 7);
+
+    QString absolutePath = QFileInfo(path).isAbsolute()
+        ? QDir::cleanPath(path)
+        : QDir::cleanPath(scriptDirectory.absoluteFilePath(path));
+
+    // ImageSource and similar filters commonly use printf/hash patterns. Expand
+    // them conservatively so every existing source frame is protected.
+    QString wildcardPath = absolutePath;
+    wildcardPath.replace(
+        QRegularExpression(QStringLiteral("%[-+0 #]*\\d*(?:\\.\\d+)?[diu]")),
+        QStringLiteral("*"));
+    wildcardPath.replace(QRegularExpression(QStringLiteral("#+")), QStringLiteral("*"));
+
+    const bool hasWildcard = wildcardPath.contains(QLatin1Char('*'))
+                          || wildcardPath.contains(QLatin1Char('?'))
+                          || wildcardPath.contains(QLatin1Char('['));
+    if (!hasWildcard) {
+        const QFileInfo info(absolutePath);
+        if (!info.exists() && !info.isSymLink()) return {};
+        if (info.isDir()) return {};
+        return { info.absoluteFilePath() };
+    }
+
+    const int separator = wildcardPath.lastIndexOf(QLatin1Char('/'));
+    const QString directoryPath = separator >= 0
+        ? (separator == 0 ? QStringLiteral("/") : wildcardPath.left(separator))
+        : scriptDirectory.absolutePath();
+    const QString namePattern = separator >= 0
+        ? wildcardPath.mid(separator + 1)
+        : wildcardPath;
+    if (namePattern.isEmpty()) return {};
+
+    QStringList matches;
+    const QFileInfoList entries = QDir(directoryPath).entryInfoList(
+        { namePattern }, QDir::Files | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
+    matches.reserve(entries.size());
+    for (const QFileInfo& entry : entries)
+        matches.append(entry.absoluteFilePath());
+    return matches;
+}
+
+void collectScriptDependencies(const QString& scriptPath,
+                               QSet<QString>& visitedScripts,
+                               QStringList& dependencies,
+                               int depth) {
+    if (depth > 32) return;
+    const QFileInfo scriptInfo(scriptPath);
+    const QString absoluteScriptPath = scriptInfo.absoluteFilePath();
+    const QString visitKey = scriptInfo.canonicalFilePath().isEmpty()
+        ? absoluteScriptPath
+        : scriptInfo.canonicalFilePath();
+    if (visitedScripts.contains(visitKey)) return;
+    visitedScripts.insert(visitKey);
+
+    QFile scriptFile(absoluteScriptPath);
+    if (!scriptFile.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    const QString content = QString::fromUtf8(scriptFile.readAll());
+    scriptFile.close();
+
+    // Extract every existing path literal, rather than trying to maintain a
+    // fragile whitelist of source-filter names. This covers variables, named
+    // arguments, plugin source filters, Import(), and ordinary VapourSynth
+    // syntax. Script dependencies are followed recursively.
+    static const QRegularExpression literalRegex(QStringLiteral(
+        R"vdq("((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)')vdq"));
+    QRegularExpressionMatchIterator matches = literalRegex.globalMatch(content);
+    const QDir scriptDirectory = scriptInfo.dir();
+    while (matches.hasNext()) {
+        const QRegularExpressionMatch match = matches.next();
+        const QString literal = match.captured(1).isNull()
+            ? match.captured(2)
+            : match.captured(1);
+        const QStringList resolved = resolveScriptPathLiteral(literal, scriptDirectory);
+        for (const QString& dependency : resolved) {
+            if (!dependencies.contains(dependency))
+                dependencies.append(dependency);
+            if (isScriptDependencyFile(dependency))
+                collectScriptDependencies(dependency, visitedScripts, dependencies, depth + 1);
+        }
+    }
+}
+
+} // namespace
 
 VDQtVideoDecoder::VDQtVideoDecoder()
     : mIsOpen(false),
       mWidth(0),
       mHeight(0),
       mFrameCount(0),
-      mFps(30.0),
+      mFrameCountStatus(FrameCountStatus::Unknown),
+      mFps(0.0),
       mVideoStreamIndex(-1),
-      mDuration(0),
+      mDuration(AV_NOPTS_VALUE),
       mFormatCtx(nullptr),
       mCodecCtx(nullptr),
       mSwsCtx(nullptr),
       mFrame(nullptr),
       mFrameRGB(nullptr),
+      mPacket(nullptr),
       mBuffer(nullptr),
-      mCurrentFrameIndex(-1) {
+      mCurrentFrameIndex(-1),
+      mNextDecodeFrameIndex(0),
+      mStreamStartTimestamp(AV_NOPTS_VALUE),
+      mPacketPending(false),
+      mDemuxEof(false),
+      mDrainSent(false),
+      mLastDecodeReachedEof(false),
+      mDiscardUntilKeyFrame(false),
+      mSwsSourceFormat(AV_PIX_FMT_NONE),
+      mSwsDestinationFormat(AV_PIX_FMT_NONE),
+      mSwsSourceWidth(0),
+      mSwsSourceHeight(0),
+      mErrorMode(0) {
+    mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
 }
 
 VDQtVideoDecoder::~VDQtVideoDecoder() {
     close();
-    if (mAvsEnv) {
-        avs_delete_script_environment(mAvsEnv);
-        mAvsEnv = nullptr;
-    }
 }
 
 QString VDQtVideoDecoder::parseScriptSource(const QString& scriptPath) {
-    QFile scriptFile(scriptPath);
-    if (!scriptFile.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    const QStringList sources = parseScriptSources(scriptPath);
+    return sources.isEmpty() ? QString() : sources.first();
+}
 
-    QTextStream in(&scriptFile);
-    QString content = in.readAll();
-    scriptFile.close();
-
-    content.replace('\\', '/'); // Convert Windows backslashes
-
-    QRegularExpression srcRegex("(?:AVISource|FFVideoSource|FFAudioSource|FFmpegSource2|LWLibavVideoSource|LWLibavAudioSource|DirectShowSource|SegmentedAVISource|OpenDMLSource|ImageSource|MovieSource)\\s*\\(\\s*[\"']([^\"']+)[\"']", QRegularExpression::CaseInsensitiveOption);
-    QRegularExpressionMatch match = srcRegex.match(content);
-
-    if (match.hasMatch()) {
-        QString refPath = match.captured(1);
-        QFileInfo scriptInfo(scriptPath);
-        QDir scriptDir = scriptInfo.dir();
-        QString resolvedPath = scriptDir.filePath(refPath);
-
-        if (!QFile::exists(resolvedPath) && QFile::exists(refPath)) {
-            resolvedPath = refPath;
-        }
-
-        if (QFile::exists(resolvedPath)) {
-            return resolvedPath;
-        }
-    }
-    return QString();
+QStringList VDQtVideoDecoder::parseScriptSources(const QString& scriptPath) {
+    QStringList resolvedSources;
+    QSet<QString> visitedScripts;
+    collectScriptDependencies(scriptPath, visitedScripts, resolvedSources, 0);
+    return resolvedSources;
 }
 
 QImage VDQtVideoDecoder::generateSyntheticFrame(int frameIndex) {
@@ -105,12 +255,23 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
     if (!mAvsClip || !mAvsVi) return QImage();
 
     AVS_VideoFrame *frame = avs_get_frame(mAvsClip, frameIndex);
-    if (!frame) return QImage();
+    if (!frame) {
+        mLastError = QStringLiteral("AviSynth failed to return frame %1.").arg(frameIndex);
+        return QImage();
+    }
 
     int w = mAvsVi->width;
     int h = mAvsVi->height;
 
     QImage img(w, h, QImage::Format_RGB32);
+    if (img.isNull()) {
+        mLastError = QStringLiteral("Could not allocate a %1x%2 image for AviSynth frame %3.")
+                         .arg(w)
+                         .arg(h)
+                         .arg(frameIndex);
+        avs_release_video_frame(frame);
+        return QImage();
+    }
 
     AVPixelFormat srcFmt = AV_PIX_FMT_NONE;
     const uint8_t *srcSlice[4] = { nullptr };
@@ -146,47 +307,79 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
         srcStride[0] = avs_get_pitch_p(frame, 0);
     } else if (avs_is_rgb32(mAvsVi)) {
         srcFmt = AV_PIX_FMT_BGRA;
-        srcSlice[0] = avs_get_read_ptr_p(frame, 0);
-        srcStride[0] = avs_get_pitch_p(frame, 0);
+        const uint8_t *base = avs_get_read_ptr_p(frame, 0);
+        const int pitch = avs_get_pitch_p(frame, 0);
+        // AviSynth's packed RGB24/RGB32 convention is bottom-up even though
+        // planar YUV and YUY2 are top-down. Present the visual top scanline to
+        // swscale and walk toward the visual bottom with a negative stride.
+        if (base && pitch > 0) {
+            srcSlice[0] = base + static_cast<ptrdiff_t>(h - 1) * pitch;
+            srcStride[0] = -pitch;
+        }
     } else if (avs_is_rgb24(mAvsVi)) {
         srcFmt = AV_PIX_FMT_BGR24;
-        srcSlice[0] = avs_get_read_ptr_p(frame, 0);
-        srcStride[0] = avs_get_pitch_p(frame, 0);
+        const uint8_t *base = avs_get_read_ptr_p(frame, 0);
+        const int pitch = avs_get_pitch_p(frame, 0);
+        if (base && pitch > 0) {
+            srcSlice[0] = base + static_cast<ptrdiff_t>(h - 1) * pitch;
+            srcStride[0] = -pitch;
+        }
     }
 
     if (srcFmt != AV_PIX_FMT_NONE && srcSlice[0]) {
-        if (!mSwsCtx) {
-            mSwsCtx = sws_getContext(w, h, srcFmt, w, h, AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
-        }
-        if (mSwsCtx) {
+        const bool contextMatches = mSwsCtx
+            && mSwsSourceFormat == srcFmt
+            && mSwsDestinationFormat == AV_PIX_FMT_BGRA
+            && mSwsSourceWidth == w
+            && mSwsSourceHeight == h;
+        if ((contextMatches || setupSwsContext(srcFmt, w, h, AV_PIX_FMT_BGRA)) && mSwsCtx) {
             uint8_t *dstSlice[4] = { img.bits(), nullptr, nullptr, nullptr };
             int dstStride[4] = { static_cast<int>(img.bytesPerLine()), 0, 0, 0 };
-            sws_scale(mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
+            const int scaledRows = sws_scale(mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
             avs_release_video_frame(frame);
-            return img;
+            if (scaledRows == h) return img;
+
+            mLastError = QStringLiteral("Pixel conversion failed for AviSynth frame %1.").arg(frameIndex);
+            return QImage();
         }
     }
 
-    img.fill(Qt::black);
+    if (mLastError.isEmpty()) {
+        mLastError = QStringLiteral("Unsupported AviSynth pixel format for frame %1.").arg(frameIndex);
+    }
     avs_release_video_frame(frame);
-    return img;
+    return QImage();
 }
 
-void VDQtVideoDecoder::setupSwsContext() {
-    if (!mCodecCtx || mWidth <= 0 || mHeight <= 0) return;
+bool VDQtVideoDecoder::setupSwsContext(AVPixelFormat sourceFormat,
+                                       int sourceWidth,
+                                       int sourceHeight,
+                                       AVPixelFormat destinationFormat) {
+    if (sourceFormat == AV_PIX_FMT_NONE && mCodecCtx) sourceFormat = mCodecCtx->pix_fmt;
+    if (sourceWidth <= 0) sourceWidth = mWidth;
+    if (sourceHeight <= 0) sourceHeight = mHeight;
 
-    if (mSwsCtx) {
-        sws_freeContext(mSwsCtx);
-        mSwsCtx = nullptr;
+    if (sourceFormat == AV_PIX_FMT_NONE || destinationFormat == AV_PIX_FMT_NONE
+        || sourceWidth <= 0 || sourceHeight <= 0) {
+        mLastError = QStringLiteral("Cannot initialize pixel conversion without a valid source format and dimensions.");
+        return false;
     }
 
-    mSwsCtx = sws_getContext(
-        mWidth, mHeight, mCodecCtx->pix_fmt,
-        mWidth, mHeight, AV_PIX_FMT_RGB24,
-        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr
+    SwsContext *newContext = sws_getContext(
+        sourceWidth, sourceHeight, sourceFormat,
+        sourceWidth, sourceHeight, destinationFormat,
+        destinationFormat == AV_PIX_FMT_BGRA ? SWS_POINT : SWS_FAST_BILINEAR,
+        nullptr, nullptr, nullptr
     );
 
-    if (!mSwsCtx) return;
+    if (!newContext) {
+        const char *formatName = av_get_pix_fmt_name(sourceFormat);
+        mLastError = QStringLiteral("Could not create pixel conversion context for %1 at %2x%3.")
+                         .arg(formatName ? QString::fromUtf8(formatName) : QStringLiteral("unknown format"))
+                         .arg(sourceWidth)
+                         .arg(sourceHeight);
+        return false;
+    }
 
     int srcRange = 0;
     if (mComponentRangeMode == 1) {
@@ -194,7 +387,7 @@ void VDQtVideoDecoder::setupSwsContext() {
     } else if (mComponentRangeMode == 2) {
         srcRange = 1; // Full (0-255)
     } else {
-        if (mCodecCtx->color_range == AVCOL_RANGE_JPEG) srcRange = 1;
+        if (mCodecCtx && mCodecCtx->color_range == AVCOL_RANGE_JPEG) srcRange = 1;
         else srcRange = 0;
     }
 
@@ -204,7 +397,7 @@ void VDQtVideoDecoder::setupSwsContext() {
     } else if (mColorSpaceMode == 2) {
         invTable = sws_getCoefficients(SWS_CS_ITU709);
     } else {
-        if (mWidth >= 1280 || mHeight >= 720) {
+        if (sourceWidth >= 1280 || sourceHeight >= 720) {
             invTable = sws_getCoefficients(SWS_CS_ITU709);
         } else {
             invTable = sws_getCoefficients(SWS_CS_ITU601);
@@ -212,12 +405,26 @@ void VDQtVideoDecoder::setupSwsContext() {
     }
 
     const int *table = sws_getCoefficients(SWS_CS_DEFAULT);
-    sws_setColorspaceDetails(
-        mSwsCtx,
+    const int colorResult = sws_setColorspaceDetails(
+        newContext,
         invTable, srcRange,
         table, 1, // destination full range RGB
         0, 1 << 16, 1 << 16
     );
+
+    if (colorResult < 0) {
+        mLastError = avOperationError(QStringLiteral("Could not configure pixel conversion colorspace"), colorResult);
+        sws_freeContext(newContext);
+        return false;
+    }
+
+    if (mSwsCtx) sws_freeContext(mSwsCtx);
+    mSwsCtx = newContext;
+    mSwsSourceFormat = sourceFormat;
+    mSwsDestinationFormat = destinationFormat;
+    mSwsSourceWidth = sourceWidth;
+    mSwsSourceHeight = sourceHeight;
+    return true;
 }
 
 void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange) {
@@ -226,170 +433,325 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
     mComponentRangeMode = componentRange;
 
     clearCache();
-    setupSwsContext();
+    if (mIsAvsNative) {
+        if (mSwsCtx) sws_freeContext(mSwsCtx);
+        mSwsCtx = nullptr;
+        mSwsSourceFormat = AV_PIX_FMT_NONE;
+        mSwsDestinationFormat = AV_PIX_FMT_NONE;
+        mSwsSourceWidth = 0;
+        mSwsSourceHeight = 0;
+    } else if (mCodecCtx && mCodecCtx->pix_fmt != AV_PIX_FMT_NONE) {
+        setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, AV_PIX_FMT_RGB24);
+    }
 }
 
 bool VDQtVideoDecoder::openFile(const QString& filePath) {
     close();
+    mLastError.clear();
 
-    mFilePath = filePath;
-    std::string pathStr = filePath.toStdString();
-
-    AVInputFormat *inputFmt = nullptr;
-    AVDictionary *formatOptions = nullptr;
-
-    bool isAvs = filePath.endsWith(".avs", Qt::CaseInsensitive);
+    const QString absolutePath = QFileInfo(filePath).absoluteFilePath();
+    const bool isAvs = absolutePath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive);
 
     if (isAvs) {
-        qDebug() << "[VDQtVideoDecoder] Attempting native AviSynth+ script evaluation:" << filePath;
-        QDir::setCurrent(QFileInfo(filePath).absolutePath());
-        if (!mAvsEnv) {
-            mAvsEnv = avs_create_script_environment(AVISYNTH_INTERFACE_VERSION);
+        qDebug() << "[VDQtVideoDecoder] Attempting native AviSynth+ script evaluation:" << absolutePath;
+
+        AVS_ScriptEnvironment *newEnvironment = avs_create_script_environment(AVISYNTH_INTERFACE_VERSION);
+        AVS_Clip *newClip = nullptr;
+        const AVS_VideoInfo *newVideoInfo = nullptr;
+
+        if (!newEnvironment) {
+            mLastError = QStringLiteral("Failed to create the AviSynth+ script environment.");
+            return false;
         }
-        if (mAvsEnv) {
-            QByteArray pathBytes = filePath.toUtf8();
-            AVS_Value val = avs_new_value_string(pathBytes.constData());
-            AVS_Value res = avs_invoke(mAvsEnv, "Import", val, nullptr);
-            qDebug() << "[VDQtVideoDecoder] avs_invoke Import returned: type=" << res.type
-                     << "is_clip=" << avs_is_clip(res)
-                     << "is_error=" << avs_is_error(res);
 
-            if (!avs_is_error(res) && avs_is_clip(res)) {
-                mAvsClip = avs_take_clip(res, mAvsEnv);
-                mAvsVi = avs_get_video_info(mAvsClip);
-                qDebug() << "[VDQtVideoDecoder] mAvsClip taken:" << (void*)mAvsClip << "mAvsVi:" << (void*)mAvsVi;
+        {
+            // AviSynth resolves some source-filter paths against the process CWD. Serialize
+            // this narrow compatibility window and restore the original directory on every
+            // return path.
+            ScopedCurrentDirectory workingDirectory(QFileInfo(absolutePath).absolutePath());
+            if (!workingDirectory.isValid()) {
+                mLastError = QStringLiteral("Could not enter the AviSynth script directory: %1")
+                                 .arg(QFileInfo(absolutePath).absolutePath());
+            } else {
+                const QByteArray pathBytes = absolutePath.toUtf8();
+                const AVS_Value argument = avs_new_value_string(pathBytes.constData());
+                AVS_Value result = avs_invoke(newEnvironment, "Import", argument, nullptr);
 
-                if (mAvsVi && mAvsVi->width > 0 && mAvsVi->height > 0) {
-                    mWidth = mAvsVi->width;
-                    mHeight = mAvsVi->height;
-                    mFrameCount = mAvsVi->num_frames;
-                    mFps = (mAvsVi->fps_denominator > 0) ? (double)mAvsVi->fps_numerator / mAvsVi->fps_denominator : 29.97;
-                    mIsOpen = true;
-                    mIsAvsNative = true;
-                    mCurrentFrameIndex = -1;
-                    mFrameCache.setMaxCost(128);
-
-                    qDebug() << "[VDQtVideoDecoder] Native AviSynth+ script evaluation SUCCESS:" << filePath
-                             << mWidth << "x" << mHeight << "@" << mFps << "fps," << mFrameCount << "total frames.";
-                    return true;
+                if (avs_is_error(result)) {
+                    mLastError = QString::fromUtf8(avs_as_string(result));
+                } else if (!avs_is_clip(result)) {
+                    mLastError = QStringLiteral("AviSynth Import did not return a video clip.");
+                } else {
+                    newClip = avs_take_clip(result, newEnvironment);
+                    if (newClip) newVideoInfo = avs_get_video_info(newClip);
                 }
-            } else if (avs_is_error(res)) {
-                mLastError = QString::fromUtf8(avs_as_string(res));
-                qWarning() << "[VDQtVideoDecoder] AviSynth+ script evaluation error:" << mLastError;
-                avs_release_value(res);
-                close();
-                return false;
+                avs_release_value(result);
             }
         }
 
-        if (mLastError.isEmpty()) {
-            mLastError = "Failed to initialize AviSynth+ script environment or load script.";
+        if (!newClip || !newVideoInfo || newVideoInfo->width <= 0 || newVideoInfo->height <= 0
+            || newVideoInfo->num_frames <= 0
+            || av_image_check_size(static_cast<unsigned>(newVideoInfo->width),
+                                   static_cast<unsigned>(newVideoInfo->height), 0, nullptr) < 0) {
+            if (mLastError.isEmpty()) {
+                const char *environmentError = avs_get_error(newEnvironment);
+                mLastError = environmentError
+                    ? QString::fromUtf8(environmentError)
+                    : QStringLiteral("AviSynth returned invalid video dimensions or no frames.");
+            }
+            if (newClip) avs_release_clip(newClip);
+            avs_delete_script_environment(newEnvironment);
+            qWarning() << "[VDQtVideoDecoder] AviSynth+ script evaluation failed:" << mLastError;
+            return false;
         }
-        close();
+
+        mAvsEnv = newEnvironment;
+        mAvsClip = newClip;
+        mAvsVi = newVideoInfo;
+        mFilePath = absolutePath;
+        mWidth = newVideoInfo->width;
+        mHeight = newVideoInfo->height;
+        mFrameCount = boundedFrameCount(newVideoInfo->num_frames);
+        mFrameCountStatus = FrameCountStatus::Exact;
+        mFps = newVideoInfo->fps_denominator > 0
+            ? static_cast<double>(newVideoInfo->fps_numerator) / newVideoInfo->fps_denominator
+            : 0.0;
+        mIsOpen = true;
+        mIsAvsNative = true;
+        mCurrentFrameIndex = -1;
+        mNextDecodeFrameIndex = 0;
+        mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
+
+        qDebug() << "[VDQtVideoDecoder] Native AviSynth+ script evaluation succeeded:"
+                 << absolutePath << mWidth << "x" << mHeight << "@" << mFps << "fps,"
+                 << mFrameCount << "frames.";
+        return true;
+    }
+
+    AVFormatContext *newFormatContext = nullptr;
+    AVCodecContext *newCodecContext = nullptr;
+    AVFrame *newFrame = nullptr;
+    AVFrame *newRgbFrame = nullptr;
+    AVPacket *newPacket = nullptr;
+    uint8_t *newBuffer = nullptr;
+
+    auto releaseLocals = [&]() {
+        if (newBuffer) av_freep(&newBuffer);
+        if (newRgbFrame) av_frame_free(&newRgbFrame);
+        if (newFrame) av_frame_free(&newFrame);
+        if (newPacket) av_packet_free(&newPacket);
+        if (newCodecContext) avcodec_free_context(&newCodecContext);
+        if (newFormatContext) avformat_close_input(&newFormatContext);
+    };
+
+    const QByteArray pathBytes = absolutePath.toUtf8();
+    int error = avformat_open_input(&newFormatContext, pathBytes.constData(), nullptr, nullptr);
+    if (error < 0) {
+        mLastError = avOperationError(QStringLiteral("Could not open %1").arg(absolutePath), error);
+        releaseLocals();
         return false;
     }
 
-    int err = avformat_open_input(&mFormatCtx, pathStr.c_str(), inputFmt, &formatOptions);
-    if (formatOptions) {
-        av_dict_free(&formatOptions);
-    }
-
-    if (err < 0) {
-        char errBuf[256];
-        av_strerror(err, errBuf, sizeof(errBuf));
-        qWarning() << "[VDQtVideoDecoder] Could not open file or script:" << filePath << "Error:" << errBuf;
-        close();
+    error = avformat_find_stream_info(newFormatContext, nullptr);
+    if (error < 0) {
+        mLastError = avOperationError(QStringLiteral("Could not read stream information"), error);
+        releaseLocals();
         return false;
     }
 
-    if (avformat_find_stream_info(mFormatCtx, nullptr) < 0) {
-        qWarning() << "[VDQtVideoDecoder] Could not find stream info:" << filePath;
-        close();
+    const AVCodec *codec = nullptr;
+    const int streamIndex = av_find_best_stream(
+        newFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+    if (streamIndex < 0) {
+        mLastError = avOperationError(QStringLiteral("No decodable video stream was found"), streamIndex);
+        releaseLocals();
         return false;
     }
 
-    // Find first video stream
-    for (unsigned int i = 0; i < mFormatCtx->nb_streams; i++) {
-        if (mFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            mVideoStreamIndex = i;
-            break;
-        }
-    }
-
-    if (mVideoStreamIndex == -1) {
-        qWarning() << "[VDQtVideoDecoder] No video stream found in:" << filePath;
-        close();
-        return false;
-    }
-
-    AVStream *videoStream = mFormatCtx->streams[mVideoStreamIndex];
-    const AVCodec *codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
+    AVStream *videoStream = newFormatContext->streams[streamIndex];
+    if (!codec) codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
     if (!codec) {
-        qWarning() << "[VDQtVideoDecoder] Unsupported codec for video stream.";
-        close();
+        mLastError = QStringLiteral("No decoder is available for codec %1.")
+                         .arg(QString::fromUtf8(avcodec_get_name(videoStream->codecpar->codec_id)));
+        releaseLocals();
         return false;
     }
 
-    mCodecCtx = avcodec_alloc_context3(codec);
-    if (!mCodecCtx) {
-        close();
+    newCodecContext = avcodec_alloc_context3(codec);
+    if (!newCodecContext) {
+        mLastError = QStringLiteral("Could not allocate the video decoder context.");
+        releaseLocals();
         return false;
     }
 
-    if (avcodec_parameters_to_context(mCodecCtx, videoStream->codecpar) < 0) {
-        close();
+    error = avcodec_parameters_to_context(newCodecContext, videoStream->codecpar);
+    if (error < 0) {
+        mLastError = avOperationError(QStringLiteral("Could not copy video stream parameters"), error);
+        releaseLocals();
+        return false;
+    }
+    newCodecContext->pkt_timebase = videoStream->time_base;
+
+    // Apply the selected policy before opening the codec. setErrorMode() also
+    // updates an already-open context for subsequent frames.
+    switch (mErrorMode) {
+    case 1:
+        newCodecContext->err_recognition = 0;
+        newCodecContext->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+        newCodecContext->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
+        break;
+    case 2:
+        newCodecContext->err_recognition = AV_EF_IGNORE_ERR;
+        newCodecContext->error_concealment = 0;
+        newCodecContext->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+        break;
+    default:
+        newCodecContext->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER;
+        newCodecContext->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+        newCodecContext->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
+        break;
+    }
+
+    error = avcodec_open2(newCodecContext, codec, nullptr);
+    if (error < 0) {
+        mLastError = avOperationError(
+            QStringLiteral("Could not open video decoder %1").arg(QString::fromUtf8(codec->name)), error);
+        releaseLocals();
         return false;
     }
 
-    if (avcodec_open2(mCodecCtx, codec, nullptr) < 0) {
-        qWarning() << "[VDQtVideoDecoder] Could not open codec.";
-        close();
+    const int width = newCodecContext->width;
+    const int height = newCodecContext->height;
+    error = av_image_check_size(static_cast<unsigned>(std::max(width, 0)),
+                                static_cast<unsigned>(std::max(height, 0)), 0, nullptr);
+    if (width <= 0 || height <= 0 || error < 0) {
+        mLastError = error < 0
+            ? avOperationError(QStringLiteral("Invalid video dimensions %1x%2").arg(width).arg(height), error)
+            : QStringLiteral("Invalid video dimensions %1x%2.").arg(width).arg(height);
+        releaseLocals();
         return false;
     }
 
-    mWidth = mCodecCtx->width;
-    mHeight = mCodecCtx->height;
-
-    // Calculate FPS
-    if (videoStream->avg_frame_rate.den > 0) {
-        mFps = av_q2d(videoStream->avg_frame_rate);
-    } else if (videoStream->r_frame_rate.den > 0) {
-        mFps = av_q2d(videoStream->r_frame_rate);
-    } else {
-        mFps = 30.0;
+    newFrame = av_frame_alloc();
+    newRgbFrame = av_frame_alloc();
+    newPacket = av_packet_alloc();
+    if (!newFrame || !newRgbFrame || !newPacket) {
+        mLastError = QStringLiteral("Could not allocate FFmpeg frame or packet storage.");
+        releaseLocals();
+        return false;
     }
 
-    // Calculate total frame count
+    const int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
+    if (bufferSize <= 0) {
+        mLastError = avOperationError(QStringLiteral("Could not calculate RGB frame buffer size"), bufferSize);
+        releaseLocals();
+        return false;
+    }
+
+    newBuffer = static_cast<uint8_t *>(av_malloc(static_cast<size_t>(bufferSize)));
+    if (!newBuffer) {
+        mLastError = QStringLiteral("Could not allocate %1 bytes for RGB frame conversion.").arg(bufferSize);
+        releaseLocals();
+        return false;
+    }
+
+    error = av_image_fill_arrays(newRgbFrame->data, newRgbFrame->linesize, newBuffer,
+                                 AV_PIX_FMT_RGB24, width, height, 1);
+    if (error < 0) {
+        mLastError = avOperationError(QStringLiteral("Could not initialize RGB frame storage"), error);
+        releaseLocals();
+        return false;
+    }
+
+    AVRational frameRate = av_guess_frame_rate(newFormatContext, videoStream, nullptr);
+    if (!isUsableFrameRate(frameRate)) frameRate = videoStream->avg_frame_rate;
+    if (!isUsableFrameRate(frameRate)) frameRate = videoStream->r_frame_rate;
+    if (!isUsableFrameRate(frameRate)) frameRate = newCodecContext->framerate;
+
+    int frameCount = 0;
+    FrameCountStatus frameCountStatus = FrameCountStatus::Unknown;
     if (videoStream->nb_frames > 0) {
-        mFrameCount = videoStream->nb_frames;
-    } else if (mFormatCtx->duration != AV_NOPTS_VALUE) {
-        double durationSec = mFormatCtx->duration / (double)AV_TIME_BASE;
-        mFrameCount = static_cast<int>(durationSec * mFps);
-    } else {
-        mFrameCount = 1000;
+        frameCount = boundedFrameCount(videoStream->nb_frames);
+        // Demuxer metadata is frequently estimated or stale (notably in AVI
+        // and remuxed VFR files). Treat it as a navigation hint until decoder
+        // EOF validates the presentation-order count; otherwise an
+        // underreported value hard-clamps valid tail frames.
+        frameCountStatus = frameCount > 0
+            ? FrameCountStatus::Estimated
+            : FrameCountStatus::Unknown;
+    } else if (isUsableFrameRate(frameRate) && videoStream->duration != AV_NOPTS_VALUE
+               && videoStream->duration > 0) {
+        const int64_t estimate = av_rescale_q_rnd(
+            videoStream->duration, videoStream->time_base, av_inv_q(frameRate),
+            static_cast<AVRounding>(AV_ROUND_UP | AV_ROUND_PASS_MINMAX));
+        frameCount = boundedFrameCount(estimate);
+        frameCountStatus = frameCount > 0 ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
+    } else if (isUsableFrameRate(frameRate) && newFormatContext->duration != AV_NOPTS_VALUE
+               && newFormatContext->duration > 0) {
+        const int64_t estimate = av_rescale_q_rnd(
+            newFormatContext->duration, AV_TIME_BASE_Q, av_inv_q(frameRate),
+            static_cast<AVRounding>(AV_ROUND_UP | AV_ROUND_PASS_MINMAX));
+        frameCount = boundedFrameCount(estimate);
+        frameCountStatus = frameCount > 0 ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
     }
 
-    if (mFrameCount <= 0) mFrameCount = 1;
+    int64_t streamStartTimestamp = videoStream->start_time;
+    if (streamStartTimestamp == AV_NOPTS_VALUE && newFormatContext->start_time != AV_NOPTS_VALUE) {
+        streamStartTimestamp = av_rescale_q(
+            newFormatContext->start_time, AV_TIME_BASE_Q, videoStream->time_base);
+    }
+    if (streamStartTimestamp == AV_NOPTS_VALUE) streamStartTimestamp = 0;
 
-    mFrame = av_frame_alloc();
-    mFrameRGB = av_frame_alloc();
+    // Commit only after every allocation and initialization above has succeeded.
+    mFormatCtx = newFormatContext;
+    mCodecCtx = newCodecContext;
+    mFrame = newFrame;
+    mFrameRGB = newRgbFrame;
+    mPacket = newPacket;
+    mBuffer = newBuffer;
+    newFormatContext = nullptr;
+    newCodecContext = nullptr;
+    newFrame = nullptr;
+    newRgbFrame = nullptr;
+    newPacket = nullptr;
+    newBuffer = nullptr;
 
-    int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, mWidth, mHeight, 1);
-    mBuffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
+    mFilePath = absolutePath;
+    mVideoStreamIndex = streamIndex;
+    mWidth = width;
+    mHeight = height;
+    mFps = isUsableFrameRate(frameRate) ? av_q2d(frameRate) : 0.0;
+    mFrameCount = frameCount;
+    mFrameCountStatus = frameCountStatus;
+    mDuration = videoStream->duration;
+    if (mDuration == AV_NOPTS_VALUE && mFormatCtx->duration != AV_NOPTS_VALUE) {
+        mDuration = av_rescale_q(mFormatCtx->duration, AV_TIME_BASE_Q, videoStream->time_base);
+    }
+    mStreamStartTimestamp = streamStartTimestamp;
+    mCurrentFrameIndex = -1;
+    mNextDecodeFrameIndex = 0;
+    mPacketPending = false;
+    mDemuxEof = false;
+    mDrainSent = false;
+    mLastDecodeReachedEof = false;
+    mDiscardUntilKeyFrame = false;
+    mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
 
-    av_image_fill_arrays(mFrameRGB->data, mFrameRGB->linesize, mBuffer, AV_PIX_FMT_RGB24, mWidth, mHeight, 1);
-
-    setupSwsContext();
+    if (mCodecCtx->pix_fmt != AV_PIX_FMT_NONE
+        && !setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, AV_PIX_FMT_RGB24)) {
+        const QString conversionError = mLastError;
+        close();
+        mLastError = conversionError;
+        return false;
+    }
 
     mIsOpen = true;
-    mCurrentFrameIndex = -1;
-    mFrameCache.setMaxCost(128); // Cache up to 128 frames for instant scrubbing
-
-    qDebug() << "[VDQtVideoDecoder] Opened file:" << filePath
-             << mWidth << "x" << mHeight
-             << "@" << mFps << "fps,"
-             << mFrameCount << "total frames.";
-
+    qDebug() << "[VDQtVideoDecoder] Opened file:" << absolutePath
+             << mWidth << "x" << mHeight << "@" << mFps << "fps,"
+             << mFrameCount
+             << (mFrameCountStatus == FrameCountStatus::Exact ? "exact frames."
+                 : mFrameCountStatus == FrameCountStatus::Estimated ? "estimated frames."
+                 : "frames unknown.");
     return true;
 }
 
@@ -397,8 +759,29 @@ void VDQtVideoDecoder::clearCache() {
     mFrameCache.clear();
 }
 
+void VDQtVideoDecoder::cacheFrame(int frameIndex, const QImage& image) {
+    if (frameIndex < 0 || image.isNull()) return;
+
+    const qsizetype byteCount = image.sizeInBytes();
+    // Divide before adding so even a theoretical qsizetype-sized image cannot
+    // overflow while rounding up. A non-null QImage should never report zero,
+    // but charge the minimum unit if a backend does.
+    const qsizetype costKiB = byteCount > 0
+        ? 1 + ((byteCount - 1) / 1024)
+        : 1;
+    if (costKiB <= 0 || costKiB > mFrameCache.maxCost()) {
+        // QCache would delete an oversized inserted object. Skip allocation and
+        // remove an older entry for this key explicitly instead.
+        mFrameCache.remove(frameIndex);
+        return;
+    }
+
+    mFrameCache.insert(frameIndex, new QImage(image), costKiB);
+}
+
 void VDQtVideoDecoder::close() {
     clearCache();
+    mFrameIndex.clear();
 
     if (mAvsClip) {
         avs_release_clip(mAvsClip);
@@ -409,13 +792,16 @@ void VDQtVideoDecoder::close() {
     if (mAvsEnv) {
         avs_delete_script_environment(mAvsEnv);
         mAvsEnv = nullptr;
-        QThread::msleep(30);
     }
 
     if (mSwsCtx) {
         sws_freeContext(mSwsCtx);
         mSwsCtx = nullptr;
     }
+    mSwsSourceFormat = AV_PIX_FMT_NONE;
+    mSwsDestinationFormat = AV_PIX_FMT_NONE;
+    mSwsSourceWidth = 0;
+    mSwsSourceHeight = 0;
 
     if (mBuffer) {
         av_free(mBuffer);
@@ -432,6 +818,11 @@ void VDQtVideoDecoder::close() {
         mFrame = nullptr;
     }
 
+    if (mPacket) {
+        av_packet_free(&mPacket);
+        mPacket = nullptr;
+    }
+
     if (mCodecCtx) {
         avcodec_free_context(&mCodecCtx);
         mCodecCtx = nullptr;
@@ -443,61 +834,424 @@ void VDQtVideoDecoder::close() {
     }
 
     mIsOpen = false;
+    mFilePath.clear();
     mIsSyntheticScript = false;
     mIsAvsNative = false;
     mWidth = 0;
     mHeight = 0;
     mFrameCount = 0;
+    mFrameCountStatus = FrameCountStatus::Unknown;
+    mFps = 0.0;
     mVideoStreamIndex = -1;
+    mDuration = AV_NOPTS_VALUE;
     mCurrentFrameIndex = -1;
+    mNextDecodeFrameIndex = 0;
+    mStreamStartTimestamp = AV_NOPTS_VALUE;
+    mPacketPending = false;
+    mDemuxEof = false;
+    mDrainSent = false;
+    mLastDecodeReachedEof = false;
+    mDiscardUntilKeyFrame = false;
+}
+
+bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
+    if (!sourceFrame) {
+        mLastError = QStringLiteral("Decoder returned an empty video frame.");
+        return false;
+    }
+
+    const int sourceWidth = sourceFrame->width > 0 ? sourceFrame->width : mWidth;
+    const int sourceHeight = sourceFrame->height > 0 ? sourceFrame->height : mHeight;
+    const AVPixelFormat sourceFormat = static_cast<AVPixelFormat>(sourceFrame->format);
+    const int sizeCheck = av_image_check_size(
+        static_cast<unsigned>(std::max(sourceWidth, 0)),
+        static_cast<unsigned>(std::max(sourceHeight, 0)), 0, nullptr);
+    if (sourceWidth <= 0 || sourceHeight <= 0 || sourceFormat == AV_PIX_FMT_NONE || sizeCheck < 0) {
+        mLastError = QStringLiteral("Decoder returned invalid frame dimensions or pixel format.");
+        return false;
+    }
+
+    const bool dimensionsMatch = mFrameRGB && mBuffer
+        && sourceWidth == mWidth && sourceHeight == mHeight;
+    const bool contextMatches = mSwsCtx
+        && mSwsSourceFormat == sourceFormat
+        && mSwsDestinationFormat == AV_PIX_FMT_RGB24
+        && mSwsSourceWidth == sourceWidth
+        && mSwsSourceHeight == sourceHeight;
+    if (dimensionsMatch && contextMatches) return true;
+
+    AVFrame *replacementFrame = nullptr;
+    uint8_t *replacementBuffer = nullptr;
+    if (!dimensionsMatch) {
+        replacementFrame = av_frame_alloc();
+        if (!replacementFrame) {
+            mLastError = QStringLiteral("Could not allocate RGB storage for a resized video frame.");
+            return false;
+        }
+
+        const int bufferSize = av_image_get_buffer_size(
+            AV_PIX_FMT_RGB24, sourceWidth, sourceHeight, 1);
+        if (bufferSize <= 0) {
+            mLastError = avOperationError(QStringLiteral("Could not size resized RGB frame storage"), bufferSize);
+            av_frame_free(&replacementFrame);
+            return false;
+        }
+
+        replacementBuffer = static_cast<uint8_t *>(av_malloc(static_cast<size_t>(bufferSize)));
+        if (!replacementBuffer) {
+            mLastError = QStringLiteral("Could not allocate %1 bytes for a resized RGB frame.").arg(bufferSize);
+            av_frame_free(&replacementFrame);
+            return false;
+        }
+
+        const int fillResult = av_image_fill_arrays(
+            replacementFrame->data, replacementFrame->linesize, replacementBuffer,
+            AV_PIX_FMT_RGB24, sourceWidth, sourceHeight, 1);
+        if (fillResult < 0) {
+            mLastError = avOperationError(QStringLiteral("Could not initialize resized RGB frame storage"), fillResult);
+            av_free(replacementBuffer);
+            av_frame_free(&replacementFrame);
+            return false;
+        }
+    }
+
+    if (!setupSwsContext(sourceFormat, sourceWidth, sourceHeight, AV_PIX_FMT_RGB24)) {
+        if (replacementBuffer) av_free(replacementBuffer);
+        if (replacementFrame) av_frame_free(&replacementFrame);
+        return false;
+    }
+
+    if (!dimensionsMatch) {
+        if (mBuffer) av_free(mBuffer);
+        if (mFrameRGB) av_frame_free(&mFrameRGB);
+        mBuffer = replacementBuffer;
+        mFrameRGB = replacementFrame;
+        mWidth = sourceWidth;
+        mHeight = sourceHeight;
+    }
+    return true;
+}
+
+bool VDQtVideoDecoder::resetDecoderToStart() {
+    if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
+
+    const int64_t timestamp = mStreamStartTimestamp == AV_NOPTS_VALUE ? 0 : mStreamStartTimestamp;
+    int result = avformat_seek_file(
+        mFormatCtx, mVideoStreamIndex, std::numeric_limits<int64_t>::min(),
+        timestamp, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (result < 0) {
+        result = av_seek_frame(mFormatCtx, mVideoStreamIndex, timestamp, AVSEEK_FLAG_BACKWARD);
+    }
+    if (result < 0) {
+        // Elementary-stream demuxers often cannot seek after find_stream_info()
+        // has consumed probe data. Reopen only the demuxer (without probing it a
+        // second time), retaining the decoder and presentation index.
+        AVFormatContext *replacementContext = nullptr;
+        const QByteArray pathBytes = mFilePath.toUtf8();
+        const int reopenResult = pathBytes.isEmpty()
+            ? AVERROR(EINVAL)
+            : avformat_open_input(&replacementContext, pathBytes.constData(), nullptr, nullptr);
+        const bool replacementValid = reopenResult >= 0
+            && replacementContext
+            && mVideoStreamIndex >= 0
+            && mVideoStreamIndex < static_cast<int>(replacementContext->nb_streams)
+            && replacementContext->streams[mVideoStreamIndex]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        if (replacementValid) {
+            avformat_close_input(&mFormatCtx);
+            mFormatCtx = replacementContext;
+            mCodecCtx->pkt_timebase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+            qWarning() << "[VDQtVideoDecoder] Demuxer is not seekable; reopened it at stream start.";
+        } else {
+            if (replacementContext) avformat_close_input(&replacementContext);
+            mLastError = avOperationError(
+                QStringLiteral("Could not seek or reopen the beginning of the video stream"),
+                reopenResult < 0 ? reopenResult : result);
+            return false;
+        }
+    }
+
+    avcodec_flush_buffers(mCodecCtx);
+    av_frame_unref(mFrame);
+    av_packet_unref(mPacket);
+    mPacketPending = false;
+    mDemuxEof = false;
+    mDrainSent = false;
+    mLastDecodeReachedEof = false;
+    mDiscardUntilKeyFrame = false;
+    mCurrentFrameIndex = -1;
+    mNextDecodeFrameIndex = 0;
+    return true;
+}
+
+bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
+    if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
+    if (frameIndex <= 0) return resetDecoderToStart();
+
+    int64_t targetTimestamp = AV_NOPTS_VALUE;
+    int anchorIndex = -1;
+
+    if (!mFrameIndex.isEmpty()) {
+        const int indexedCount = boundedFrameCount(mFrameIndex.size());
+        int candidate = std::min(frameIndex, indexedCount - 1);
+        while (candidate > 0 && (!mFrameIndex[candidate].keyFrame || mFrameIndex[candidate].timestamp == AV_NOPTS_VALUE)) {
+            --candidate;
+        }
+        // Only use the anchor if it is a known keyframe close to the target
+        if (candidate > 0 && mFrameIndex[candidate].timestamp != AV_NOPTS_VALUE) {
+            anchorIndex = candidate;
+            targetTimestamp = mFrameIndex[candidate].timestamp;
+        }
+    }
+
+    if (targetTimestamp == AV_NOPTS_VALUE) {
+        if (mFps > 0.0) {
+            const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+            const double targetSec = frameIndex / mFps;
+            targetTimestamp = static_cast<int64_t>(targetSec / av_q2d(timeBase));
+            if (mStreamStartTimestamp != AV_NOPTS_VALUE) {
+                targetTimestamp += mStreamStartTimestamp;
+            }
+        } else {
+            targetTimestamp = 0;
+        }
+    }
+
+    int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
+    if (result < 0) {
+        result = avformat_seek_file(
+            mFormatCtx, mVideoStreamIndex, 0, targetTimestamp, targetTimestamp, AVSEEK_FLAG_BACKWARD);
+    }
+    if (result < 0) {
+        return resetDecoderToStart();
+    }
+
+    avcodec_flush_buffers(mCodecCtx);
+    av_frame_unref(mFrame);
+    av_packet_unref(mPacket);
+    mPacketPending = false;
+    mDemuxEof = false;
+    mDrainSent = false;
+    mLastDecodeReachedEof = false;
+    mDiscardUntilKeyFrame = false;
+    mCurrentFrameIndex = (anchorIndex >= 0) ? (anchorIndex - 1) : -1;
+    mNextDecodeFrameIndex = (anchorIndex >= 0) ? anchorIndex : 0;
+    return true;
+}
+
+bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors) {
+    if (!mCodecCtx || !mFormatCtx || !mFrame || !mPacket) return false;
+
+    auto recordDecodeError = [&](const QString& operation, int error) {
+        if (decodeErrors) ++*decodeErrors;
+        mLastError = avOperationError(operation, error);
+        qWarning() << "[VDQtVideoDecoder]" << mLastError;
+    };
+
+    for (;;) {
+        const int receiveResult = avcodec_receive_frame(mCodecCtx, mFrame);
+        if (receiveResult == 0) {
+            mLastDecodeReachedEof = false;
+            return true;
+        }
+        if (receiveResult == AVERROR_EOF) {
+            mLastDecodeReachedEof = true;
+            updateFrameCountAtEndOfStream();
+            return false;
+        }
+        if (receiveResult != AVERROR(EAGAIN)) {
+            recordDecodeError(QStringLiteral("Video decoder could not produce a frame"), receiveResult);
+            avcodec_flush_buffers(mCodecCtx);
+            mPacketPending = false;
+            av_packet_unref(mPacket);
+            if (mErrorMode == 1) mDiscardUntilKeyFrame = true;
+        }
+
+        if (mPacketPending) {
+            const int sendResult = avcodec_send_packet(mCodecCtx, mPacket);
+            if (sendResult == AVERROR(EAGAIN)) {
+                // The packet is deliberately retained. receive_frame() will be called
+                // again before another input packet is read.
+                continue;
+            }
+
+            mPacketPending = false;
+            av_packet_unref(mPacket);
+            if (sendResult == 0) continue;
+            if (sendResult == AVERROR_EOF) {
+                mDemuxEof = true;
+                mDrainSent = true;
+                continue;
+            }
+
+            recordDecodeError(QStringLiteral("Video decoder rejected a packet"), sendResult);
+            if (mErrorMode == 1) {
+                avcodec_flush_buffers(mCodecCtx);
+                mDiscardUntilKeyFrame = true;
+            }
+            continue;
+        }
+
+        if (mDemuxEof) {
+            if (mDrainSent) {
+                // A successfully submitted drain packet must eventually produce frames
+                // or EOF. Treat an unexpected EAGAIN as EOF instead of spinning forever.
+                mLastDecodeReachedEof = true;
+                updateFrameCountAtEndOfStream();
+                return false;
+            }
+
+            const int drainResult = avcodec_send_packet(mCodecCtx, nullptr);
+            if (drainResult == AVERROR(EAGAIN)) continue;
+            if (drainResult == 0) {
+                mDrainSent = true;
+                continue;
+            }
+            if (drainResult == AVERROR_EOF) {
+                mDrainSent = true;
+                mLastDecodeReachedEof = true;
+                updateFrameCountAtEndOfStream();
+                return false;
+            }
+
+            recordDecodeError(QStringLiteral("Video decoder could not be drained"), drainResult);
+            mLastDecodeReachedEof = true;
+            updateFrameCountAtEndOfStream();
+            return false;
+        }
+
+        const int readResult = av_read_frame(mFormatCtx, mPacket);
+        if (readResult < 0) {
+            if (readResult != AVERROR_EOF) {
+                recordDecodeError(QStringLiteral("Could not read the next media packet"), readResult);
+            }
+            av_packet_unref(mPacket);
+            mDemuxEof = true;
+            continue;
+        }
+
+        if (mPacket->stream_index != mVideoStreamIndex) {
+            av_packet_unref(mPacket);
+            continue;
+        }
+
+        if (mDiscardUntilKeyFrame && !(mPacket->flags & AV_PKT_FLAG_KEY)) {
+            av_packet_unref(mPacket);
+            continue;
+        }
+        if (mDiscardUntilKeyFrame) {
+            avcodec_flush_buffers(mCodecCtx);
+            mDiscardUntilKeyFrame = false;
+        }
+
+        mPacketPending = true;
+    }
+}
+
+int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint) const {
+    if (timestamp == AV_NOPTS_VALUE || mFrameIndex.isEmpty()) return -1;
+
+    const int indexedCount = boundedFrameCount(mFrameIndex.size());
+    hint = std::clamp(hint, 0, indexedCount - 1);
+    for (int distance = 0; distance < indexedCount; ++distance) {
+        const int after = hint + distance;
+        if (after < indexedCount && mFrameIndex[after].timestamp == timestamp) return after;
+        const int before = hint - distance;
+        if (distance && before >= 0 && mFrameIndex[before].timestamp == timestamp) return before;
+    }
+    return -1;
+}
+
+int VDQtVideoDecoder::registerDecodedFrame() {
+    int64_t timestamp = mFrame->best_effort_timestamp;
+    if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
+
+    int frameIndex = mNextDecodeFrameIndex;
+    if (timestamp != AV_NOPTS_VALUE && mFps > 0.0 && mFormatCtx && mVideoStreamIndex >= 0) {
+        int64_t origin = mStreamStartTimestamp;
+        if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE) {
+            origin = mFrameIndex.front().timestamp;
+        }
+        if (origin == AV_NOPTS_VALUE) origin = 0;
+        const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+        const double sec = static_cast<double>(timestamp - origin) * av_q2d(timeBase);
+        const int calcIndex = std::max(0, static_cast<int>(std::round(sec * mFps)));
+        frameIndex = calcIndex;
+    }
+
+    const int indexedCount = boundedFrameCount(mFrameIndex.size());
+    if (frameIndex > indexedCount) {
+        mFrameIndex.resize(frameIndex);
+    }
+
+    FrameIndexEntry entry;
+    entry.timestamp = timestamp;
+    entry.duration = mFrame->duration;
+    entry.keyFrame = (mFrame->flags & AV_FRAME_FLAG_KEY) != 0;
+
+    if (frameIndex == mFrameIndex.size()) {
+        mFrameIndex.append(entry);
+    } else if (frameIndex < mFrameIndex.size()) {
+        FrameIndexEntry& indexedEntry = mFrameIndex[frameIndex];
+        if (indexedEntry.timestamp == AV_NOPTS_VALUE) indexedEntry.timestamp = entry.timestamp;
+        if (indexedEntry.duration <= 0) indexedEntry.duration = entry.duration;
+        indexedEntry.keyFrame = indexedEntry.keyFrame || entry.keyFrame;
+    }
+
+    mCurrentFrameIndex = frameIndex;
+    mNextDecodeFrameIndex = frameIndex + 1;
+    return frameIndex;
+}
+
+void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
+    if (mFrameIndex.isEmpty()) return;
+    mFrameCount = boundedFrameCount(mFrameIndex.size());
+    mFrameCountStatus = FrameCountStatus::Exact;
 }
 
 QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
     if (!mIsOpen || frameIndex < 0) return QImage();
 
-    frameIndex = std::min(frameIndex, mFrameCount - 1);
-
-    // Native AviSynth+ C-API script frame rendering
-    if (mIsAvsNative) {
-        if (QImage *cached = mFrameCache.object(frameIndex)) {
-            return *cached;
-        }
-        QImage img = renderAvsFrame(frameIndex);
-        if (!img.isNull()) {
-            mFrameCache.insert(frameIndex, new QImage(img));
-        }
-        return img;
+    if (mFrameCountStatus == FrameCountStatus::Exact
+        && (mFrameCount <= 0 || frameIndex >= mFrameCount)) {
+        return QImage();
     }
 
-    // Synthetic script (e.g. ColorBars, BlankClip, Version) generator preview
+    if (QImage *cached = mFrameCache.object(frameIndex)) return *cached;
+
+    if (mIsAvsNative) {
+        QImage image = renderAvsFrame(frameIndex);
+        if (!image.isNull()) cacheFrame(frameIndex, image);
+        return image;
+    }
+
     if (mIsSyntheticScript) {
         return generateSyntheticFrame(frameIndex);
     }
 
-    // Instant cache lookup for zero-latency timeline scrubbing
-    if (QImage *cached = mFrameCache.object(frameIndex)) {
-        return *cached;
+    if (!mFormatCtx || !mCodecCtx || !mFrame || !mFrameRGB || mVideoStreamIndex < 0) {
+        return QImage();
     }
 
     AVStream *videoStream = mFormatCtx->streams[mVideoStreamIndex];
-
-    // Calculate target timestamp (PTS) in stream time_base
-    double targetSec = frameIndex / mFps;
+    double targetSec = mFps > 0.0 ? (frameIndex / mFps) : 0.0;
     int64_t targetPts = static_cast<int64_t>(targetSec / av_q2d(videoStream->time_base));
 
-    // If seeking backward or jumping non-sequentially, seek to keyframe first
+    // Direct, fast seek on non-sequential jump or seek backward
     if (frameIndex != mCurrentFrameIndex + 1 || frameIndex == 0) {
         av_seek_frame(mFormatCtx, mVideoStreamIndex, targetPts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(mCodecCtx);
+        mCurrentFrameIndex = -1;
     }
 
-    AVPacket packet;
-    bool frameDecoded = false;
-    QImage resultImage;
+    AVPacket *packet = mPacket ? mPacket : av_packet_alloc();
+    if (!mPacket) mPacket = packet;
 
-    while (av_read_frame(mFormatCtx, &packet) >= 0) {
-        if (packet.stream_index == mVideoStreamIndex) {
-            int ret = avcodec_send_packet(mCodecCtx, &packet);
+    QImage resultImage;
+    bool frameDecoded = false;
+
+    while (av_read_frame(mFormatCtx, packet) >= 0) {
+        if (packet->stream_index == mVideoStreamIndex) {
+            int ret = avcodec_send_packet(mCodecCtx, packet);
             if (ret >= 0) {
                 while (avcodec_receive_frame(mCodecCtx, mFrame) == 0) {
                     int64_t currentPts = mFrame->pts;
@@ -505,34 +1259,37 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
                         currentPts = mFrame->best_effort_timestamp;
                     }
 
-                    // Convert current frame PTS to frame index
                     int currentFrameIndex = -1;
                     if (currentPts != AV_NOPTS_VALUE) {
                         double currentSec = currentPts * av_q2d(videoStream->time_base);
                         currentFrameIndex = static_cast<int>(std::round(currentSec * mFps));
                     }
 
-                    // Decode & convert to RGB
+                    int decodedIdx = (currentFrameIndex >= 0) ? currentFrameIndex : (mCurrentFrameIndex + 1);
+                    mCurrentFrameIndex = decodedIdx;
+
+                    if (!ensureConversionResources(mFrame)) {
+                        av_packet_unref(packet);
+                        return QImage();
+                    }
+
                     sws_scale(
                         mSwsCtx,
                         (const uint8_t *const *)mFrame->data,
                         mFrame->linesize,
                         0,
-                        mHeight,
+                        mFrame->height > 0 ? mFrame->height : mHeight,
                         mFrameRGB->data,
                         mFrameRGB->linesize
                     );
 
-                    int decodedIdx = (currentFrameIndex >= 0) ? currentFrameIndex : (mCurrentFrameIndex + 1);
-                    mCurrentFrameIndex = decodedIdx;
+                    const QImage frameView(
+                        mFrameRGB->data[0], mWidth, mHeight, mFrameRGB->linesize[0], QImage::Format_RGB888);
+                    QImage deepCopy = frameView.copy();
 
-                    QImage img(mBuffer, mWidth, mHeight, mFrameRGB->linesize[0], QImage::Format_RGB888);
-                    QImage deepCopy = img.copy();
+                    cacheFrame(decodedIdx, deepCopy);
 
-                    // Insert decoded frames into LRU cache as we encounter them
-                    mFrameCache.insert(decodedIdx, new QImage(deepCopy));
-
-                    if (decodedIdx >= frameIndex || currentPts >= targetPts || mCurrentFrameIndex == frameIndex) {
+                    if (decodedIdx >= frameIndex || (currentPts != AV_NOPTS_VALUE && currentPts >= targetPts) || mCurrentFrameIndex == frameIndex) {
                         resultImage = deepCopy;
                         frameDecoded = true;
                         break;
@@ -540,11 +1297,116 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
                 }
             }
         }
-        av_packet_unref(&packet);
+        av_packet_unref(packet);
         if (frameDecoded) break;
     }
 
     return resultImage;
+}
+
+bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {
+    if (!mIsOpen || frameIndex < 0) return false;
+    if (mIsAvsNative || mIsSyntheticScript) {
+        return mFrameCountStatus != FrameCountStatus::Exact || frameIndex < mFrameCount;
+    }
+    if (frameIndex >= 0 && frameIndex < mFrameIndex.size()) {
+        return mFrameIndex[frameIndex].keyFrame;
+    }
+    return false;
+}
+
+int VDQtVideoDecoder::getPreviousKeyFrame(int frameIndex) {
+    if (!mIsOpen) return -1;
+    if (mIsAvsNative || mIsSyntheticScript) return std::max(0, frameIndex - 1);
+
+    int candidate = std::min(frameIndex - 1, boundedFrameCount(mFrameIndex.size()) - 1);
+    for (; candidate >= 0; --candidate) {
+        if (mFrameIndex[candidate].keyFrame) return candidate;
+    }
+    int step = std::max(1, static_cast<int>(std::round(mFps > 0 ? mFps : 30.0)));
+    return std::max(0, frameIndex - step);
+}
+
+int VDQtVideoDecoder::getNextKeyFrame(int frameIndex) {
+    if (!mIsOpen) return -1;
+    if (mIsAvsNative || mIsSyntheticScript) {
+        if (mFrameCountStatus == FrameCountStatus::Exact && mFrameCount > 0) {
+            return std::min(frameIndex + 1, mFrameCount - 1);
+        }
+        return frameIndex + 1;
+    }
+
+    int candidate = std::max(0, frameIndex + 1);
+    while (candidate < boundedFrameCount(mFrameIndex.size())) {
+        if (mFrameIndex[candidate].keyFrame) return candidate;
+        ++candidate;
+    }
+
+    int step = std::max(1, static_cast<int>(std::round(mFps > 0 ? mFps : 30.0)));
+    int maxFrame = mFrameCount > 0 ? mFrameCount - 1 : (frameIndex + step);
+    return std::min(maxFrame, frameIndex + step);
+}
+
+double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
+    const double unavailable = std::numeric_limits<double>::quiet_NaN();
+    if (!mIsOpen || frameIndex < 0) return unavailable;
+    if (mIsAvsNative || mIsSyntheticScript) {
+        return mFps > 0.0 ? frameIndex / mFps : unavailable;
+    }
+
+    if (frameIndex >= 0 && frameIndex < mFrameIndex.size()) {
+        const FrameIndexEntry& entry = mFrameIndex[frameIndex];
+        if (entry.timestamp != AV_NOPTS_VALUE && mVideoStreamIndex >= 0 && mFormatCtx) {
+            int64_t origin = mStreamStartTimestamp;
+            if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE) {
+                origin = mFrameIndex.front().timestamp;
+            }
+            if (origin == AV_NOPTS_VALUE) origin = 0;
+            const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+            return static_cast<double>(entry.timestamp - origin) * av_q2d(timeBase);
+        }
+    }
+
+    return mFps > 0.0 ? (frameIndex / mFps) : unavailable;
+}
+
+double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
+    const double unavailable = std::numeric_limits<double>::quiet_NaN();
+    if (!mIsOpen || frameIndex < 0) return unavailable;
+    if (mIsAvsNative || mIsSyntheticScript) return mFps > 0.0 ? 1.0 / mFps : unavailable;
+
+    if (frameIndex >= 0 && frameIndex < mFrameIndex.size() && mVideoStreamIndex >= 0 && mFormatCtx) {
+        const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+        if (mFrameIndex[frameIndex].duration > 0) {
+            return static_cast<double>(mFrameIndex[frameIndex].duration) * av_q2d(timeBase);
+        }
+    }
+
+    return mFps > 0.0 ? 1.0 / mFps : unavailable;
+}
+
+void VDQtVideoDecoder::applyErrorMode() {
+    if (!mCodecCtx) return;
+
+    if (mErrorMode == 1) {
+        mCodecCtx->err_recognition = 0;
+        mCodecCtx->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+        mCodecCtx->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
+    } else if (mErrorMode == 2) {
+        mCodecCtx->err_recognition = AV_EF_IGNORE_ERR;
+        mCodecCtx->error_concealment = 0;
+        mCodecCtx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+    } else {
+        mCodecCtx->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER;
+        mCodecCtx->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+        mCodecCtx->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
+    }
+}
+
+void VDQtVideoDecoder::setErrorMode(int errorMode) {
+    mErrorMode = std::clamp(errorMode, 0, 2);
+    mDiscardUntilKeyFrame = false;
+    applyErrorMode();
 }
 
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
@@ -557,7 +1419,6 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
     res.totalFrames = mFrameCount;
 
     if (mIsAvsNative && mAvsClip) {
-        bool lastValid = true;
         for (int i = 0; i < mFrameCount; ++i) {
             if (progressCallback && !progressCallback(i + 1, mFrameCount)) {
                 res.cancelled = true;
@@ -568,10 +1429,8 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
             if (!frame) {
                 res.badFrames++;
                 res.maskedFrames++;
-                lastValid = false;
             } else {
                 avs_release_video_frame(frame);
-                lastValid = true;
             }
         }
         return res;
@@ -592,65 +1451,54 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
         return res;
     }
 
-    // Seek to beginning and flush decoder
-    av_seek_frame(mFormatCtx, mVideoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(mCodecCtx);
-
-    AVStream *videoStream = mFormatCtx->streams[mVideoStreamIndex];
-    AVPacket packet;
-    int decodedCount = 0;
-    bool lastValid = true;
-
-    while (av_read_frame(mFormatCtx, &packet) >= 0) {
-        if (packet.stream_index == mVideoStreamIndex) {
-            bool isKey = (packet.flags & AV_PKT_FLAG_KEY) != 0;
-            if (isKey) res.keyFrames++;
-
-            int sendRet = avcodec_send_packet(mCodecCtx, &packet);
-            if (sendRet < 0) {
-                res.badFrames++;
-                res.maskedFrames++;
-                lastValid = false;
-            } else {
-                while (avcodec_receive_frame(mCodecCtx, mFrame) == 0) {
-                    decodedCount++;
-                    if (progressCallback && !progressCallback(decodedCount, mFrameCount)) {
-                        res.cancelled = true;
-                        av_packet_unref(&packet);
-                        goto scan_done;
-                    }
-
-                    if (!lastValid && !isKey) {
-                        res.maskedFrames++;
-                    } else {
-                        lastValid = true;
-                    }
-                }
-            }
-        }
-        av_packet_unref(&packet);
+    if (!resetDecoderToStart()) {
+        res.errorMessage = mLastError;
+        return res;
     }
 
-    // Flush remaining frames from codec
-    avcodec_send_packet(mCodecCtx, nullptr);
-    while (avcodec_receive_frame(mCodecCtx, mFrame) == 0) {
-        decodedCount++;
-        if (progressCallback && !progressCallback(decodedCount, mFrameCount)) {
+    // Rebuild a contiguous presentation-order index while scanning. This makes
+    // the decoded total exact and includes frames emitted only during decoder drain.
+    mFrameIndex.clear();
+    mCurrentFrameIndex = -1;
+    mNextDecodeFrameIndex = 0;
+    clearCache();
+
+    int decodedCount = 0;
+    for (;;) {
+        int decodeErrors = 0;
+        if (!decodeNextFrame(&decodeErrors)) {
+            res.badFrames += decodeErrors;
+            res.maskedFrames += decodeErrors;
+            break;
+        }
+
+        res.badFrames += decodeErrors;
+        res.maskedFrames += decodeErrors;
+        const int decodedIndex = registerDecodedFrame();
+        decodedCount = decodedIndex + 1;
+        if (mFrame->flags & AV_FRAME_FLAG_KEY) ++res.keyFrames;
+        if (mFrame->flags & AV_FRAME_FLAG_CORRUPT) {
+            ++res.badFrames;
+            ++res.maskedFrames;
+        }
+
+        const int progressTotal = mFrameCount > 0 ? mFrameCount : decodedCount;
+        if (progressCallback && !progressCallback(decodedCount, progressTotal)) {
             res.cancelled = true;
             break;
         }
     }
 
-scan_done:
-    // Restore decoder state
-    av_seek_frame(mFormatCtx, mVideoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(mCodecCtx);
-    mCurrentFrameIndex = -1;
-    clearCache();
-
-    if (decodedCount > 0 && res.totalFrames < decodedCount) {
+    if (!res.cancelled) {
+        updateFrameCountAtEndOfStream();
+        res.totalFrames = mFrameCount;
+    } else if (res.totalFrames < decodedCount) {
         res.totalFrames = decodedCount;
     }
+
+    // Restore the interactive decoder to the beginning, retaining the timestamp index.
+    if (!resetDecoderToStart() && res.errorMessage.isEmpty()) res.errorMessage = mLastError;
+    clearCache();
 
     return res;
 }

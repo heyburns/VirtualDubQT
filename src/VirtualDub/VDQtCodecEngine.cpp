@@ -128,7 +128,6 @@ void VDQtCodecEngine::resetToDefaults() {
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
-#include <QStandardPaths>
 
 bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString *outError) const {
     QString id = codecId.trimmed().toLower();
@@ -136,18 +135,16 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
         return true;
     }
 
-    // Special case: MP3 can be encoded via libmp3lame or external lame CLI
+    // Video export invokes FFmpeg directly, so only an FFmpeg encoder counts as
+    // available here. Standalone command-line encoders are handled separately by
+    // the dedicated audio-export workflow.
     if (id == "libmp3lame" || id == "mp3") {
         if (avcodec_find_encoder_by_name("libmp3lame") != nullptr) {
-            return true;
-        }
-        if (!QStandardPaths::findExecutable("lame").isEmpty()) {
             return true;
         }
         if (outError) {
             *outError = QString("The MP3 audio encoder is not available on your system.\n\n"
                                 "• Your FFmpeg installation was built without 'libmp3lame' support.\n"
-                                "• The standalone 'lame' CLI tool was not found in your PATH.\n\n"
                                 "To resolve this:\n"
                                 "1. Select another audio codec (e.g. AAC, Opus, FLAC, or Uncompressed WAV).\n"
                                 "2. Or install/recompile FFmpeg with libmp3lame enabled.");
@@ -155,12 +152,9 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
         return false;
     }
 
-    // Special case: Opus (native 'opus' or external 'libopus' or 'opusenc')
+    // Special case: Opus (native 'opus' or external-library 'libopus' in FFmpeg)
     if (id == "libopus" || id == "opus") {
         if (avcodec_find_encoder_by_name("opus") != nullptr || avcodec_find_encoder_by_name("libopus") != nullptr) {
-            return true;
-        }
-        if (!QStandardPaths::findExecutable("opusenc").isEmpty()) {
             return true;
         }
         if (outError) {
@@ -172,9 +166,9 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
         return false;
     }
 
-    // Special case: AAC (native 'aac' or 'libfdk_aac')
+    // AAC encoder names are not interchangeable in the FFmpeg command line.
     if (id == "aac" || id == "libfdk_aac") {
-        if (avcodec_find_encoder_by_name("aac") != nullptr || avcodec_find_encoder_by_name("libfdk_aac") != nullptr) {
+        if (avcodec_find_encoder_by_name(id.toUtf8().constData()) != nullptr) {
             return true;
         }
         if (outError) {
@@ -186,9 +180,10 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
         return false;
     }
 
-    // Special case: Vorbis (native 'vorbis' or 'libvorbis')
+    // The export pipeline requests libvorbis explicitly. FFmpeg's native
+    // experimental encoder is not a drop-in alias for that command line.
     if (id == "libvorbis" || id == "vorbis") {
-        if (avcodec_find_encoder_by_name("vorbis") != nullptr || avcodec_find_encoder_by_name("libvorbis") != nullptr) {
+        if (avcodec_find_encoder_by_name("libvorbis") != nullptr) {
             return true;
         }
         if (outError) {
@@ -225,6 +220,8 @@ bool VDQtCodecEngine::checkVideoEncoderAvailable(const QString &codecId, QString
     // Handle x265 variants
     if (id == "libx265_lossless") {
         id = "libx265";
+    } else if (id == "libx264_10bit") {
+        id = "libx264";
     }
 
     // Check direct encoder name
@@ -232,14 +229,6 @@ bool VDQtCodecEngine::checkVideoEncoderAvailable(const QString &codecId, QString
     if (codec != nullptr) {
         return true;
     }
-
-    // Check aliases
-    if (id == "libx264" && (avcodec_find_encoder_by_name("h264") != nullptr || avcodec_find_encoder_by_name("h264_nvenc") != nullptr || avcodec_find_encoder_by_name("h264_vaapi") != nullptr)) return true;
-    if (id == "libx265" && (avcodec_find_encoder_by_name("hevc") != nullptr || avcodec_find_encoder_by_name("hevc_nvenc") != nullptr || avcodec_find_encoder_by_name("hevc_vaapi") != nullptr)) return true;
-    if (id == "libvpx" && avcodec_find_encoder_by_name("vp8") != nullptr) return true;
-    if (id == "libvpx-vp9" && avcodec_find_encoder_by_name("vp9") != nullptr) return true;
-    if (id == "prores_ks" && (avcodec_find_encoder_by_name("prores") != nullptr || avcodec_find_encoder_by_name("prores_aw") != nullptr)) return true;
-    if (id == "huffyuv" && avcodec_find_encoder_by_name("ffvhuff") != nullptr) return true;
 
     if (outError) {
         *outError = QString("The video encoder '%1' is not available in your FFmpeg installation.\n\n"

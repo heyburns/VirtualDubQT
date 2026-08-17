@@ -9,6 +9,7 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QUrl>
+#include <QFile>
 #include <QFileInfo>
 #include <QSettings>
 #include <QProgressDialog>
@@ -19,12 +20,116 @@
 #include <QDBusReply>
 #include <QDBusConnection>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
+#include <QStandardPaths>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <limits>
+#include <sys/stat.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+namespace {
+
+bool pathsReferToSameFile(const QString& firstPath, const QString& secondPath) {
+    if (firstPath.isEmpty() || secondPath.isEmpty()) return false;
+    const QFileInfo first(firstPath);
+    const QFileInfo second(secondPath);
+    if (first.absoluteFilePath() == second.absoluteFilePath()) return true;
+
+    struct stat firstStatus = {};
+    struct stat secondStatus = {};
+    const QByteArray firstName = QFile::encodeName(first.absoluteFilePath());
+    const QByteArray secondName = QFile::encodeName(second.absoluteFilePath());
+    return ::stat(firstName.constData(), &firstStatus) == 0
+        && ::stat(secondName.constData(), &secondStatus) == 0
+        && firstStatus.st_dev == secondStatus.st_dev
+        && firstStatus.st_ino == secondStatus.st_ino;
+}
+
+QString aliasedLoadedSource(const QString& outputPath,
+                            const VDQtVideoDecoder& decoder,
+                            const VDQtAudioPlayer& audioPlayer) {
+    QStringList protectedSources;
+    protectedSources.append(decoder.getFilePath());
+    protectedSources.append(audioPlayer.getSourcePath());
+    const QString scriptPath = decoder.getFilePath();
+    if (scriptPath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
+        || scriptPath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive)) {
+        protectedSources.append(VDQtVideoDecoder::parseScriptSources(scriptPath));
+    }
+
+    for (const QString& sourcePath : protectedSources) {
+        if (pathsReferToSameFile(outputPath, sourcePath))
+            return sourcePath;
+    }
+    return {};
+}
+
+bool scriptOutputWouldReplaceExisting(const QString& outputPath,
+                                      const VDQtVideoDecoder& decoder) {
+    const QString sourcePath = decoder.getFilePath();
+    const bool scriptBacked = decoder.isAvsNative()
+        || sourcePath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
+        || sourcePath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive);
+    if (!scriptBacked) return false;
+    const QFileInfo target(outputPath);
+    return target.exists() || target.isSymLink();
+}
+
+QString stagedOutputTemplate(const QString& outputPath) {
+    const QFileInfo target(outputPath);
+    QString baseName = target.completeBaseName();
+    if (baseName.isEmpty()) baseName = QStringLiteral("audio");
+    QString pattern = target.dir().filePath(QStringLiteral(".%1.XXXXXX").arg(baseName));
+    const QString suffix = target.completeSuffix();
+    if (!suffix.isEmpty()) pattern += QLatin1Char('.') + suffix;
+    return pattern;
+}
+
+bool replaceWithStagedFile(const QString& stagedPath, const QString& outputPath) {
+    if (QFileInfo(stagedPath).size() <= 0) return false;
+    const QFileInfo existing(outputPath);
+    const QFile::Permissions permissions = existing.exists()
+        ? existing.permissions()
+        : QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup | QFile::ReadOther;
+    QFile::setPermissions(stagedPath, permissions);
+    const QByteArray stagedName = QFile::encodeName(stagedPath);
+    const QByteArray outputName = QFile::encodeName(outputPath);
+    return std::rename(stagedName.constData(), outputName.constData()) == 0;
+}
+
+} // namespace
+
 VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     : QMainWindow(parent) {
+    QSettings settings("VirtualDub", "VirtualDub_Port");
+    mDecompressionFormatConfig.formatName = settings.value(
+        "decoder/decompressionFormat", QStringLiteral("Autoselect")).toString();
+    if (mDecompressionFormatConfig.formatName != QStringLiteral("Autoselect")
+        && mDecompressionFormatConfig.formatName != QStringLiteral("RGB24")) {
+        mDecompressionFormatConfig.formatName = QStringLiteral("Autoselect");
+    }
+    mDecompressionFormatConfig.colorSpace = settings.value("decoder/colorSpace", 0).toInt();
+    if (mDecompressionFormatConfig.colorSpace < 0 || mDecompressionFormatConfig.colorSpace > 2) {
+        mDecompressionFormatConfig.colorSpace = 0;
+    }
+    mDecompressionFormatConfig.componentRange = settings.value("decoder/componentRange", 0).toInt();
+    if (mDecompressionFormatConfig.componentRange < 0 || mDecompressionFormatConfig.componentRange > 2) {
+        mDecompressionFormatConfig.componentRange = 0;
+    }
+    mDecoderErrorModeConfig.errorMode = settings.value("decoder/errorMode", 0).toInt();
+    if (mDecoderErrorModeConfig.errorMode < 0 || mDecoderErrorModeConfig.errorMode > 2) {
+        mDecoderErrorModeConfig.errorMode = 0;
+    }
+    mVideoDecoder.setDecompressionConfig(
+        mDecompressionFormatConfig.formatName,
+        mDecompressionFormatConfig.colorSpace,
+        mDecompressionFormatConfig.componentRange);
+    mVideoDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
+
     setWindowTitle("VirtualDubQt v0.1");
     resize(1120, 780);
     setAcceptDrops(true);
@@ -82,6 +187,11 @@ void VDQtMainWindow::applyTheme() {
 
 void VDQtMainWindow::createMenus() {
     QMenuBar *bar = menuBar();
+    const auto disableIncomplete = [](QAction *action) {
+        action->setEnabled(false);
+        action->setToolTip("This feature is not implemented in the native Linux port yet.");
+        return action;
+    };
 
     // -------------------------------------------------------------------------
     // FILE MENU (Matching VirtualDub Screenshot)
@@ -90,15 +200,15 @@ void VDQtMainWindow::createMenus() {
 
     actFileOpen = mFileMenu->addAction("&Open video file...", this, &VDQtMainWindow::onFileOpen, QKeySequence::Open);
     actFileReopen = mFileMenu->addAction("&Reopen video file", this, &VDQtMainWindow::onFileReopen, QKeySequence(Qt::Key_F2));
-    mFileMenu->addAction("Append video segment...", this, &VDQtMainWindow::onFileAppendSegment);
+    disableIncomplete(mFileMenu->addAction("Append video segment...", this, &VDQtMainWindow::onFileAppendSegment));
     actFileClose = mFileMenu->addAction("&Close video file", this, &VDQtMainWindow::onFileClose, QKeySequence::Close);
     mFileMenu->addAction("File &Information...", this, &VDQtMainWindow::onFileInformation);
-    mFileMenu->addAction("Set text information...", this, &VDQtMainWindow::onFileSetTextInformation);
+    disableIncomplete(mFileMenu->addAction("Set text information...", this, &VDQtMainWindow::onFileSetTextInformation));
     mFileMenu->addSeparator();
 
-    mFileMenu->addAction("Load Project...", this, &VDQtMainWindow::onFileLoadProject);
-    mFileMenu->addAction("Save Project", this, &VDQtMainWindow::onFileSaveProject);
-    mFileMenu->addAction("Save Project As...", this, &VDQtMainWindow::onFileSaveProjectAs);
+    disableIncomplete(mFileMenu->addAction("Load Project...", this, &VDQtMainWindow::onFileLoadProject));
+    disableIncomplete(mFileMenu->addAction("Save Project", this, &VDQtMainWindow::onFileSaveProject));
+    disableIncomplete(mFileMenu->addAction("Save Project As...", this, &VDQtMainWindow::onFileSaveProjectAs));
     mFileMenu->addSeparator();
 
     actFileSaveAVI = mFileMenu->addAction("Save video...", this, &VDQtMainWindow::onFileSaveAVI, QKeySequence(Qt::Key_F7));
@@ -106,21 +216,22 @@ void VDQtMainWindow::createMenus() {
     mFileMenu->addAction("Run video analysis pass", this, &VDQtMainWindow::onFileRunAnalysisPass);
 
     QMenu *mExport = mFileMenu->addMenu("Export");
-    mExport->addAction("Raw video...", this, &VDQtMainWindow::onFileExportRawVideo);
+    disableIncomplete(mExport->addAction("Raw video...", this, &VDQtMainWindow::onFileExportRawVideo));
     mExport->addAction("Image sequence...", this, &VDQtMainWindow::onFileSaveImageSequence);
-    mExport->addAction("Animated GIF...", this, &VDQtMainWindow::onFileExportAnimatedGIF);
+    disableIncomplete(mExport->addAction("Animated GIF...", this, &VDQtMainWindow::onFileExportAnimatedGIF));
 
     QMenu *mBatch = mFileMenu->addMenu("Queue batch operation");
     mBatch->addAction("Batch wizard...", this, &VDQtMainWindow::onFileBatchWizard);
     mBatch->addAction("Save video...", this, &VDQtMainWindow::onFileSaveAVI);
     mBatch->addAction("Save audio...", this, &VDQtMainWindow::onFileSaveAudio);
+    disableIncomplete(mBatch->menuAction());
 
-    mFileMenu->addAction("Job control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4));
-    mFileMenu->addAction("Start frame server...", this, &VDQtMainWindow::onFileStartFrameServer);
+    disableIncomplete(mFileMenu->addAction("Job control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4)));
+    disableIncomplete(mFileMenu->addAction("Start frame server...", this, &VDQtMainWindow::onFileStartFrameServer));
     mFileMenu->addSeparator();
 
-    mFileMenu->addAction("Load processing settings...", this, &VDQtMainWindow::onFileLoadProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_L));
-    mFileMenu->addAction("Save processing settings...", this, &VDQtMainWindow::onFileSaveProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_S));
+    disableIncomplete(mFileMenu->addAction("Load processing settings...", this, &VDQtMainWindow::onFileLoadProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_L)));
+    disableIncomplete(mFileMenu->addAction("Save processing settings...", this, &VDQtMainWindow::onFileSaveProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_S)));
     mFileMenu->addAction("Run script...", this, &VDQtMainWindow::onFileRunScript);
     mFileMenu->addSeparator();
 
@@ -178,6 +289,8 @@ void VDQtMainWindow::createMenus() {
 
     actVideoFastRecompress = mVideo->addAction("Fast recompress", this, &VDQtMainWindow::onVideoModeFastRecompress);
     actVideoFastRecompress->setCheckable(true);
+    actVideoFastRecompress->setEnabled(false);
+    actVideoFastRecompress->setToolTip("Native-planar fast recompress is not implemented yet; use Normal recompress.");
     grpVideoMode->addAction(actVideoFastRecompress);
 
     actVideoNormalRecompress = mVideo->addAction("Normal recompress", this, &VDQtMainWindow::onVideoModeNormalRecompress);
@@ -194,10 +307,14 @@ void VDQtMainWindow::createMenus() {
     actVideoSmartRendering = mVideo->addAction("Smart rendering", this, &VDQtMainWindow::onVideoSmartRendering);
     actVideoSmartRendering->setCheckable(true);
     actVideoSmartRendering->setChecked(false);
+    actVideoSmartRendering->setEnabled(false);
+    actVideoSmartRendering->setToolTip("Smart rendering is not implemented in the native pipeline yet.");
 
     actVideoPreserveEmptyFrames = mVideo->addAction("Preserve empty frames", this, &VDQtMainWindow::onVideoPreserveEmptyFrames);
     actVideoPreserveEmptyFrames->setCheckable(true);
     actVideoPreserveEmptyFrames->setChecked(false);
+    actVideoPreserveEmptyFrames->setEnabled(false);
+    actVideoPreserveEmptyFrames->setToolTip("Empty-frame preservation is not implemented in the native pipeline yet.");
 
     mVideo->addSeparator();
 
@@ -226,13 +343,13 @@ void VDQtMainWindow::createMenus() {
     // OPTIONS MENU
     // -------------------------------------------------------------------------
     QMenu *mOptions = bar->addMenu("&Options");
-    mOptions->addAction("&Preferences...", this, &VDQtMainWindow::onOptionsPreferences);
+    disableIncomplete(mOptions->addAction("&Preferences...", this, &VDQtMainWindow::onOptionsPreferences));
 
     // -------------------------------------------------------------------------
     // TOOLS MENU
     // -------------------------------------------------------------------------
     QMenu *mTools = bar->addMenu("&Tools");
-    mTools->addAction("&Job Control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4));
+    disableIncomplete(mTools->addAction("&Job Control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4)));
 
     // -------------------------------------------------------------------------
     // HELP MENU
@@ -247,15 +364,22 @@ void VDQtMainWindow::createStatusBar() {
 
 bool VDQtMainWindow::openVideoFile(const QString& filePath) {
     if (filePath.isEmpty()) return false;
+    if (filePath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive)) {
+        QMessageBox::warning(this, "Unsupported Script",
+                             "Native VapourSynth script evaluation is not implemented yet. "
+                             "Use an AviSynth script or open the rendered media source directly.");
+        return false;
+    }
 
     onFileClose();
 
     if (mVideoDecoder.openFile(filePath)) {
-        bool audioLoaded = false;
         if (mVideoDecoder.isAvsNative()) {
-            audioLoaded = mAudioPlayer.openAvsClip(mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi());
-        }
-        if (!audioLoaded) {
+            // The native AviSynth clip is authoritative. In particular, do not
+            // resurrect audio from a parsed source file when the script has
+            // intentionally removed it (for example with KillAudio()).
+            mAudioPlayer.openAvsClip(mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi());
+        } else {
             QString mediaPath = filePath;
             if (filePath.endsWith(".avs", Qt::CaseInsensitive) || filePath.endsWith(".vpy", Qt::CaseInsensitive)) {
                 QString resolved = VDQtVideoDecoder::parseScriptSource(filePath);
@@ -268,10 +392,11 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
 
         mInputDisplay->setLabelText(QString("Loaded: %1").arg(filePath));
         mOutputDisplay->setLabelText(QString("Filtered Output: %1").arg(filePath));
-        mPositionControl->SetRange(0, mVideoDecoder.getFrameCount() - 1);
+        mPositionControl->SetRange(0, std::max(0, mVideoDecoder.getFrameCount() - 1));
         mPositionControl->SetPosition(0);
 
         updateFrameDisplay(0);
+        mPositionControl->SetFrameRate(VDFraction(mVideoDecoder.getFps()));
         autoFitWindowToVideo();
 
         setWindowTitle(QString("VirtualDubQt v0.1 - [%1]").arg(QFileInfo(filePath).fileName()));
@@ -338,7 +463,7 @@ void VDQtMainWindow::onFileOpen() {
         this,
         "Open Video / Script File",
         QString(),
-        "AviSynth / VapourSynth Scripts (*.avs *.AVS *.vpy *.VPY);;All Video & Media Files (*.avi *.mp4 *.mkv *.mov *.webm *.flv *.wmv *.avs *.vpy *.AVS *.VPY);;All Files (*)"
+        "AviSynth Scripts (*.avs *.AVS);;All Video & Media Files (*.avi *.mp4 *.mkv *.mov *.webm *.flv *.wmv *.avs *.AVS);;All Files (*)"
     );
 
     if (!fileName.isEmpty()) {
@@ -355,11 +480,11 @@ void VDQtMainWindow::onFileClose() {
     mAudioPlayer.close();
     QCoreApplication::processEvents();
     mVideoDecoder.close();
-    VDQtFilterSystem::instance().clearFilters();
     mInputDisplay->clearDisplay();
     mOutputDisplay->clearDisplay();
     mPositionControl->SetRange(0, 0);
     mPositionControl->SetPosition(0);
+    mPositionControl->SetSelection(0, 0);
     statusBar()->showMessage("No Video File Loaded");
     VDLogWindow::instance(this)->appendLog("[File] Closed current video session.");
 }
@@ -414,11 +539,15 @@ void VDQtMainWindow::onFileSaveAudio() {
         return;
     }
 
+    // Export callbacks pump the Qt event loop. Quiesce playback first so the
+    // shared decoder/AviSynth clip cannot be sought or pulled concurrently.
+    mPlaybackTimer->stop();
+    mAudioPlayer.stop();
+
     if (!mAudioPlayer.hasAudio()) {
         if (mVideoDecoder.isAvsNative() && mVideoDecoder.getAvsClip() && mVideoDecoder.getAvsVi()) {
             mAudioPlayer.openAvsClip(mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi());
-        }
-        if (!mAudioPlayer.hasAudio()) {
+        } else {
             QString srcFile = mVideoDecoder.getFilePath();
             if (srcFile.endsWith(".avs", Qt::CaseInsensitive) || srcFile.endsWith(".vpy", Qt::CaseInsensitive)) {
                 QString resolved = VDQtVideoDecoder::parseScriptSource(srcFile);
@@ -448,6 +577,34 @@ void VDQtMainWindow::onFileSaveAudio() {
         QString outPath = dlg.getSelectedFilePath();
         VDAudioCodecConfig audioCfg = dlg.getAudioConfig();
 
+        if (!aliasedLoadedSource(outPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+            QMessageBox::critical(this, "Unsafe Output Path",
+                                  "The output file is a currently loaded source. Choose a different path.");
+            return;
+        }
+
+        const QFileInfo audioTarget(outPath);
+        if (scriptOutputWouldReplaceExisting(outPath, mVideoDecoder)) {
+            QMessageBox::critical(
+                this, "Unsafe Script Output Path",
+                "An existing destination cannot be replaced while an AviSynth script is loaded, "
+                "because scripts can compute source paths dynamically. Choose a new output path.");
+            return;
+        }
+        if (audioTarget.exists() || audioTarget.isSymLink()) {
+            const auto answer = QMessageBox::warning(
+                this, "Replace Existing Audio File?",
+                QString("The destination already exists:\n%1\n\nReplace it after the new file is encoded successfully?")
+                    .arg(outPath),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+        }
+
+        if (mPositionControl->hasSelection()
+            && !ensureExactFrameRange(QStringLiteral("audio selection range"))) {
+            return;
+        }
+
         if (dlg.isAddToJobQueue()) {
             VDLogWindow::instance(this)->appendLog(QString("[Batch] Added audio export job to queue: %1").arg(outPath));
             statusBar()->showMessage("Audio export job added to queue.");
@@ -455,23 +612,59 @@ void VDQtMainWindow::onFileSaveAudio() {
             return;
         }
 
+        QTemporaryFile stagedOutput(stagedOutputTemplate(outPath));
+        stagedOutput.setAutoRemove(true);
+        if (!stagedOutput.open()) {
+            QMessageBox::critical(this, "Save Audio Error",
+                                  "A temporary output could not be created in the destination directory.");
+            return;
+        }
+        const QString workingOutputPath = stagedOutput.fileName();
+        stagedOutput.close();
+
         QProgressDialog progress("Exporting audio stream...", "Cancel", 0, 100, this);
         progress.setWindowTitle("Audio Export (Full Processing)");
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
         progress.setValue(0);
 
-        int totalFrames = mVideoDecoder.getFrameCount();
-        int startFrame = mPositionControl->getEffectiveStartFrame(totalFrames);
-        int endFrame = mPositionControl->getEffectiveEndFrame(totalFrames);
-
         double fps = mVideoDecoder.getFps();
         if (fps <= 0) fps = 29.97;
         int sampleRate = mAudioPlayer.getSampleRate();
         if (sampleRate <= 0) sampleRate = 48000;
 
-        int64_t startSample = (int64_t)std::round(startFrame * ((double)sampleRate / fps));
-        int64_t sampleCount = (int64_t)std::round((endFrame - startFrame + 1) * ((double)sampleRate / fps));
+        int64_t startSample = 0;
+        int64_t sampleCount = -1;
+        if (mPositionControl->hasSelection()) {
+            const qint64 requestedStart = mPositionControl->GetSelectionStart();
+            const qint64 requestedEndExclusive = mPositionControl->GetSelectionEnd();
+            const int exactFrameCount = mVideoDecoder.getFrameCount();
+            if (requestedStart < 0 || requestedStart >= exactFrameCount
+                || requestedEndExclusive <= requestedStart) {
+                QMessageBox::critical(
+                    this, "Audio Export Range Error",
+                    QString("The requested selection starts at frame %1, but the source contains only %2 frame(s).")
+                        .arg(requestedStart)
+                        .arg(exactFrameCount));
+                return;
+            }
+            const int startFrame = static_cast<int>(requestedStart);
+            const int endFrame = static_cast<int>(std::min<qint64>(
+                requestedEndExclusive - 1, exactFrameCount - 1));
+
+            double startSeconds = mVideoDecoder.getFrameTimestampSeconds(startFrame);
+            if (!std::isfinite(startSeconds)) startSeconds = startFrame / fps;
+            double durationSeconds = (endFrame - startFrame + 1) / fps;
+            const double lastTimestamp = mVideoDecoder.getFrameTimestampSeconds(endFrame);
+            const double lastDuration = mVideoDecoder.getFrameDurationSeconds(endFrame);
+            if (std::isfinite(lastTimestamp) && std::isfinite(lastDuration)
+                && lastTimestamp + lastDuration > startSeconds) {
+                durationSeconds = lastTimestamp + lastDuration - startSeconds;
+            }
+
+            startSample = static_cast<int64_t>(std::llround(startSeconds * sampleRate));
+            sampleCount = static_cast<int64_t>(std::llround(durationSeconds * sampleRate));
+        }
 
         bool ok = false;
         QString errorMsg;
@@ -481,7 +674,7 @@ void VDQtMainWindow::onFileSaveAudio() {
         // 1. Direct Uncompressed PCM Export if no resampling/channel change requested and saving as WAV
         if ((audioCodec == "pcm_s16le" || audioCodec == "(uncompressed)" || audioCodec.isEmpty()) &&
             audioCfg.sampleRate == 0 && audioCfg.channels == 0 && outPath.endsWith(".wav", Qt::CaseInsensitive)) {
-            ok = mAudioPlayer.exportAudioToFile(outPath, startSample, sampleCount, [&progress](int cur, int tot) -> bool {
+            ok = mAudioPlayer.exportAudioToFile(workingOutputPath, startSample, sampleCount, [&progress](int cur, int) -> bool {
                 progress.setValue(cur);
                 progress.setLabelText(QString("Exporting uncompressed PCM audio...\n%1% complete").arg(cur));
                 QCoreApplication::processEvents();
@@ -489,8 +682,13 @@ void VDQtMainWindow::onFileSaveAudio() {
             });
         } else {
             // 2. Full Processing Encoding with selected codec, bitrate, sample rate, and channels
-            QString tempWav = QString("/tmp/vd_audio_enc_%1.wav").arg(QDateTime::currentMSecsSinceEpoch());
-            bool extractOk = mAudioPlayer.exportAudioToFile(tempWav, startSample, sampleCount, [&progress](int cur, int tot) -> bool {
+            QTemporaryDir tempDir;
+            if (!tempDir.isValid()) {
+                QMessageBox::critical(this, "Save Audio Error", "Unable to create a secure temporary directory.");
+                return;
+            }
+            QString tempWav = tempDir.filePath("audio.wav");
+            bool extractOk = mAudioPlayer.exportAudioToFile(tempWav, startSample, sampleCount, [&progress](int cur, int) -> bool {
                 int pct = cur / 2; // 0..50%
                 progress.setValue(pct);
                 progress.setLabelText(QString("Extracting audio stream...\n%1% complete").arg(pct * 2));
@@ -502,8 +700,10 @@ void VDQtMainWindow::onFileSaveAudio() {
                 QProcess ffmpeg;
                 QStringList args;
                 bool isVbr = (audioCfg.rateControlMode.toLower() == "vbr");
+                const QString lameExecutable = QStandardPaths::findExecutable("lame");
 
-                if (audioCodec == "libmp3lame" || audioCodec == "mp3") {
+                if ((audioCodec == "libmp3lame" || audioCodec == "mp3")
+                    && !lameExecutable.isEmpty()) {
                     // Use native LAME MP3 encoder
                     QProcess lameProc;
                     QStringList lameArgs;
@@ -522,19 +722,28 @@ void VDQtMainWindow::onFileSaveAudio() {
                     } else if (audioCfg.channels == 2) {
                         lameArgs << "-m" << "j";
                     }
-                    lameArgs << tempWav << outPath;
-                    int64_t totalDurationUs = (sampleCount > 0 && sampleRate > 0) ? (sampleCount * 1000000LL) / sampleRate : 1000000LL;
+                    lameArgs << tempWav << workingOutputPath;
 
-                    lameProc.start("lame", lameArgs);
+                    // LAME may prompt instead of replacing an existing file.
+                    // The randomized path remains safely scoped to the target directory.
+                    QFile::remove(workingOutputPath);
+                    lameProc.start(lameExecutable, lameArgs);
                     if (lameProc.waitForStarted(3000)) {
                         static const QRegularExpression re("\\(\\s*(\\d+)%\\)");
                         QByteArray errBuf;
+                        bool cancelled = false;
                         while (!lameProc.waitForFinished(30)) {
                             if (progress.wasCanceled()) {
-                                lameProc.kill();
+                                cancelled = true;
+                                lameProc.terminate();
+                                if (!lameProc.waitForFinished(1000)) {
+                                    lameProc.kill();
+                                    lameProc.waitForFinished(3000);
+                                }
                                 break;
                             }
                             errBuf += lameProc.readAllStandardError();
+                            lameProc.readAllStandardOutput();
                             auto match = re.match(QString::fromUtf8(errBuf));
                             if (match.hasMatch()) {
                                 int rawPct = match.captured(1).toInt();
@@ -545,22 +754,35 @@ void VDQtMainWindow::onFileSaveAudio() {
                             if (errBuf.size() > 4096) errBuf = errBuf.right(1024);
                             QCoreApplication::processEvents();
                         }
-                        progress.setValue(100);
-                        progress.setLabelText("Encoding MP3 audio stream...\n100% complete");
-                        QCoreApplication::processEvents();
-                        if (lameProc.exitCode() == 0) {
+                        errBuf += lameProc.readAllStandardError();
+                        lameProc.readAllStandardOutput();
+                        if (!cancelled && lameProc.exitStatus() == QProcess::NormalExit
+                            && lameProc.exitCode() == 0 && QFileInfo(workingOutputPath).size() > 0) {
                             ok = true;
+                            progress.setValue(100);
+                            progress.setLabelText("Encoding MP3 audio stream...\n100% complete");
                         } else {
-                            errorMsg = QString("LAME MP3 encoding failed:\n%1").arg(QString::fromUtf8(lameProc.readAllStandardError()));
+                            QFile::remove(workingOutputPath);
+                            errorMsg = cancelled ? "Audio export was cancelled."
+                                                 : QString("LAME MP3 encoding failed:\n%1").arg(QString::fromUtf8(errBuf));
                         }
+                        QCoreApplication::processEvents();
                     } else {
                         errorMsg = "Failed to launch LAME MP3 encoder.";
                     }
                 } else {
                     args << "-y" << "-i" << tempWav;
 
-                    if (audioCodec == "aac" || audioCodec.contains("aac")) {
-                        args << "-c:a" << "aac";
+                    if (audioCodec == "libmp3lame" || audioCodec == "mp3") {
+                        args << "-c:a" << "libmp3lame";
+                        if (isVbr) {
+                            args << "-q:a" << QString::number(std::clamp(audioCfg.vbrQuality, 0, 9));
+                        } else {
+                            const int br = audioCfg.bitrateKbps > 0 ? audioCfg.bitrateKbps : 192;
+                            args << "-b:a" << QString("%1k").arg(br);
+                        }
+                    } else if (audioCodec == "aac" || audioCodec == "libfdk_aac") {
+                        args << "-c:a" << audioCodec;
                         if (isVbr) {
                             static const double aacQ[] = { 0.2, 0.5, 0.9, 1.4, 2.0 };
                             int qIdx = std::clamp(audioCfg.vbrQuality - 1, 0, 4);
@@ -625,19 +847,35 @@ void VDQtMainWindow::onFileSaveAudio() {
                     }
                     if (audioCfg.channels > 0) args << "-ac" << QString::number(audioCfg.channels);
 
-                    int64_t totalDurationUs = (sampleCount > 0 && sampleRate > 0) ? (sampleCount * 1000000LL) / sampleRate : 1000000LL;
+                    const int64_t progressSamples = sampleCount > 0
+                        ? sampleCount
+                        : std::max<int64_t>(1, mAudioPlayer.getTotalSamples() - startSample);
+                    const int64_t totalDurationUs = sampleRate > 0
+                        ? std::max<int64_t>(1, static_cast<int64_t>(
+                              static_cast<long double>(progressSamples) * 1000000.0L / sampleRate))
+                        : 1000000LL;
                     args << "-progress" << "pipe:1";
-                    args << outPath;
+                    args << workingOutputPath;
 
                     ffmpeg.start("ffmpeg", args);
                     if (ffmpeg.waitForStarted(3000)) {
                         QByteArray outBuf;
+                        QByteArray errBuf;
+                        bool cancelled = false;
                         while (!ffmpeg.waitForFinished(30)) {
                             if (progress.wasCanceled()) {
-                                ffmpeg.kill();
+                                cancelled = true;
+                                ffmpeg.terminate();
+                                if (!ffmpeg.waitForFinished(1000)) {
+                                    ffmpeg.kill();
+                                    ffmpeg.waitForFinished(3000);
+                                }
                                 break;
                             }
                             outBuf += ffmpeg.readAllStandardOutput();
+                            errBuf += ffmpeg.readAllStandardError();
+                            if (errBuf.size() > 1024 * 1024)
+                                errBuf = errBuf.right(1024 * 1024);
                             int lastNl;
                             while ((lastNl = outBuf.indexOf('\n')) >= 0) {
                                 QByteArray line = outBuf.left(lastNl).trimmed();
@@ -655,16 +893,18 @@ void VDQtMainWindow::onFileSaveAudio() {
                         progress.setValue(100);
                         progress.setLabelText(QString("Encoding %1 audio stream...\n100% complete").arg(audioCfg.codecName));
                         QCoreApplication::processEvents();
-                        if (ffmpeg.exitCode() == 0) {
+                        errBuf += ffmpeg.readAllStandardError();
+                        if (!cancelled && ffmpeg.exitStatus() == QProcess::NormalExit && ffmpeg.exitCode() == 0 && QFileInfo(workingOutputPath).size() > 0) {
                             ok = true;
                         } else {
-                            errorMsg = QString("FFmpeg audio encoding failed:\n%1").arg(QString::fromUtf8(ffmpeg.readAllStandardError()));
+                            QFile::remove(workingOutputPath);
+                            errorMsg = cancelled ? "Audio export was cancelled."
+                                                 : QString("FFmpeg audio encoding failed:\n%1").arg(QString::fromUtf8(errBuf));
                         }
                     } else {
                         errorMsg = "Failed to launch FFmpeg audio encoder.";
                     }
                 }
-                QFile::remove(tempWav);
             } else {
                 errorMsg = "Failed to extract uncompressed PCM audio from source.";
             }
@@ -673,6 +913,12 @@ void VDQtMainWindow::onFileSaveAudio() {
         progress.reset();
         progress.close();
         QCoreApplication::processEvents();
+
+        if (ok && !replaceWithStagedFile(workingOutputPath, outPath)) {
+            ok = false;
+            errorMsg = "The completed audio output could not be committed to its destination.";
+        }
+        if (!ok) QFile::remove(workingOutputPath);
 
         if (ok) {
             VDLogWindow::instance(this)->appendLog(QString("[Audio] Successfully exported audio: %1 (%2 bytes, codec: %3)").arg(outPath).arg(QFileInfo(outPath).size()).arg(audioCfg.codecName));
@@ -732,19 +978,21 @@ void VDQtMainWindow::onFileSaveProcessingSettings() {
 }
 
 void VDQtMainWindow::onFileRunScript() {
-    QString fileName = QFileDialog::getOpenFileName(this, "Run Script", QString(), "VirtualDub Scripts (*.vdscript *.jobs);;AviSynth Scripts (*.avs);;All Files (*)");
+    QString fileName = QFileDialog::getOpenFileName(
+        this, "Run Script", QString(),
+        "AviSynth Scripts (*.avs *.AVS);;All Files (*)");
     if (!fileName.isEmpty()) {
-        if (fileName.endsWith(".avs", Qt::CaseInsensitive) || fileName.endsWith(".vpy", Qt::CaseInsensitive)) {
+        if (fileName.endsWith(".avs", Qt::CaseInsensitive)) {
             openVideoFile(fileName);
         } else {
-            VDLogWindow::instance(this)->appendLog(QString("[Script] Running script: %1").arg(fileName));
-            statusBar()->showMessage(QString("Script executed: %1").arg(fileName));
+            QMessageBox::warning(this, "Unsupported Script",
+                                 "Only AviSynth scripts can currently be evaluated. Native VirtualDub "
+                                 "job/project scripts and VapourSynth scripts are not implemented yet.");
         }
     }
 }
 
 void VDQtMainWindow::closeEvent(QCloseEvent *event) {
-    VDQtFilterSystem::instance().clearFilters();
     QMainWindow::closeEvent(event);
 }
 
@@ -766,20 +1014,57 @@ void VDQtMainWindow::onFileSaveAVI() {
         QString savePath = dlg.getSelectedFilePath();
         if (savePath.isEmpty()) return;
 
+        // The save dialog may have been open while playback was active.
+        mPlaybackTimer->stop();
+        mAudioPlayer.stop();
+
+        if (!aliasedLoadedSource(savePath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+            QMessageBox::critical(this, "Unsafe Output Path",
+                                  "The output file is a currently loaded source. Choose a different path.");
+            return;
+        }
+        const QFileInfo videoTarget(savePath);
+        if (scriptOutputWouldReplaceExisting(savePath, mVideoDecoder)) {
+            QMessageBox::critical(
+                this, "Unsafe Script Output Path",
+                "An existing destination cannot be replaced while an AviSynth script is loaded, "
+                "because scripts can compute source paths dynamically. Choose a new output path.");
+            return;
+        }
+        if (videoTarget.exists() || videoTarget.isSymLink()) {
+            const auto answer = QMessageBox::warning(
+                this, "Replace Existing Video File?",
+                QString("The destination already exists:\n%1\n\nReplace it after the new file is encoded successfully?")
+                    .arg(savePath),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+        }
+
         VDLogWindow::instance(this)->appendLog(QString("[Export] Exporting video to %1...").arg(savePath));
 
-        int totalFrames = mVideoDecoder.getFrameCount();
         VDQtVideoExporter exporter;
         VDQtVideoExporter::ExportOptions opts;
         opts.inputPath = mVideoDecoder.getFilePath();
         opts.outputPath = savePath;
-        opts.startFrame = mPositionControl->getEffectiveStartFrame(totalFrames);
-        opts.endFrame = mPositionControl->getEffectiveEndFrame(totalFrames);
+        if (mPositionControl->hasSelection()) {
+            // Preserve raw markers until a durationless/estimated source has
+            // been scanned. Clamping against a provisional zero/estimate here
+            // would silently shift or truncate the requested range.
+            opts.startFrame = std::max(0, static_cast<int>(mPositionControl->GetSelectionStart()));
+            opts.endFrame = std::max(opts.startFrame,
+                                     static_cast<int>(mPositionControl->GetSelectionEnd() - 1));
+        } else {
+            // Keep the full-range sentinel unresolved until the exporter has
+            // converted an Estimated/Unknown stream length to an exact count.
+            opts.startFrame = 0;
+            opts.endFrame = -1;
+        }
         double targetFps = 0.0;
         if (mFrameRateConfig.sourceMode == 1) {
             targetFps = mFrameRateConfig.customSourceFps;
         } else if (mFrameRateConfig.convMode == 4) {
             targetFps = mFrameRateConfig.convertFps;
+            opts.convertFpsPreserveDuration = true;
         }
         opts.customFps = targetFps;
 
@@ -829,11 +1114,63 @@ void VDQtMainWindow::onFileSaveImageSequence() {
         return;
     }
 
-    int totalFrames = mVideoDecoder.getFrameCount();
-    if (totalFrames <= 0) return;
+    mPlaybackTimer->stop();
+    mAudioPlayer.stop();
 
-    int startFrame = mPositionControl->getEffectiveStartFrame(totalFrames);
-    int endFrame = mPositionControl->getEffectiveEndFrame(totalFrames);
+    int totalFrames = mVideoDecoder.getFrameCount();
+    if (!mVideoDecoder.isFrameCountExact()) {
+        QProgressDialog indexingProgress(
+            "Indexing source frames for image export...", "Cancel",
+            0, totalFrames > 0 ? totalFrames : 0, this);
+        indexingProgress.setWindowModality(Qt::WindowModal);
+        indexingProgress.setMinimumDuration(0);
+        const int initialEstimate = totalFrames;
+        const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.scanVideoStream(
+            [&indexingProgress, initialEstimate](int current, int reportedTotal) {
+                if (initialEstimate > 0) {
+                    const int maximum = std::max(initialEstimate, reportedTotal);
+                    indexingProgress.setRange(0, maximum);
+                    indexingProgress.setValue(std::min(current, maximum));
+                } else {
+                    indexingProgress.setRange(0, 0);
+                    indexingProgress.setLabelText(
+                        QString("Indexing source frames... %1 decoded").arg(current));
+                }
+                QCoreApplication::processEvents();
+                return !indexingProgress.wasCanceled();
+            });
+        indexingProgress.close();
+        if (scan.cancelled) return;
+        if (!scan.errorMessage.isEmpty()) {
+            QMessageBox::critical(this, "Image Export Error", scan.errorMessage);
+            return;
+        }
+        totalFrames = mVideoDecoder.getFrameCount();
+        if (totalFrames > 0) mPositionControl->SetRange(0, totalFrames - 1);
+    }
+    if (totalFrames <= 0) {
+        QMessageBox::warning(this, "Image Export Error", "The source has no decodable video frames.");
+        return;
+    }
+
+    int startFrame = 0;
+    int endFrame = totalFrames - 1;
+    if (mPositionControl->hasSelection()) {
+        const qint64 requestedStart = mPositionControl->GetSelectionStart();
+        const qint64 requestedEndExclusive = mPositionControl->GetSelectionEnd();
+        if (requestedStart < 0 || requestedStart >= totalFrames
+            || requestedEndExclusive <= requestedStart) {
+            QMessageBox::critical(
+                this, "Image Export Range Error",
+                QString("The requested selection starts at frame %1, but the source contains only %2 frame(s).")
+                    .arg(requestedStart)
+                    .arg(totalFrames));
+            return;
+        }
+        startFrame = static_cast<int>(requestedStart);
+        endFrame = static_cast<int>(std::min<qint64>(requestedEndExclusive - 1,
+                                                     totalFrames - 1));
+    }
 
     QString defaultFile = "frame_.png";
     QString filter = "PNG Images (*.png);;Windows Bitmap (*.bmp);;JPEG Images (*.jpg *.jpeg);;TIFF Images (*.tif *.tiff);;Targa Images (*.tga)";
@@ -845,7 +1182,63 @@ void VDQtMainWindow::onFileSaveImageSequence() {
     QString baseName = fi.baseName();
     QString ext = fi.suffix().isEmpty() ? "png" : fi.suffix();
 
-    int framesToExport = endFrame - startFrame + 1;
+    const int sourceFramesToExport = endFrame - startFrame + 1;
+    const VDFilterTimingInfo filterTiming = VDQtFilterSystem::instance().getTimingInfo();
+    if (!filterTiming.sequenceSupported || filterTiming.outputFramesPerInput <= 0
+        || sourceFramesToExport > std::numeric_limits<int>::max() / filterTiming.outputFramesPerInput) {
+        QMessageBox::critical(this, "Image Export Error",
+                              "The temporal filter chain produces an unsupported sequence size.");
+        return;
+    }
+    const int framesToExport = sourceFramesToExport * filterTiming.outputFramesPerInput;
+    QStringList targetPaths;
+    targetPaths.reserve(framesToExport);
+    QStringList existingTargets;
+    for (int f = startFrame; f <= endFrame; ++f) {
+        for (int phase = 0; phase < filterTiming.outputFramesPerInput; ++phase) {
+            const qint64 outputNumber = static_cast<qint64>(f)
+                                      * filterTiming.outputFramesPerInput + phase;
+            const QString targetPath = QString("%1/%2_%3.%4")
+                .arg(dir)
+                .arg(baseName)
+                .arg(outputNumber, 5, 10, QChar('0'))
+                .arg(ext);
+            if (!aliasedLoadedSource(targetPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+                QMessageBox::critical(this, "Unsafe Image Sequence Path",
+                                      QString("Generated image path aliases a loaded source:\n%1").arg(targetPath));
+                return;
+            }
+            const QFileInfo targetInfo(targetPath);
+            if (scriptOutputWouldReplaceExisting(targetPath, mVideoDecoder)) {
+                QMessageBox::critical(
+                    this, "Unsafe Script Image Path",
+                    QString("An existing generated image cannot be replaced while an AviSynth script is loaded:\n%1\n"
+                            "Choose a new image-sequence base name.").arg(targetPath));
+                return;
+            }
+            if (targetInfo.exists() || targetInfo.isSymLink())
+                existingTargets.append(targetPath);
+            targetPaths.append(targetPath);
+        }
+    }
+
+    if (!existingTargets.isEmpty()) {
+        const auto answer = QMessageBox::warning(
+            this, "Replace Existing Image Sequence?",
+            QString("%1 generated image file(s) already exist. They will be replaced only after "
+                    "the complete sequence has rendered successfully. Continue?")
+                .arg(existingTargets.size()),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) return;
+    }
+
+    QTemporaryDir stagingDirectory(QDir(dir).filePath(QStringLiteral(".virtualdub-images-XXXXXX")));
+    if (!stagingDirectory.isValid()) {
+        QMessageBox::critical(this, "Image Export Error",
+                              "A staging directory could not be created beside the destination sequence.");
+        return;
+    }
+
     QProgressDialog progress("Exporting Image Sequence...", "Cancel", 0, framesToExport, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
@@ -855,37 +1248,139 @@ void VDQtMainWindow::onFileSaveImageSequence() {
     timer.start();
 
     int exportedCount = 0;
+    QStringList stagedPaths;
+    stagedPaths.reserve(framesToExport);
+    bool renderFailed = false;
     for (int f = startFrame; f <= endFrame; ++f) {
         if (progress.wasCanceled()) break;
 
         QImage rawFrame = mVideoDecoder.getFrameImage(f);
-        if (!rawFrame.isNull()) {
-            QImage filtered = VDQtFilterSystem::instance().processFrame(rawFrame);
-            QString frameFileName = QString("%1/%2_%3.%4")
-                .arg(dir)
-                .arg(baseName)
-                .arg(f, 5, 10, QChar('0'))
-                .arg(ext);
-
-            filtered.save(frameFileName);
-            exportedCount++;
+        if (rawFrame.isNull()) {
+            renderFailed = true;
+            VDLogWindow::instance(this)->appendLog(
+                QString("[Export] Failed to decode image-sequence frame %1").arg(f));
+            break;
         }
 
-        progress.setValue(f - startFrame + 1);
-        double elapsedSec = timer.elapsed() / 1000.0;
-        double currentFps = (elapsedSec > 0) ? (exportedCount / elapsedSec) : 0;
-        progress.setLabelText(QString("Exporting frame %1 of %2 (%3%)\nSpeed: %4 fps")
-            .arg(f - startFrame + 1)
-            .arg(framesToExport)
-            .arg(static_cast<int>(100.0 * (f - startFrame + 1) / framesToExport))
-            .arg(currentFps, 0, 'f', 1));
-        QApplication::processEvents();
+        QList<QImage> filteredFrames;
+        if (!VDQtFilterSystem::instance().processFrameSequence(rawFrame, filteredFrames)
+            || filteredFrames.size() != filterTiming.outputFramesPerInput) {
+            renderFailed = true;
+            VDLogWindow::instance(this)->appendLog(
+                QString("[Export] Temporal filter chain failed on image frame %1").arg(f));
+            break;
+        }
+
+        for (const QImage& filtered : filteredFrames) {
+            if (progress.wasCanceled()) break;
+            const QString stagedPath = stagingDirectory.filePath(
+                QString("frame_%1.%2").arg(exportedCount, 8, 10, QChar('0')).arg(ext));
+            if (filtered.isNull() || !filtered.save(stagedPath)) {
+                renderFailed = true;
+                VDLogWindow::instance(this)->appendLog(
+                    QString("[Export] Failed to stage image frame %1").arg(f));
+                break;
+            }
+            stagedPaths.append(stagedPath);
+            exportedCount++;
+
+            progress.setValue(exportedCount);
+            const double elapsedSec = timer.elapsed() / 1000.0;
+            const double currentFps = elapsedSec > 0 ? exportedCount / elapsedSec : 0;
+            progress.setLabelText(QString("Exporting frame %1 of %2 (%3%)\nSpeed: %4 fps")
+                .arg(exportedCount)
+                .arg(framesToExport)
+                .arg(static_cast<int>(100.0 * exportedCount / framesToExport))
+                .arg(currentFps, 0, 'f', 1));
+            QApplication::processEvents();
+        }
+        if (progress.wasCanceled() || renderFailed) break;
+
     }
 
-    if (exportedCount > 0) {
-        VDLogWindow::instance(this)->appendLog(QString("[Export] Image sequence successfully exported: %1 frames to %2").arg(exportedCount).arg(dir));
-        QMessageBox::information(this, "Export Complete", QString("Successfully exported %1 frames to:\n%2").arg(exportedCount).arg(dir));
+    if (progress.wasCanceled() || renderFailed || exportedCount != framesToExport) {
+        if (renderFailed) {
+            QMessageBox::critical(this, "Image Export Error",
+                                  "The sequence could not be rendered completely. Existing files were not changed.");
+        }
+        return;
     }
+
+    // Recheck aliases/collisions after rendering to close the user-visible
+    // race window before any destination is changed.
+    for (const QString& targetPath : targetPaths) {
+        if (!aliasedLoadedSource(targetPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+            QMessageBox::critical(this, "Unsafe Image Sequence Path",
+                                  "A generated image path became an alias of a loaded source. Existing files were not changed.");
+            return;
+        }
+        const QFileInfo targetInfo(targetPath);
+        if ((targetInfo.exists() || targetInfo.isSymLink())
+            && !existingTargets.contains(targetPath)) {
+            QMessageBox::critical(this, "Image Export Collision",
+                                  QString("A destination appeared while the sequence was rendering:\n%1\n"
+                                          "Existing files were not changed.").arg(targetPath));
+            return;
+        }
+        if (scriptOutputWouldReplaceExisting(targetPath, mVideoDecoder)) {
+            QMessageBox::critical(
+                this, "Unsafe Script Image Path",
+                QString("A generated destination appeared while the script sequence was rendering:\n%1\n"
+                        "No existing files were changed.").arg(targetPath));
+            return;
+        }
+    }
+
+    const QString backupDirectory = stagingDirectory.filePath(QStringLiteral("backups"));
+    if (!QDir().mkpath(backupDirectory)) {
+        QMessageBox::critical(this, "Image Export Error",
+                              "Could not prepare transactional backups. Existing files were not changed.");
+        return;
+    }
+
+    QVector<QPair<QString, QString>> backups;
+    QStringList committedTargets;
+    auto rollbackCommit = [&]() {
+        bool restored = true;
+        for (auto it = committedTargets.crbegin(); it != committedTargets.crend(); ++it)
+            restored = QFile::remove(*it) && restored;
+        for (auto it = backups.crbegin(); it != backups.crend(); ++it)
+            restored = QFile::rename(it->second, it->first) && restored;
+        return restored;
+    };
+
+    for (int i = 0; i < targetPaths.size(); ++i) {
+        const QString& targetPath = targetPaths.at(i);
+        const QFileInfo targetInfo(targetPath);
+        if (!targetInfo.exists() && !targetInfo.isSymLink()) continue;
+
+        QFile::setPermissions(stagedPaths.at(i), targetInfo.permissions());
+        const QString backupPath = QDir(backupDirectory).filePath(QString::number(i));
+        if (!QFile::rename(targetPath, backupPath)) {
+            const bool restored = rollbackCommit();
+            QMessageBox::critical(this, "Image Export Error",
+                                  restored
+                                      ? "Could not back up an existing image. No sequence files were changed."
+                                      : "Could not back up an existing image, and automatic rollback was incomplete.");
+            return;
+        }
+        backups.append(qMakePair(targetPath, backupPath));
+    }
+
+    for (int i = 0; i < targetPaths.size(); ++i) {
+        if (!QFile::rename(stagedPaths.at(i), targetPaths.at(i))) {
+            const bool restored = rollbackCommit();
+            QMessageBox::critical(this, "Image Export Error",
+                                  restored
+                                      ? "Could not commit the completed sequence. Previous files were restored."
+                                      : "Could not commit the completed sequence, and automatic rollback was incomplete.");
+            return;
+        }
+        committedTargets.append(targetPaths.at(i));
+    }
+
+    VDLogWindow::instance(this)->appendLog(QString("[Export] Image sequence successfully exported: %1 frames to %2").arg(exportedCount).arg(dir));
+    QMessageBox::information(this, "Export Complete", QString("Successfully exported %1 frames to:\n%2").arg(exportedCount).arg(dir));
 }
 
 void VDQtMainWindow::onFileQuit() {
@@ -893,7 +1388,8 @@ void VDQtMainWindow::onFileQuit() {
 }
 
 void VDQtMainWindow::onEditSetSelectionStart() {
-    mPositionControl->SetSelection(mPositionControl->GetPosition(), mPositionControl->GetRangeEnd());
+    if (!ensureExactFrameRange(QStringLiteral("selection range"))) return;
+    mPositionControl->SetSelection(mPositionControl->GetPosition(), mPositionControl->GetRangeEnd() + 1);
 }
 
 void VDQtMainWindow::onEditSetSelectionEnd() {
@@ -903,7 +1399,48 @@ void VDQtMainWindow::onEditSetSelectionEnd() {
 }
 
 void VDQtMainWindow::onEditSelectAll() {
-    mPositionControl->SetSelection(mPositionControl->GetRangeBegin(), mPositionControl->GetRangeEnd());
+    if (!ensureExactFrameRange(QStringLiteral("complete source range"))) return;
+    mPositionControl->SetSelection(mPositionControl->GetRangeBegin(), mPositionControl->GetRangeEnd() + 1);
+}
+
+bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
+    if (!mVideoDecoder.isOpen() || mVideoDecoder.isFrameCountExact())
+        return true;
+
+    mPlaybackTimer->stop();
+    mAudioPlayer.stop();
+    const int estimate = mVideoDecoder.getFrameCount();
+    QProgressDialog progress(QString("Indexing the %1...").arg(operationLabel), "Cancel",
+                             0, estimate > 0 ? estimate : 0, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.scanVideoStream(
+        [&progress, estimate, operationLabel](int current, int reportedTotal) {
+            if (estimate > 0) {
+                const int maximum = std::max(estimate, reportedTotal);
+                progress.setRange(0, maximum);
+                progress.setValue(std::min(current, maximum));
+            } else {
+                progress.setRange(0, 0);
+                progress.setLabelText(
+                    QString("Indexing the %1... %2 decoded").arg(operationLabel).arg(current));
+            }
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        });
+    progress.close();
+    if (scan.cancelled) return false;
+    if (!scan.errorMessage.isEmpty()) {
+        QMessageBox::critical(this, "Frame Range Error", scan.errorMessage);
+        return false;
+    }
+    const int exactCount = mVideoDecoder.getFrameCount();
+    if (exactCount <= 0) {
+        QMessageBox::warning(this, "Frame Range", "The source has no decodable video frames.");
+        return false;
+    }
+    mPositionControl->SetRange(0, exactCount - 1);
+    return true;
 }
 
 void VDQtMainWindow::autoFitWindowToVideo() {
@@ -1118,14 +1655,14 @@ void VDQtMainWindow::onVideoModeDirectStream() {
 void VDQtMainWindow::onVideoModeFastRecompress() {
     mVideoMode = VideoMode_FastRecompress;
     actVideoFastRecompress->setChecked(true);
-    statusBar()->showMessage("Video Mode: Fast Recompress (Bypasses video filters, direct codec encode)");
+    statusBar()->showMessage("Video Mode: Fast Recompress (Bypasses video filters)");
     VDLogWindow::instance(this)->appendLog("[Video] Mode set to Fast Recompress");
 }
 
 void VDQtMainWindow::onVideoModeNormalRecompress() {
     mVideoMode = VideoMode_NormalRecompress;
     actVideoNormalRecompress->setChecked(true);
-    statusBar()->showMessage("Video Mode: Normal Recompress (Bypasses video filters, native color format)");
+    statusBar()->showMessage("Video Mode: Normal Recompress (Bypasses video filters with configured RGB conversion)");
     VDLogWindow::instance(this)->appendLog("[Video] Mode set to Normal Recompress");
 }
 
@@ -1163,6 +1700,12 @@ void VDQtMainWindow::onVideoDecodeFormat() {
             mDecompressionFormatConfig.colorSpace,
             mDecompressionFormatConfig.componentRange
         );
+        if (dlg.isSaveAsDefault()) {
+            QSettings settings("VirtualDub", "VirtualDub_Port");
+            settings.setValue("decoder/decompressionFormat", mDecompressionFormatConfig.formatName);
+            settings.setValue("decoder/colorSpace", mDecompressionFormatConfig.colorSpace);
+            settings.setValue("decoder/componentRange", mDecompressionFormatConfig.componentRange);
+        }
         if (mVideoDecoder.isOpen()) {
             updateFrameDisplay(mPositionControl->GetPosition());
         }
@@ -1176,10 +1719,10 @@ void VDQtMainWindow::onVideoDecodeFormat() {
 }
 
 void VDQtMainWindow::onVideoSelectRange() {
-    QMessageBox::information(this, "Select Range", QString("Current selection range:\nStart: Frame %1\nEnd: Frame %2\nTotal frames: %3")
+    QMessageBox::information(this, "Select Range", QString("Current selection range:\nStart: Frame %1\nEnd: Frame %2 (exclusive)\nTotal frames: %3")
         .arg(mPositionControl->GetSelectionStart())
         .arg(mPositionControl->GetSelectionEnd())
-        .arg(mPositionControl->GetSelectionEnd() - mPositionControl->GetSelectionStart() + 1));
+        .arg(std::max<sint64>(0, mPositionControl->GetSelectionEnd() - mPositionControl->GetSelectionStart())));
 }
 
 void VDQtMainWindow::onVideoCopySourceFrame() {
@@ -1275,6 +1818,11 @@ void VDQtMainWindow::onVideoErrorMode() {
     VDDecoderErrorModeDialog dlg(mDecoderErrorModeConfig, this);
     if (dlg.exec() == QDialog::Accepted) {
         mDecoderErrorModeConfig = dlg.getConfig();
+        mVideoDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
+        if (dlg.isSaveAsDefault()) {
+            QSettings settings("VirtualDub", "VirtualDub_Port");
+            settings.setValue("decoder/errorMode", mDecoderErrorModeConfig.errorMode);
+        }
         QString modeStr = "Report all errors";
         if (mDecoderErrorModeConfig.errorMode == 1) modeStr = "Conceal errors and resume decoding at next keyframe";
         else if (mDecoderErrorModeConfig.errorMode == 2) modeStr = "Decode even if the result may be garbled";
@@ -1303,6 +1851,8 @@ void VDQtMainWindow::onVideoCompression() {
 }
 
 void VDQtMainWindow::onVideoFilters() {
+    VDQtFilterSystem& filterSystem = VDQtFilterSystem::instance();
+    const QList<VDFilterInstance> originalChain = filterSystem.getActiveChain();
     int w = mVideoDecoder.isOpen() ? mVideoDecoder.getWidth() : 1920;
     int h = mVideoDecoder.isOpen() ? mVideoDecoder.getHeight() : 1080;
     QImage currentFrame;
@@ -1310,9 +1860,10 @@ void VDQtMainWindow::onVideoFilters() {
         currentFrame = mVideoDecoder.getFrameImage(mPositionControl->GetPosition());
     }
     VDVideoFiltersDialog dlg(w, h, currentFrame, this);
-    if (dlg.exec() == QDialog::Accepted || true) {
-        updateFrameDisplay(mPositionControl->GetPosition());
+    if (dlg.exec() != QDialog::Accepted) {
+        filterSystem.replaceActiveChain(originalChain);
     }
+    updateFrameDisplay(mPositionControl->GetPosition());
 }
 
 void VDQtMainWindow::onVideoFrameRate() {
@@ -1371,9 +1922,14 @@ void VDQtMainWindow::onHelpAbout() {
 void VDQtMainWindow::onPositionChanged(int frame) {
     if (mIsExporting) return;
     updateFrameDisplay(frame);
-    if (mVideoDecoder.isOpen() && !mPlaybackTimer->isActive()) {
-        mAudioPlayer.seekToFrame(frame, mVideoDecoder.getFps());
-    }
+}
+
+void VDQtMainWindow::seekAudioToVideoFrame(int frameIndex) {
+    const double timestamp = mVideoDecoder.getFrameTimestampSeconds(frameIndex);
+    if (std::isfinite(timestamp))
+        mAudioPlayer.seekToTimeSeconds(timestamp);
+    else
+        mAudioPlayer.seekToFrame(frameIndex, mVideoDecoder.getFps());
 }
 
 void VDQtMainWindow::onTransportAction(int actionCode) {
@@ -1394,8 +1950,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
             updateFrameDisplay(mPositionControl->GetPosition());
         } else {
             mPlaybackStartFrame = mPositionControl->GetPosition();
+            mPlaybackStartTimestamp = mVideoDecoder.getFrameTimestampSeconds(mPlaybackStartFrame);
+            if (!std::isfinite(mPlaybackStartTimestamp))
+                mPlaybackStartTimestamp = mVideoDecoder.getFps() > 0.0
+                    ? mPlaybackStartFrame / mVideoDecoder.getFps()
+                    : 0.0;
             mPlaybackElapsedTimer.restart();
-            mAudioPlayer.seekToFrame(mPositionControl->GetPosition(), mVideoDecoder.getFps());
+            seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
             mAudioPlayer.play();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(10);
@@ -1410,8 +1971,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
             updateFrameDisplay(mPositionControl->GetPosition());
         } else {
             mPlaybackStartFrame = mPositionControl->GetPosition();
+            mPlaybackStartTimestamp = mVideoDecoder.getFrameTimestampSeconds(mPlaybackStartFrame);
+            if (!std::isfinite(mPlaybackStartTimestamp))
+                mPlaybackStartTimestamp = mVideoDecoder.getFps() > 0.0
+                    ? mPlaybackStartFrame / mVideoDecoder.getFps()
+                    : 0.0;
             mPlaybackElapsedTimer.restart();
-            mAudioPlayer.seekToFrame(mPositionControl->GetPosition(), mVideoDecoder.getFps());
+            seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
             mAudioPlayer.play();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(10);
@@ -1427,7 +1993,14 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     case PCN_END: // 7 - Jump to End (>|)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
-        mPositionControl->SetPosition(mVideoDecoder.getFrameCount() - 1);
+        if (!ensureExactFrameRange(QStringLiteral("end of stream"))) break;
+        if (mVideoDecoder.getFrameCount() > 0) {
+            int target = mVideoDecoder.getFrameCount() - 1;
+            mPositionControl->SetRange(0, std::max(0, mVideoDecoder.getFrameCount() - 1));
+            mPositionControl->SetPosition(target);
+        } else {
+            statusBar()->showMessage("The stream length is unknown; play or scan the stream to discover its end.");
+        }
         break;
 
     case PCN_BACKWARD: // 5 - Step Backward 1 frame (<)
@@ -1437,17 +2010,32 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         break;
 
     case PCN_FORWARD: // 6 - Step Forward 1 frame (>)
+    {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
-        mPositionControl->SetPosition(std::min((sint64)(mVideoDecoder.getFrameCount() - 1), mPositionControl->GetPosition() + 1));
+        const int target = static_cast<int>(mPositionControl->GetPosition()) + 1;
+        if (!mVideoDecoder.isFrameCountExact()) {
+            if (!mVideoDecoder.getFrameImage(target).isNull()) {
+                const int rangeEnd = std::max(target, mVideoDecoder.getFrameCount() - 1);
+                mPositionControl->SetRange(0, rangeEnd);
+                mPositionControl->SetPosition(target);
+            } else if (mVideoDecoder.getFrameCount() > 0) {
+                const int lastFrame = mVideoDecoder.getFrameCount() - 1;
+                mPositionControl->SetRange(0, lastFrame);
+                mPositionControl->SetPosition(lastFrame);
+            }
+        } else if (mVideoDecoder.getFrameCount() > 0) {
+            mPositionControl->SetPosition(std::min(mVideoDecoder.getFrameCount() - 1, target));
+        }
         break;
+    }
 
     case PCN_KEYPREV: // 8 - Previous Keyframe (<<K)
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
-        int step = std::max(1, static_cast<int>(std::round(mVideoDecoder.getFps())));
-        mPositionControl->SetPosition(std::max((sint64)0, mPositionControl->GetPosition() - step));
+        const int target = mVideoDecoder.getPreviousKeyFrame(mPositionControl->GetPosition());
+        if (target >= 0) mPositionControl->SetPosition(target);
         break;
     }
 
@@ -1455,14 +2043,23 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
-        int step = std::max(1, static_cast<int>(std::round(mVideoDecoder.getFps())));
-        mPositionControl->SetPosition(std::min((sint64)(mVideoDecoder.getFrameCount() - 1), mPositionControl->GetPosition() + step));
+        const int target = mVideoDecoder.getNextKeyFrame(mPositionControl->GetPosition());
+        if (target >= 0) mPositionControl->SetPosition(target);
         break;
     }
 
     case PCN_MARKIN: // 2 - Mark In ([)
-        mPositionControl->SetSelection(mPositionControl->GetPosition(), mPositionControl->GetSelectionEnd());
+    {
+        sint64 position = mPositionControl->GetPosition();
+        sint64 end = mPositionControl->GetSelectionEnd();
+        if (end <= position) {
+            if (!ensureExactFrameRange(QStringLiteral("selection range"))) break;
+            position = std::min(position, mPositionControl->GetRangeEnd());
+            end = mPositionControl->GetRangeEnd() + 1;
+        }
+        mPositionControl->SetSelection(position, end);
         break;
+    }
 
     case PCN_MARKOUT: // 3 - Mark Out (])
         mPositionControl->SetSelection(mPositionControl->GetSelectionStart(), mPositionControl->GetPosition());
@@ -1483,14 +2080,24 @@ void VDQtMainWindow::onPlaybackTick() {
     double fps = mVideoDecoder.getFps();
     if (fps <= 0.0) fps = 29.97;
 
-    qint64 elapsedMs = mPlaybackElapsedTimer.elapsed();
-    int targetFrame = mPlaybackStartFrame + static_cast<int>((elapsedMs * fps) / 1000.0);
+    const double elapsedSeconds = mPlaybackElapsedTimer.elapsed() / 1000.0;
+    int targetFrame = mPlaybackStartFrame + static_cast<int>(std::floor(elapsedSeconds * fps));
 
     if (targetFrame != mPositionControl->GetPosition()) {
-        if (targetFrame >= mVideoDecoder.getFrameCount()) {
+        if (!mVideoDecoder.isFrameCountExact()
+            && targetFrame >= mVideoDecoder.getFrameCount()) {
+            if (!mVideoDecoder.getFrameImage(targetFrame).isNull()) {
+                mPositionControl->SetRange(0, std::max(targetFrame, mVideoDecoder.getFrameCount() - 1));
+                mPositionControl->SetPosition(targetFrame);
+                return;
+            }
+        }
+        if (mVideoDecoder.getFrameCount() > 0 && targetFrame >= mVideoDecoder.getFrameCount()) {
             mPlaybackTimer->stop();
             mAudioPlayer.stop();
-            mPositionControl->SetPosition(mVideoDecoder.getFrameCount() - 1);
+            const int lastFrame = mVideoDecoder.getFrameCount() - 1;
+            mPositionControl->SetRange(0, lastFrame);
+            mPositionControl->SetPosition(lastFrame);
         } else {
             mPositionControl->SetPosition(targetFrame);
         }
@@ -1504,6 +2111,7 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
 
     QImage frameImage = mVideoDecoder.getFrameImage(frameIndex);
     if (!frameImage.isNull()) {
+        mPositionControl->SetCurrentFrameKey(mVideoDecoder.isKeyFrame(frameIndex));
         mInputDisplay->setFrameImage(frameImage);
 
         // If playing and input-only mode, skip filter processing on output display for maximum performance
@@ -1514,8 +2122,14 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
             mOutputDisplay->setFrameImage(filteredImage);
         }
 
+        const int frameCount = mVideoDecoder.getFrameCount();
+        if (frameCount > 0 && mPositionControl->GetRangeEnd() != frameCount - 1) {
+            mPositionControl->SetRange(0, frameCount - 1);
+        }
+
         double fps = mVideoDecoder.getFps();
-        double timeSeconds = (fps > 0) ? (frameIndex / fps) : 0;
+        double timeSeconds = mVideoDecoder.getFrameTimestampSeconds(frameIndex);
+        if (!std::isfinite(timeSeconds)) timeSeconds = (fps > 0) ? (frameIndex / fps) : 0;
         int hours = static_cast<int>(timeSeconds / 3600);
         int mins = static_cast<int>((timeSeconds - hours * 3600) / 60);
         int secs = static_cast<int>(timeSeconds) % 60;
@@ -1527,9 +2141,12 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
             .arg(secs, 2, 10, QChar('0'))
             .arg(msecs, 3, 10, QChar('0'));
 
+        QString lastFrame = frameCount > 0 ? QString::number(frameCount - 1) : QStringLiteral("?");
+        if (mVideoDecoder.getFrameCountStatus() == VDQtVideoDecoder::FrameCountStatus::Estimated)
+            lastFrame.prepend(QLatin1Char('~'));
         statusBar()->showMessage(QString("Frame: %1 / %2  |  Time: %3  |  %4x%5 @ %6 fps")
             .arg(frameIndex)
-            .arg(mVideoDecoder.getFrameCount() - 1)
+            .arg(lastFrame)
             .arg(timeStr)
             .arg(mVideoDecoder.getWidth())
             .arg(mVideoDecoder.getHeight())

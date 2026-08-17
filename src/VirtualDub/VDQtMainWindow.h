@@ -104,6 +104,8 @@ private:
     void applyTheme();
     void autoFitWindowToVideo();
     void updateFrameDisplay(int frameIndex);
+    void seekAudioToVideoFrame(int frameIndex);
+    bool ensureExactFrameRange(const QString& operationLabel);
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
 
@@ -116,6 +118,7 @@ private:
     QTimer *mPlaybackTimer;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;
+    double mPlaybackStartTimestamp = 0.0;
     bool mPlaybackPreview = false;
 
     QMenu *mFileMenu;

@@ -76,7 +76,7 @@ public:
 	vdrefcount(const vdrefcount& src) : mRefCount(0) {}		// do not copy the refcount
 	virtual ~vdrefcount() {}
 
-	vdrefcount& operator=(const vdrefcount&) {}			// do not copy the refcount
+	vdrefcount& operator=(const vdrefcount&) { return *this; }	// do not copy the refcount
 
 	int AddRef() {
 		return mRefCount.inc();
@@ -112,7 +112,7 @@ public:
 	vdrefcounted(const vdrefcounted<T>& src) : mRefCount(0) {}		// do not copy the refcount
 	virtual ~vdrefcounted() {}
 
-	vdrefcounted<T>& operator=(const vdrefcounted<T>&) {}			// do not copy the refcount
+	vdrefcounted<T>& operator=(const vdrefcounted<T>&) { return *this; }	// do not copy the refcount
 
 	inline virtual int AddRef() {
 		return mRefCount.inc();

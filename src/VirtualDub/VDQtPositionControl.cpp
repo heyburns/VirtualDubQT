@@ -116,7 +116,7 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
 
     controlLayout->addSpacing(12);
 
-    mStatusLabel = new QLabel("Frame 0 (0:00:00.000) [K]", this);
+    mStatusLabel = new QLabel("Frame 0 (0:00:00.000)", this);
     mStatusLabel->setStyleSheet("color: #00bcd4; font-family: monospace; font-size: 12px; font-weight: bold; padding: 2px 8px; background: #1a1a22; border-radius: 4px;");
     controlLayout->addWidget(mStatusLabel, 1);
 
@@ -217,11 +217,12 @@ void VDQtPositionControlWidget::UpdateStatusText() {
     int mins = (int)((seconds - hrs * 3600.0) / 60.0);
     double secs = seconds - hrs * 3600.0 - mins * 60.0;
 
-    QString status = QString("Frame %1 (%2:%3:%4) [K]")
+    QString status = QString("Frame %1 (%2:%3:%4)%5")
                          .arg(mPosition)
                          .arg(hrs, 2, 10, QChar('0'))
                          .arg(mins, 2, 10, QChar('0'))
-                         .arg(secs, 0, 'f', 3);
+                         .arg(secs, 0, 'f', 3)
+                         .arg(mCurrentFrameIsKey ? QStringLiteral(" [K]") : QString());
 
     if (mSelStart != mSelEnd) {
         status += QString(" | Selection: %1 - %2 (%3 frames)").arg(mSelStart).arg(mSelEnd).arg(mSelEnd - mSelStart);

@@ -244,28 +244,53 @@ class VDAtomicFloat {
 protected:
 	volatile float n;
 
+	float loadValue() const {
+	#if defined(__GNUC__) || defined(__clang__)
+		float value;
+		__atomic_load(&n, &value, __ATOMIC_SEQ_CST);
+		return value;
+	#else
+		return n;
+	#endif
+	}
+
+	void storeValue(float value) {
+	#if defined(__GNUC__) || defined(__clang__)
+		__atomic_store(&n, &value, __ATOMIC_SEQ_CST);
+	#else
+		n = value;
+	#endif
+	}
+
 public:
 	VDAtomicFloat() = default;
 	VDAtomicFloat(float v) : n(v) {}
 
-	bool operator!=(float v) const  { return n!=v; }
-	bool operator==(float v) const { return n==v; }
-	bool operator<=(float v) const { return n<=v; }
-	bool operator>=(float v) const { return n>=v; }
-	bool operator<(float v) const { return n<v; }
-	bool operator>(float v) const { return n>v; }
+	bool operator!=(float v) const { return loadValue()!=v; }
+	bool operator==(float v) const { return loadValue()==v; }
+	bool operator<=(float v) const { return loadValue()<=v; }
+	bool operator>=(float v) const { return loadValue()>=v; }
+	bool operator<(float v) const { return loadValue()<v; }
+	bool operator>(float v) const { return loadValue()>v; }
 
-	float operator=(float v) { return n = v; }
+	float operator=(float v) { storeValue(v); return v; }
 
 	operator float() const {
-		return n;
+		return loadValue();
 	}
 
 	/// Atomic exchange.
 	float xchg(float v) {
-		union { int i; float f; } converter = {VDAtomicInt::staticExchange((volatile int *)&n, *(const int *)&v)};
-
-		return converter.f;
+	#if defined(__GNUC__) || defined(__clang__)
+		float previous;
+		__atomic_exchange(&n, &v, &previous, __ATOMIC_SEQ_CST);
+		return previous;
+	#else
+		union { int i; float f; } input = {}, output = {};
+		input.f = v;
+		output.i = VDAtomicInt::staticExchange((volatile int *)&n, input.i);
+		return output.f;
+	#endif
 	}
 };
 
@@ -275,33 +300,53 @@ class VDAtomicBool {
 protected:
 	volatile char n;
 
+	bool loadValue() const {
+	#if defined(__GNUC__) || defined(__clang__)
+		return __atomic_load_n(&n, __ATOMIC_SEQ_CST) != 0;
+	#else
+		return n != 0;
+	#endif
+	}
+
+	void storeValue(bool value) {
+	#if defined(__GNUC__) || defined(__clang__)
+		__atomic_store_n(&n, static_cast<char>(value), __ATOMIC_SEQ_CST);
+	#else
+		n = static_cast<char>(value);
+	#endif
+	}
+
 public:
 	VDAtomicBool() = default;
 	VDAtomicBool(bool v) : n(v) {}
 
-	bool operator!=(bool v) const { return (n != 0) != v; }
-	bool operator==(bool v) const { return (n != 0) == v; }
+	bool operator!=(bool v) const { return loadValue() != v; }
+	bool operator==(bool v) const { return loadValue() == v; }
 
-	bool operator=(bool v) { return n = v; }
+	bool operator=(bool v) { storeValue(v); return v; }
 
 	operator bool() const {
-		return n != 0;
+		return loadValue();
 	}
 
 	/// Atomic exchange.
 	bool xchg(bool v) {
-		const uint32 mask = ((uint32)0xFF << (int)((size_t)&n & 3));
+	#if defined(__GNUC__) || defined(__clang__)
+		return __atomic_exchange_n(&n, static_cast<char>(v), __ATOMIC_SEQ_CST) != 0;
+	#else
+		const uint32 mask = ((uint32)0xFF << (8 * (int)((size_t)&n & 3)));
 		const int andval = (int)~mask; 
-		const int orval = (int)(mask & 0x01010101);
+		const int orval = v ? (int)(mask & 0x01010101) : 0;
 		volatile int *p = (volatile int *)((uintptr)&n & ~(uintptr)3);
 
 		for(;;) {
 			const uint32 prevval = *p;
 			const uint32 newval = (prevval & andval) + orval;
 
-			if (prevval == VDAtomicInt::staticCompareExchange(p, newval, prevval))
+			if (prevval == static_cast<uint32>(VDAtomicInt::staticCompareExchange(p, newval, prevval)))
 				return (prevval & mask) != 0;
 		}
+	#endif
 	}
 };
 
