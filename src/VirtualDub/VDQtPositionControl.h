@@ -81,12 +81,14 @@ public:
 Q_SIGNALS:
     void positionChanged(int frame);
     void transportActionTriggered(int actionCode);
+    void userScrubStarted();
 
 private Q_SLOTS:
     void onSliderValueChanged(int value);
     void onTransportButtonClicked();
 
 private:
+    void DispatchPendingScrub();
     void UpdateStatusText();
     void NotifyEvent(VDPositionControlEventData::EventType type, VDPosition pos);
 

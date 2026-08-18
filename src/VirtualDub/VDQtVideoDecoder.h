@@ -45,6 +45,8 @@ public:
     double getFps() const { return mFps; }
     int getWidth() const { return mWidth; }
     int getHeight() const { return mHeight; }
+    int getSourceBitDepth() const { return mSourceBitDepth; }
+    bool sourceHasAlpha() const { return mSourceHasAlpha; }
     bool isAvsNative() const { return mIsAvsNative; }
     AVS_Clip* getAvsClip() const { return mAvsClip; }
     const AVS_VideoInfo* getAvsVi() const { return mAvsVi; }
@@ -65,10 +67,16 @@ public:
         return "YUV420";
     }
 
-    QImage getFrameImage(int frameIndex);
+    // preserveSequentialDecode is used by playback: a late presentation may
+    // skip image conversion, but dependency frames are still decoded in order
+    // instead of turning every dropped display frame into a random seek.
+    QImage getFrameImage(int frameIndex, bool preserveSequentialDecode = false);
     void clearCache();
     qsizetype getCachedFrameCount() const { return mFrameCache.size(); }
     qsizetype getCachedFrameCostKiB() const { return mFrameCache.totalCost(); }
+    quint64 getSeekCount() const { return mSeekCount; }
+    quint64 getDecodedFrameCount() const { return mDecodedFrameCount; }
+    void resetPerformanceCounters() { mSeekCount = 0; mDecodedFrameCount = 0; }
     static constexpr qsizetype getFrameCacheBudgetKiB() { return 64 * 1024; }
     static QString parseScriptSource(const QString& scriptPath);
     static QStringList parseScriptSources(const QString& scriptPath);
@@ -108,6 +116,7 @@ private:
     bool seekToFrame(int frameIndex);
     bool resetDecoderToStart();
     bool decodeNextFrame(int *decodeErrors = nullptr);
+    QImage convertDecodedFrameToImage();
     int registerDecodedFrame();
     int findIndexedFrameByTimestamp(int64_t timestamp, int hint) const;
     void updateFrameCountAtEndOfStream();
@@ -136,15 +145,22 @@ private:
     int mCurrentFrameIndex;
     int mNextDecodeFrameIndex;
     int64_t mStreamStartTimestamp;
+    int64_t mPendingSeekTargetTimestamp;
     bool mPacketPending;
     bool mDemuxEof;
     bool mDrainSent;
     bool mLastDecodeReachedEof;
     bool mDiscardUntilKeyFrame;
+    quint64 mSeekCount;
+    quint64 mDecodedFrameCount;
     AVPixelFormat mSwsSourceFormat;
     AVPixelFormat mSwsDestinationFormat;
+    AVPixelFormat mOutputPixelFormat;
+    QImage::Format mOutputImageFormat;
     int mSwsSourceWidth;
     int mSwsSourceHeight;
+    int mSourceBitDepth;
+    bool mSourceHasAlpha;
     int mErrorMode;
     bool mIsSyntheticScript = false;
     bool mIsAvsNative = false;

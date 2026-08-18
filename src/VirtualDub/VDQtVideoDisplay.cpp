@@ -23,7 +23,9 @@ VDVideoDisplayWidget::VDVideoDisplayWidget(const QString& title, QWidget *parent
 
 void VDVideoDisplayWidget::setFrameImage(const QImage& img) {
     mFrameImage = img;
-    repaint();
+    // Let Qt coalesce obsolete paints when playback or scrubbing produces
+    // frames faster than the display can refresh.
+    update();
 }
 
 void VDVideoDisplayWidget::setLabelText(const QString& text) {

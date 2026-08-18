@@ -12,12 +12,14 @@
 #include <QElapsedTimer>
 
 #include "VDQtVideoDisplay.h"
+#include "VDQtFrameDecodeWorker.h"
 #include "VDQtPositionControl.h"
 #include "VDQtDialogs.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtAudioPlayer.h"
 #include "VDQtVideoExporter.h"
 #include <QTimer>
+#include <QThread>
 
 class VDQtMainWindow : public QMainWindow {
     Q_OBJECT
@@ -97,6 +99,21 @@ private Q_SLOTS:
     void onPositionChanged(int frame);
     void onTransportAction(int actionCode);
     void onPlaybackTick();
+    void onDecodedFrameReady(int frameIndex,
+                             quint64 generation,
+                             const QImage& inputImage,
+                             const QImage& outputImage,
+                             bool keyFrame,
+                             double timestampSeconds,
+                             int frameCount,
+                             int frameCountStatus,
+                             quint64 seekCount,
+                             quint64 decodedFrameCount);
+    void onDecodedFrameUnavailable(int frameIndex,
+                                   quint64 generation,
+                                   const QString& errorMessage,
+                                   int frameCount,
+                                   int frameCountStatus);
 
 private:
     void createMenus();
@@ -104,6 +121,9 @@ private:
     void applyTheme();
     void autoFitWindowToVideo();
     void updateFrameDisplay(int frameIndex);
+    bool openInteractiveDecoder(const QString& filePath, QString *errorMessage);
+    void closeInteractiveDecoder();
+    void syncInteractiveFilterChain();
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
     void updateRecentFilesMenu();
@@ -114,7 +134,14 @@ private:
     VDVideoDisplayWidget *mOutputDisplay;
     VDQtPositionControlWidget *mPositionControl;
     VDQtVideoDecoder mVideoDecoder;
+    // Native AviSynth audio gets an independently evaluated clip. AviSynth
+    // filters are not universally safe when get_audio/get_frame run on the
+    // same graph from the audio and video threads.
+    VDQtVideoDecoder mAvsAudioDecoder;
     VDQtAudioPlayer mAudioPlayer;
+    QThread *mFrameDecodeThread = nullptr;
+    VDQtFrameDecodeWorker *mFrameDecodeWorker = nullptr;
+    quint64 mFrameRequestGeneration = 0;
     QTimer *mPlaybackTimer;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;

@@ -585,12 +585,10 @@ VDResizeFilterDialog::VDResizeFilterDialog(const QMap<QString, double>& params, 
     // -------------------------------------------------------------------------
     QHBoxLayout *bottomBar = new QHBoxLayout();
     QPushButton *btnShowPreview = new QPushButton("Show preview", this);
-    QPushButton *btnSaveDefault = new QPushButton("Save as default", this);
     QPushButton *btnApply = new QPushButton("Apply", this);
     QDialogButtonBox *btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 
     bottomBar->addWidget(btnShowPreview);
-    bottomBar->addWidget(btnSaveDefault);
     bottomBar->addStretch();
     bottomBar->addWidget(btnApply);
     bottomBar->addWidget(btnBox);
@@ -2617,9 +2615,6 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
     // Bottom Buttons
     // -------------------------------------------------------------------------
     QHBoxLayout *hButtons = new QHBoxLayout();
-    btnSaveDefault = new QPushButton("Save as default", this);
-    btnSaveDefault->setFixedWidth(110);
-
     btnOk = new QPushButton("OK", this);
     btnOk->setDefault(true);
     btnOk->setFixedWidth(75);
@@ -2627,7 +2622,6 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
     btnCancel = new QPushButton("Cancel", this);
     btnCancel->setFixedWidth(75);
 
-    hButtons->addWidget(btnSaveDefault);
     hButtons->addStretch();
     hButtons->addWidget(btnOk);
     hButtons->addWidget(btnCancel);
@@ -2635,16 +2629,6 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
 
     connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
     connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
-    connect(btnSaveDefault, &QPushButton::clicked, this, &VDDecodeFormatDialog::onSaveAsDefaultClicked);
-}
-
-void VDDecodeFormatDialog::onSaveAsDefaultClicked() {
-    mSaveAsDefault = true;
-    accept();
-}
-
-bool VDDecodeFormatDialog::isSaveAsDefault() const {
-    return mSaveAsDefault;
 }
 
 VDDecompressionFormatConfig VDDecodeFormatDialog::getConfig() const {
@@ -2730,9 +2714,6 @@ VDDecoderErrorModeDialog::VDDecoderErrorModeDialog(const VDDecoderErrorModeConfi
 
     // Bottom Buttons
     QHBoxLayout *hButtons = new QHBoxLayout();
-    btnSaveDefault = new QPushButton("Save as default", this);
-    btnSaveDefault->setFixedWidth(110);
-
     btnOk = new QPushButton("OK", this);
     btnOk->setDefault(true);
     btnOk->setFixedWidth(75);
@@ -2740,7 +2721,6 @@ VDDecoderErrorModeDialog::VDDecoderErrorModeDialog(const VDDecoderErrorModeConfi
     btnCancel = new QPushButton("Cancel", this);
     btnCancel->setFixedWidth(75);
 
-    hButtons->addWidget(btnSaveDefault);
     hButtons->addStretch();
     hButtons->addWidget(btnOk);
     hButtons->addWidget(btnCancel);
@@ -2749,16 +2729,6 @@ VDDecoderErrorModeDialog::VDDecoderErrorModeDialog(const VDDecoderErrorModeConfi
 
     connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
     connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
-    connect(btnSaveDefault, &QPushButton::clicked, this, &VDDecoderErrorModeDialog::onSaveAsDefaultClicked);
-}
-
-void VDDecoderErrorModeDialog::onSaveAsDefaultClicked() {
-    mSaveAsDefault = true;
-    accept();
-}
-
-bool VDDecoderErrorModeDialog::isSaveAsDefault() const {
-    return mSaveAsDefault;
 }
 
 VDDecoderErrorModeConfig VDDecoderErrorModeDialog::getConfig() const {

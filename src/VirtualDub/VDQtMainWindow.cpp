@@ -101,29 +101,24 @@ bool replaceWithStagedFile(const QString& stagedPath, const QString& outputPath)
     return std::rename(stagedName.constData(), outputName.constData()) == 0;
 }
 
+void clearLegacyPersistentProcessingSettings()
+{
+    // Processing choices are session state. Remove values written by older
+    // builds while retaining unrelated application history such as Recent Files.
+    QSettings applicationSettings("VirtualDub", "VirtualDub_Port");
+    applicationSettings.remove(QStringLiteral("decoder"));
+    applicationSettings.sync();
+
+    QSettings filterSettings("VirtualDubPort", "FilterSettings");
+    filterSettings.clear();
+    filterSettings.sync();
+}
+
 } // namespace
 
 VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     : QMainWindow(parent) {
-    QSettings settings("VirtualDub", "VirtualDub_Port");
-    mDecompressionFormatConfig.formatName = settings.value(
-        "decoder/decompressionFormat", QStringLiteral("Autoselect")).toString();
-    if (mDecompressionFormatConfig.formatName != QStringLiteral("Autoselect")
-        && mDecompressionFormatConfig.formatName != QStringLiteral("RGB24")) {
-        mDecompressionFormatConfig.formatName = QStringLiteral("Autoselect");
-    }
-    mDecompressionFormatConfig.colorSpace = settings.value("decoder/colorSpace", 0).toInt();
-    if (mDecompressionFormatConfig.colorSpace < 0 || mDecompressionFormatConfig.colorSpace > 2) {
-        mDecompressionFormatConfig.colorSpace = 0;
-    }
-    mDecompressionFormatConfig.componentRange = settings.value("decoder/componentRange", 0).toInt();
-    if (mDecompressionFormatConfig.componentRange < 0 || mDecompressionFormatConfig.componentRange > 2) {
-        mDecompressionFormatConfig.componentRange = 0;
-    }
-    mDecoderErrorModeConfig.errorMode = settings.value("decoder/errorMode", 0).toInt();
-    if (mDecoderErrorModeConfig.errorMode < 0 || mDecoderErrorModeConfig.errorMode > 2) {
-        mDecoderErrorModeConfig.errorMode = 0;
-    }
+    clearLegacyPersistentProcessingSettings();
     mVideoDecoder.setDecompressionConfig(
         mDecompressionFormatConfig.formatName,
         mDecompressionFormatConfig.colorSpace,
@@ -164,13 +159,45 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     mPlaybackTimer = new QTimer(this);
     connect(mPlaybackTimer, &QTimer::timeout, this, &VDQtMainWindow::onPlaybackTick);
 
+    mFrameDecodeThread = new QThread(this);
+    mFrameDecodeWorker = new VDQtFrameDecodeWorker;
+    mFrameDecodeWorker->moveToThread(mFrameDecodeThread);
+    connect(mFrameDecodeThread, &QThread::finished,
+            mFrameDecodeWorker, &QObject::deleteLater);
+    connect(mFrameDecodeWorker, &VDQtFrameDecodeWorker::frameReady,
+            this, &VDQtMainWindow::onDecodedFrameReady);
+    connect(mFrameDecodeWorker, &VDQtFrameDecodeWorker::frameUnavailable,
+            this, &VDQtMainWindow::onDecodedFrameUnavailable);
+    mFrameDecodeThread->start();
+
     connect(mPositionControl, &VDQtPositionControlWidget::positionChanged, this, &VDQtMainWindow::onPositionChanged);
     connect(mPositionControl, &VDQtPositionControlWidget::transportActionTriggered, this, &VDQtMainWindow::onTransportAction);
+    connect(mPositionControl, &VDQtPositionControlWidget::userScrubStarted, this, [this]() {
+        if (mPlaybackTimer->isActive()) {
+            mPlaybackTimer->stop();
+            mAudioPlayer.pause();
+        }
+    });
 
     VDLogWindow::instance(this)->appendLog("[Info] VirtualDub Native C++/Qt6 Linux Port initialized successfully.");
 }
 
 VDQtMainWindow::~VDQtMainWindow() {
+    if (mPlaybackTimer) mPlaybackTimer->stop();
+    if (mFrameDecodeWorker) {
+        mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);
+        if (mFrameDecodeThread && mFrameDecodeThread->isRunning()) {
+            QMetaObject::invokeMethod(
+                mFrameDecodeWorker,
+                [worker = mFrameDecodeWorker]() { worker->closeSource(); },
+                Qt::BlockingQueuedConnection);
+        }
+    }
+    if (mFrameDecodeThread) {
+        mFrameDecodeThread->quit();
+        mFrameDecodeThread->wait();
+    }
+    mFrameDecodeWorker = nullptr;
 }
 
 void VDQtMainWindow::applyTheme() {
@@ -374,11 +401,36 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
     onFileClose();
 
     if (mVideoDecoder.openFile(filePath)) {
+        QString interactiveError;
+        if (!openInteractiveDecoder(filePath, &interactiveError)) {
+            mVideoDecoder.close();
+            QMessageBox::critical(
+                this, "VirtualDub Error",
+                QString("Could not initialize interactive video decoding:\n%1")
+                    .arg(interactiveError));
+            return false;
+        }
+
         if (mVideoDecoder.isAvsNative()) {
             // The native AviSynth clip is authoritative. In particular, do not
             // resurrect audio from a parsed source file when the script has
             // intentionally removed it (for example with KillAudio()).
-            mAudioPlayer.openAvsClip(mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi());
+            const AVS_VideoInfo *videoInfo = mVideoDecoder.getAvsVi();
+            if (videoInfo && avs_has_audio(videoInfo)) {
+                mAvsAudioDecoder.setDecompressionConfig(
+                    mDecompressionFormatConfig.formatName,
+                    mDecompressionFormatConfig.colorSpace,
+                    mDecompressionFormatConfig.componentRange);
+                mAvsAudioDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
+                if (mAvsAudioDecoder.openFile(filePath)) {
+                    mAudioPlayer.openAvsClip(
+                        mAvsAudioDecoder.getAvsClip(), mAvsAudioDecoder.getAvsVi());
+                } else {
+                    VDLogWindow::instance(this)->appendLog(
+                        QString("[Audio] AviSynth audio graph could not be opened independently: %1")
+                            .arg(mAvsAudioDecoder.getLastError()));
+                }
+            }
         } else {
             QString mediaPath = filePath;
             if (filePath.endsWith(".avs", Qt::CaseInsensitive) || filePath.endsWith(".vpy", Qt::CaseInsensitive)) {
@@ -477,7 +529,9 @@ void VDQtMainWindow::onFileAppendSegment() {
 
 void VDQtMainWindow::onFileClose() {
     mPlaybackTimer->stop();
+    closeInteractiveDecoder();
     mAudioPlayer.close();
+    mAvsAudioDecoder.close();
     QCoreApplication::processEvents();
     mVideoDecoder.close();
     mInputDisplay->clearDisplay();
@@ -1700,20 +1754,22 @@ void VDQtMainWindow::onVideoDecodeFormat() {
             mDecompressionFormatConfig.colorSpace,
             mDecompressionFormatConfig.componentRange
         );
-        if (dlg.isSaveAsDefault()) {
-            QSettings settings("VirtualDub", "VirtualDub_Port");
-            settings.setValue("decoder/decompressionFormat", mDecompressionFormatConfig.formatName);
-            settings.setValue("decoder/colorSpace", mDecompressionFormatConfig.colorSpace);
-            settings.setValue("decoder/componentRange", mDecompressionFormatConfig.componentRange);
-        }
         if (mVideoDecoder.isOpen()) {
+            QMetaObject::invokeMethod(
+                mFrameDecodeWorker,
+                [this]() {
+                    mFrameDecodeWorker->setDecompressionConfig(
+                        mDecompressionFormatConfig.formatName,
+                        mDecompressionFormatConfig.colorSpace,
+                        mDecompressionFormatConfig.componentRange);
+                },
+                Qt::BlockingQueuedConnection);
             updateFrameDisplay(mPositionControl->GetPosition());
         }
-        VDLogWindow::instance(this)->appendLog(QString("[Video] Decompression format selected: %1 (Color space: %2, Component range: %3, SaveDefault: %4)")
+        VDLogWindow::instance(this)->appendLog(QString("[Video] Session decompression format selected: %1 (Color space: %2, Component range: %3)")
             .arg(mDecompressionFormatConfig.formatName)
             .arg(mDecompressionFormatConfig.colorSpace == 1 ? "Rec. 601" : (mDecompressionFormatConfig.colorSpace == 2 ? "Rec. 709" : "No change"))
-            .arg(mDecompressionFormatConfig.componentRange == 1 ? "Limited" : (mDecompressionFormatConfig.componentRange == 2 ? "Full" : "No change"))
-            .arg(dlg.isSaveAsDefault() ? "Yes" : "No"));
+            .arg(mDecompressionFormatConfig.componentRange == 1 ? "Limited" : (mDecompressionFormatConfig.componentRange == 2 ? "Full" : "No change")));
         statusBar()->showMessage(QString("Decompression Format: %1").arg(mDecompressionFormatConfig.formatName));
     }
 }
@@ -1819,17 +1875,16 @@ void VDQtMainWindow::onVideoErrorMode() {
     if (dlg.exec() == QDialog::Accepted) {
         mDecoderErrorModeConfig = dlg.getConfig();
         mVideoDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
-        if (dlg.isSaveAsDefault()) {
-            QSettings settings("VirtualDub", "VirtualDub_Port");
-            settings.setValue("decoder/errorMode", mDecoderErrorModeConfig.errorMode);
-        }
+        QMetaObject::invokeMethod(
+            mFrameDecodeWorker,
+            [this]() { mFrameDecodeWorker->setErrorMode(mDecoderErrorModeConfig.errorMode); },
+            Qt::BlockingQueuedConnection);
         QString modeStr = "Report all errors";
         if (mDecoderErrorModeConfig.errorMode == 1) modeStr = "Conceal errors and resume decoding at next keyframe";
         else if (mDecoderErrorModeConfig.errorMode == 2) modeStr = "Decode even if the result may be garbled";
 
-        VDLogWindow::instance(this)->appendLog(QString("[Video] Decoder error mode set: %1 (SaveDefault: %2)")
-            .arg(modeStr)
-            .arg(dlg.isSaveAsDefault() ? "Yes" : "No"));
+        VDLogWindow::instance(this)->appendLog(QString("[Video] Session decoder error mode set: %1")
+            .arg(modeStr));
         statusBar()->showMessage(QString("Decoder error mode: %1").arg(modeStr));
     }
 }
@@ -1863,6 +1918,7 @@ void VDQtMainWindow::onVideoFilters() {
     if (dlg.exec() != QDialog::Accepted) {
         filterSystem.replaceActiveChain(originalChain);
     }
+    syncInteractiveFilterChain();
     updateFrameDisplay(mPositionControl->GetPosition());
 }
 
@@ -1955,9 +2011,9 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
                 mPlaybackStartTimestamp = mVideoDecoder.getFps() > 0.0
                     ? mPlaybackStartFrame / mVideoDecoder.getFps()
                     : 0.0;
-            mPlaybackElapsedTimer.restart();
             seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
             mAudioPlayer.play();
+            mPlaybackElapsedTimer.restart();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(10);
         }
@@ -1976,9 +2032,9 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
                 mPlaybackStartTimestamp = mVideoDecoder.getFps() > 0.0
                     ? mPlaybackStartFrame / mVideoDecoder.getFps()
                     : 0.0;
-            mPlaybackElapsedTimer.restart();
             seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
             mAudioPlayer.play();
+            mPlaybackElapsedTimer.restart();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(10);
         }
@@ -2015,15 +2071,9 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         mAudioPlayer.pause();
         const int target = static_cast<int>(mPositionControl->GetPosition()) + 1;
         if (!mVideoDecoder.isFrameCountExact()) {
-            if (!mVideoDecoder.getFrameImage(target).isNull()) {
-                const int rangeEnd = std::max(target, mVideoDecoder.getFrameCount() - 1);
-                mPositionControl->SetRange(0, rangeEnd);
-                mPositionControl->SetPosition(target);
-            } else if (mVideoDecoder.getFrameCount() > 0) {
-                const int lastFrame = mVideoDecoder.getFrameCount() - 1;
-                mPositionControl->SetRange(0, lastFrame);
-                mPositionControl->SetPosition(lastFrame);
-            }
+            const int rangeEnd = std::max(target, mVideoDecoder.getFrameCount() - 1);
+            mPositionControl->SetRange(0, rangeEnd);
+            mPositionControl->SetPosition(target);
         } else if (mVideoDecoder.getFrameCount() > 0) {
             mPositionControl->SetPosition(std::min(mVideoDecoder.getFrameCount() - 1, target));
         }
@@ -2086,11 +2136,10 @@ void VDQtMainWindow::onPlaybackTick() {
     if (targetFrame != mPositionControl->GetPosition()) {
         if (!mVideoDecoder.isFrameCountExact()
             && targetFrame >= mVideoDecoder.getFrameCount()) {
-            if (!mVideoDecoder.getFrameImage(targetFrame).isNull()) {
-                mPositionControl->SetRange(0, std::max(targetFrame, mVideoDecoder.getFrameCount() - 1));
-                mPositionControl->SetPosition(targetFrame);
-                return;
-            }
+            mPositionControl->SetRange(
+                0, std::max(targetFrame, mVideoDecoder.getFrameCount() - 1));
+            mPositionControl->SetPosition(targetFrame);
+            return;
         }
         if (mVideoDecoder.getFrameCount() > 0 && targetFrame >= mVideoDecoder.getFrameCount()) {
             mPlaybackTimer->stop();
@@ -2107,29 +2156,54 @@ void VDQtMainWindow::onPlaybackTick() {
 #include "VDQtFilterSystem.h"
 
 void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
-    if (!mVideoDecoder.isOpen()) return;
+    if (!mVideoDecoder.isOpen() || !mFrameDecodeWorker) return;
 
-    QImage frameImage = mVideoDecoder.getFrameImage(frameIndex);
-    if (!frameImage.isNull()) {
-        mPositionControl->SetCurrentFrameKey(mVideoDecoder.isKeyFrame(frameIndex));
-        mInputDisplay->setFrameImage(frameImage);
+    const quint64 generation = ++mFrameRequestGeneration;
+    const bool playing = mPlaybackTimer->isActive();
+    mFrameDecodeWorker->requestFrame(
+        frameIndex,
+        generation,
+        playing,
+        !playing || mPlaybackPreview);
+}
 
-        // If playing and input-only mode, skip filter processing on output display for maximum performance
-        if (mPlaybackTimer->isActive() && !mPlaybackPreview) {
-            // Only input pane is updated during Play Input
-        } else {
-            QImage filteredImage = VDQtFilterSystem::instance().processFrame(frameImage);
-            mOutputDisplay->setFrameImage(filteredImage);
-        }
+void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
+                                         quint64 generation,
+                                         const QImage& inputImage,
+                                         const QImage& outputImage,
+                                         bool keyFrame,
+                                         double timestampSeconds,
+                                         int frameCount,
+                                         int frameCountStatus,
+                                         quint64 seekCount,
+                                         quint64 decodedFrameCount) {
+    Q_UNUSED(seekCount);
+    Q_UNUSED(decodedFrameCount);
+    if (generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
 
-        const int frameCount = mVideoDecoder.getFrameCount();
-        if (frameCount > 0 && mPositionControl->GetRangeEnd() != frameCount - 1) {
-            mPositionControl->SetRange(0, frameCount - 1);
-        }
+    mPositionControl->SetCurrentFrameKey(keyFrame);
+    mInputDisplay->setFrameImage(inputImage);
+    if (!outputImage.isNull()) mOutputDisplay->setFrameImage(outputImage);
 
-        double fps = mVideoDecoder.getFps();
-        double timeSeconds = mVideoDecoder.getFrameTimestampSeconds(frameIndex);
-        if (!std::isfinite(timeSeconds)) timeSeconds = (fps > 0) ? (frameIndex / fps) : 0;
+    if (frameCount > 0) {
+        const bool exactFrameCount = frameCountStatus
+            == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Exact);
+        // Provisional metadata may underestimate a stream. Keep an expanded
+        // interactive range while playback is discovering frames; shrinking
+        // it would clamp the slider backwards and enqueue a spurious seek on
+        // every frame beyond the estimate.
+        const int rangeEnd = exactFrameCount
+            ? frameCount - 1
+            : std::max({static_cast<int>(mPositionControl->GetRangeEnd()),
+                        frameCount - 1,
+                        frameIndex});
+        if (mPositionControl->GetRangeEnd() != rangeEnd)
+            mPositionControl->SetRange(0, rangeEnd);
+    }
+
+    const double fps = mVideoDecoder.getFps();
+    double timeSeconds = timestampSeconds;
+    if (!std::isfinite(timeSeconds)) timeSeconds = (fps > 0) ? (frameIndex / fps) : 0;
         int hours = static_cast<int>(timeSeconds / 3600);
         int mins = static_cast<int>((timeSeconds - hours * 3600) / 60);
         int secs = static_cast<int>(timeSeconds) % 60;
@@ -2141,17 +2215,86 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
             .arg(secs, 2, 10, QChar('0'))
             .arg(msecs, 3, 10, QChar('0'));
 
-        QString lastFrame = frameCount > 0 ? QString::number(frameCount - 1) : QStringLiteral("?");
-        if (mVideoDecoder.getFrameCountStatus() == VDQtVideoDecoder::FrameCountStatus::Estimated)
-            lastFrame.prepend(QLatin1Char('~'));
-        statusBar()->showMessage(QString("Frame: %1 / %2  |  Time: %3  |  %4x%5 @ %6 fps")
-            .arg(frameIndex)
-            .arg(lastFrame)
-            .arg(timeStr)
-            .arg(mVideoDecoder.getWidth())
-            .arg(mVideoDecoder.getHeight())
-            .arg(fps, 0, 'f', 2));
+    QString lastFrame = frameCount > 0 ? QString::number(frameCount - 1) : QStringLiteral("?");
+    if (frameCountStatus == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Estimated))
+        lastFrame.prepend(QLatin1Char('~'));
+    statusBar()->showMessage(QString("Frame: %1 / %2  |  Time: %3  |  %4x%5 @ %6 fps")
+        .arg(frameIndex)
+        .arg(lastFrame)
+        .arg(timeStr)
+        .arg(inputImage.width())
+        .arg(inputImage.height())
+        .arg(fps, 0, 'f', 2));
+}
+
+void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
+                                               quint64 generation,
+                                               const QString& errorMessage,
+                                               int frameCount,
+                                               int frameCountStatus) {
+    if (generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
+
+    const bool exact = frameCountStatus
+        == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Exact);
+    if (mPlaybackTimer->isActive() && exact) {
+        mPlaybackTimer->stop();
+        mAudioPlayer.stop();
+        if (frameCount > 0) {
+            const int lastFrame = frameCount - 1;
+            mPositionControl->SetRange(0, lastFrame);
+            if (mPositionControl->GetPosition() != lastFrame)
+                mPositionControl->SetPosition(lastFrame);
+        }
+    } else if (!errorMessage.isEmpty()) {
+        statusBar()->showMessage(
+            QString("Unable to decode frame %1: %2").arg(frameIndex).arg(errorMessage));
     }
+}
+
+bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *errorMessage) {
+    if (!mFrameDecodeWorker || !mFrameDecodeThread || !mFrameDecodeThread->isRunning()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The frame decoding worker is unavailable.");
+        return false;
+    }
+
+    bool opened = false;
+    QString workerError;
+    const QList<VDFilterInstance> chain = VDQtFilterSystem::instance().getActiveChain();
+    QMetaObject::invokeMethod(
+        mFrameDecodeWorker,
+        [this, &opened, &workerError, filePath, chain]() {
+            mFrameDecodeWorker->setFilterChain(chain);
+            opened = mFrameDecodeWorker->openSource(
+                filePath,
+                mDecompressionFormatConfig.formatName,
+                mDecompressionFormatConfig.colorSpace,
+                mDecompressionFormatConfig.componentRange,
+                mDecoderErrorModeConfig.errorMode);
+            if (!opened) workerError = mFrameDecodeWorker->lastError();
+        },
+        Qt::BlockingQueuedConnection);
+    if (errorMessage) *errorMessage = workerError;
+    return opened;
+}
+
+void VDQtMainWindow::closeInteractiveDecoder() {
+    if (!mFrameDecodeWorker) return;
+    mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);
+    if (mFrameDecodeThread && mFrameDecodeThread->isRunning()) {
+        QMetaObject::invokeMethod(
+            mFrameDecodeWorker,
+            [worker = mFrameDecodeWorker]() { worker->closeSource(); },
+            Qt::BlockingQueuedConnection);
+    }
+}
+
+void VDQtMainWindow::syncInteractiveFilterChain() {
+    if (!mFrameDecodeWorker || !mFrameDecodeThread || !mFrameDecodeThread->isRunning()) return;
+    const QList<VDFilterInstance> chain = VDQtFilterSystem::instance().getActiveChain();
+    QMetaObject::invokeMethod(
+        mFrameDecodeWorker,
+        [worker = mFrameDecodeWorker, chain]() { worker->setFilterChain(chain); },
+        Qt::BlockingQueuedConnection);
 }
 
 void VDQtMainWindow::addRecentFile(const QString& filePath) {

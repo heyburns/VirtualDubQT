@@ -50,8 +50,10 @@
 #define _byteswap_uint64(x) __builtin_bswap64(x)
 #endif
 
-constexpr long long operator""i64(unsigned long long v) { return static_cast<long long>(v); }
-constexpr unsigned long long operator""ui64(unsigned long long v) { return v; }
+// The separating space is required by Clang when parsing Microsoft's reserved
+// integer suffixes as compatibility user-defined literals.
+constexpr long long operator"" i64(unsigned long long v) { return static_cast<long long>(v); }
+constexpr unsigned long long operator"" ui64(unsigned long long v) { return v; }
 #endif
 
 #include <vd2/system/vdtypes.h>
@@ -1349,4 +1351,3 @@ inline HANDLE GetCurrentThread() { return (HANDLE)2; }
 inline BOOL SetThreadPriority(HANDLE, int) { return TRUE; }
 
 #endif // VDWIN32_SHIM_H
-

@@ -1,19 +1,27 @@
+#include <array>
+#include <cmath>
+#include <iostream>
+
 #include "VDQtFilterSystem.h"
+#include "VDQtFrameDecodeWorker.h"
+#include "VDQtAudioPlayer.h"
+#include "VDQtCodecEngine.h"
+#include "VDQtCodecSettings.h"
+#include "VDQtPositionControl.h"
 #include "VDQtVideoDecoder.h"
 #include <vd2/system/atomic.h>
 #include <vd2/system/binary.h>
 
-#include <QCoreApplication>
+#include <QApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
-#include <QSettings>
+#include <QProcess>
 #include <QTemporaryDir>
-
-#include <iostream>
-#include <array>
-#include <cmath>
+#include <QThread>
+#include <QTimer>
 
 namespace {
 
@@ -37,6 +45,18 @@ bool isMostlyBlue(const QColor& color) {
     return color.blue() > 220 && color.green() < 35 && color.red() < 35;
 }
 
+bool runProcess(const QString& program, const QStringList& arguments, QByteArray *errorOutput = nullptr) {
+    QProcess process;
+    process.start(program, arguments);
+    if (!process.waitForStarted(5000) || !process.waitForFinished(30000)) {
+        process.kill();
+        process.waitForFinished();
+        return false;
+    }
+    if (errorOutput) *errorOutput = process.readAllStandardError();
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -44,16 +64,76 @@ int main(int argc, char **argv) {
     if (!require(settingsDirectory.isValid(), "temporary settings directory"))
         return 1;
 
-    // QSettings' native Unix backend uses XDG_CONFIG_HOME. Set it before
-    // constructing QCoreApplication so this test never touches user settings.
-    qputenv("XDG_CONFIG_HOME", settingsDirectory.path().toUtf8());
-    QCoreApplication application(argc, argv);
+    qputenv("QT_QPA_PLATFORM", "offscreen");
+    qputenv("VD_DISABLE_AUDIO_OUTPUT", "1");
+    QApplication application(argc, argv);
+
+    {
+        VDQtPositionControlWidget positionControl;
+        int dispatchCount = 0;
+        int dispatchedPosition = -1;
+        QObject::connect(&positionControl, &VDQtPositionControlWidget::positionChanged,
+                         [&](int position) {
+                             ++dispatchCount;
+                             dispatchedPosition = position;
+                         });
+        positionControl.SetRange(0, 100, true);
+        positionControl.SetPosition(12);
+
+        // A programmatic move used to emit once directly and once again through
+        // QSlider::valueChanged after the scrub debounce expired.
+        QEventLoop settleLoop;
+        QTimer::singleShot(40, &settleLoop, &QEventLoop::quit);
+        settleLoop.exec();
+        if (!require(dispatchCount == 1 && dispatchedPosition == 12,
+                     "programmatic playhead movement dispatches exactly once"))
+            return 1;
+    }
 
     QImage source(8, 8, QImage::Format_RGB888);
     source.fill(QColor(16, 32, 64));
 
     {
-        VDQtFilterSystem filters;
+        QImage highPrecision(4, 4, QImage::Format_RGBA64);
+        highPrecision.fill(QColor::fromRgba64(1000, 2000, 3000, 4000));
+
+        VDFilterInstance resize;
+        resize.id = QStringLiteral("test-resize");
+        resize.name = QStringLiteral("Resize");
+        resize.type = VDFilterType::Resize;
+        resize.enabled = true;
+        resize.params.insert(QStringLiteral("width"), 8.0);
+        resize.params.insert(QStringLiteral("height"), 8.0);
+
+        VDQtFilterSystem geometricFilters;
+        geometricFilters.replaceActiveChainTransient({ resize });
+        const QImage resized = geometricFilters.processFrame(highPrecision);
+        if (!require(!resized.isNull() && resized.depth() == 64,
+                     "geometric filters retain high-bit-depth frame storage"))
+            return 1;
+
+        VDFilterInstance grayscale;
+        grayscale.id = QStringLiteral("test-grayscale");
+        grayscale.name = QStringLiteral("Grayscale");
+        grayscale.type = VDFilterType::Grayscale;
+        grayscale.enabled = true;
+        geometricFilters.replaceActiveChainTransient({ grayscale });
+        if (!require(geometricFilters.processFrame(highPrecision).isNull(),
+                     "byte-oriented filters reject high-depth input instead of quantizing it"))
+            return 1;
+
+        QImage alphaImage(2, 2, QImage::Format_RGBA8888);
+        alphaImage.fill(QColor(20, 80, 140, 73));
+        const QImage grayscaleAlpha = geometricFilters.processFrame(alphaImage);
+        if (!require(!grayscaleAlpha.isNull()
+                     && grayscaleAlpha.hasAlphaChannel()
+                     && grayscaleAlpha.pixelColor(0, 0).alpha() == 73,
+                     "8-bit pixel filters preserve source alpha"))
+            return 1;
+    }
+
+    {
+        VDQtFilterSystem& filters = VDQtFilterSystem::instance();
         filters.clearFilters();
         filters.addFilter(VDFilterType::BobDoubler);
         QList<QImage> phases;
@@ -66,18 +146,49 @@ int main(int argc, char **argv) {
         if (!require(!phases[0].isNull() && !phases[1].isNull(),
                      "bob output phases are valid"))
             return 1;
+        if (!require(VDQtFilterSystem::instance().getActiveChain().size() == 1,
+                     "filter chain persists for the application session"))
+            return 1;
+
+        VDQtFilterSystem freshSession;
+        if (!require(freshSession.getActiveChain().isEmpty(),
+                     "a new filter session starts without the previous chain"))
+            return 1;
+        filters.clearFilters();
     }
 
     {
-        VDQtFilterSystem restored;
-        if (!require(restored.getActiveChain().size() == 1,
-                     "filter chain persists and reloads"))
+        VDQtCodecEngine& codecs = VDQtCodecEngine::instance();
+        codecs.resetToDefaults();
+        VDVideoCodecParams videoParams =
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("libx264"));
+        videoParams.crf = 17;
+        codecs.setVideoParams(videoParams);
+        if (!require(VDQtCodecEngine::instance().getVideoParams().codecId == QStringLiteral("libx264")
+                     && VDQtCodecEngine::instance().getVideoParams().crf == 17,
+                     "compression choices persist for the application session"))
             return 1;
-        if (!require(restored.getActiveChain().first().type == VDFilterType::BobDoubler,
-                     "persisted filter type is retained"))
+
+        VDQtCodecEngine freshCodecSession;
+        if (!require(freshCodecSession.getVideoParams().codecId == QStringLiteral("prores_ks"),
+                     "a new compression session starts at defaults"))
             return 1;
-        restored.clearFilters();
-        restored.saveSettings();
+
+        VDQtCodecSettings& codecSettings = VDQtCodecSettings::instance();
+        codecSettings.resetToDefaults();
+        VDAudioCodecConfig audioConfig = codecSettings.getAudioConfig();
+        audioConfig.bitrateKbps = 256;
+        codecSettings.setAudioConfig(audioConfig);
+        if (!require(VDQtCodecSettings::instance().getAudioConfig().bitrateKbps == 256,
+                     "audio compression choices persist for the application session"))
+            return 1;
+
+        VDQtCodecSettings freshSettingsSession;
+        if (!require(freshSettingsSession.getAudioConfig().bitrateKbps == 192,
+                     "a new audio settings session starts at defaults"))
+            return 1;
+        codecs.resetToDefaults();
+        codecSettings.resetToDefaults();
     }
 
     {
@@ -96,6 +207,20 @@ int main(int argc, char **argv) {
     }
 
     {
+        volatile int rawAtomic = 7;
+        if (!require(VDAtomicInt::staticExchange(&rawAtomic, 11) == 7 && rawAtomic == 11,
+                     "atomic exchange updates the pointed-to integer"))
+            return 1;
+        VDAtomicInt::staticIncrement(&rawAtomic);
+        VDAtomicInt::staticDecrement(&rawAtomic);
+        if (!require(rawAtomic == 11,
+                     "atomic increment/decrement do not modify the pointer variable"))
+            return 1;
+        if (!require(VDAtomicInt::staticCompareExchange(&rawAtomic, 19, 11) == 11
+                     && rawAtomic == 19,
+                     "atomic compare/exchange targets the supplied storage"))
+            return 1;
+
         VDAtomicBool atomicBool(true);
         if (!require(atomicBool.xchg(false), "atomic bool exchange returns prior true value"))
             return 1;
@@ -160,6 +285,298 @@ int main(int argc, char **argv) {
     }
 
     {
+        const QString audioFixture = settingsDirectory.filePath(QStringLiteral("buffered_audio.m4a"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=997:sample_rate=48000:duration=2"),
+                           QStringLiteral("-c:a"), QStringLiteral("aac"),
+                           QStringLiteral("-b:a"), QStringLiteral("192k"),
+                           QStringLiteral("-y"), audioFixture },
+                         &ffmpegError),
+                     "create streaming-audio fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        QString audioBufferError;
+        if (!require(VDQtRunAudioBufferRegression(audioFixture, &audioBufferError),
+                     "bounded live-audio buffer primes, pulls, and rebuilds after seek")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+        audioBufferError.clear();
+        if (!require(VDQtRunAudioDecodeAheadDeadlineRegression(audioFixture, &audioBufferError),
+                     "codec work stays off the real-time audio pull path")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+
+        const QString jitterFixture = settingsDirectory.filePath(QStringLiteral("subsample_jitter.nut"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=997:sample_rate=48000:duration=2"),
+                           QStringLiteral("-af"),
+                           QStringLiteral("volume=0.8,asetnsamples=n=1024,asetpts=PTS+mod(floor(N/1024)\\,2)/(48000*TB)"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("nut"),
+                           QStringLiteral("-y"), jitterFixture },
+                         &ffmpegError),
+                     "create sub-millisecond timestamp-jitter fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        audioBufferError.clear();
+        if (!require(VDQtRunAudioBufferRegression(jitterFixture, &audioBufferError),
+                     "sub-millisecond timestamp jitter does not create PCM clicks")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+
+        const QString durationJitterFixture =
+            settingsDirectory.filePath(QStringLiteral("aac_duration_jitter.m4a"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=997:sample_rate=48000:duration=2"),
+                           QStringLiteral("-af"),
+                           QStringLiteral("volume=0.8,asetnsamples=n=1024,asetpts=PTS+(if(eq(mod(floor(N/1024)\\,3)\\,1)\\,-32\\,if(eq(mod(floor(N/1024)\\,3)\\,2)\\,24\\,0)))/(48000*TB)"),
+                           QStringLiteral("-c:a"), QStringLiteral("aac"),
+                           QStringLiteral("-b:a"), QStringLiteral("192k"),
+                           QStringLiteral("-y"), durationJitterFixture },
+                         &ffmpegError),
+                     "create AAC duration-jitter fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        audioBufferError.clear();
+        if (!require(VDQtRunAudioBufferRegression(durationJitterFixture, &audioBufferError),
+                     "variable AAC packet durations do not cut continuous playback PCM")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+
+        const QString exportedWav =
+            settingsDirectory.filePath(QStringLiteral("aac_duration_jitter_export.wav"));
+        VDQtAudioPlayer audioExporter;
+        if (!require(audioExporter.openFile(durationJitterFixture),
+                     "open AAC duration-jitter fixture for full-processing export") ||
+            !require(audioExporter.exportAudioToFile(exportedWav),
+                     "export continuous AAC PCM without packet-duration edits")) {
+            return 1;
+        }
+
+        const QString sourcePcm =
+            settingsDirectory.filePath(QStringLiteral("aac_duration_jitter_source.pcm"));
+        const QString exportedPcm =
+            settingsDirectory.filePath(QStringLiteral("aac_duration_jitter_export.pcm"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), durationJitterFixture,
+                           QStringLiteral("-map"), QStringLiteral("0:a:0"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("s16le"),
+                           QStringLiteral("-y"), sourcePcm },
+                         &ffmpegError),
+                     "decode AAC duration-jitter reference PCM") ||
+            !require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), exportedWav,
+                           QStringLiteral("-map"), QStringLiteral("0:a:0"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("s16le"),
+                           QStringLiteral("-y"), exportedPcm },
+                         &ffmpegError),
+                     "decode exported AAC PCM for comparison")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        QFile sourcePcmFile(sourcePcm);
+        QFile exportedPcmFile(exportedPcm);
+        if (!require(sourcePcmFile.open(QIODevice::ReadOnly) &&
+                     exportedPcmFile.open(QIODevice::ReadOnly) &&
+                     sourcePcmFile.readAll() == exportedPcmFile.readAll(),
+                     "full-processing audio export matches continuous decoder PCM exactly")) {
+            return 1;
+        }
+
+        const QString gapFixture = settingsDirectory.filePath(QStringLiteral("real_audio_gap.nut"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=997:sample_rate=48000:duration=2"),
+                           QStringLiteral("-af"),
+                           QStringLiteral("volume=0.8,asetnsamples=n=1024,asetpts=PTS+if(gte(N\\,1024)\\,480/(48000*TB)\\,0)"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("nut"),
+                           QStringLiteral("-y"), gapFixture },
+                         &ffmpegError),
+                     "create real audio-gap fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        audioBufferError.clear();
+        if (!require(VDQtRunAudioGapRegression(gapFixture, 1024, 480, &audioBufferError),
+                     "real audio gaps remain present after timestamp jitter smoothing")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+    }
+
+    {
+        const QString fixturePath = settingsDirectory.filePath(QStringLiteral("nonzero_bframes.mp4"));
+        QByteArray ffmpegError;
+        const bool fixtureCreated = runProcess(
+            QStringLiteral("ffmpeg"),
+            { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+              QStringLiteral("-f"), QStringLiteral("lavfi"),
+              QStringLiteral("-i"), QStringLiteral("testsrc2=size=96x64:rate=10:duration=1.2"),
+              QStringLiteral("-vf"), QStringLiteral("setpts=PTS+5/TB"),
+              QStringLiteral("-c:v"), QStringLiteral("libx264"),
+              QStringLiteral("-bf"), QStringLiteral("3"),
+              QStringLiteral("-g"), QStringLiteral("30"),
+              QStringLiteral("-an"), QStringLiteral("-copyts"),
+              QStringLiteral("-avoid_negative_ts"), QStringLiteral("disabled"),
+              QStringLiteral("-y"), fixturePath },
+            &ffmpegError);
+        if (!require(fixtureCreated, "create non-zero-start B-frame fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(fixturePath), "open non-zero-start B-frame fixture"))
+            return 1;
+        decoder.resetPerformanceCounters();
+        for (int frameIndex = 0; frameIndex < 12; ++frameIndex) {
+            if (!require(!decoder.getFrameImage(frameIndex).isNull(),
+                         "sequential decoder returns every delayed frame"))
+                return 1;
+        }
+        if (!require(decoder.getSeekCount() == 0,
+                     "sequential playback does not seek between frames"))
+            return 1;
+        if (!require(decoder.getFrameImage(12).isNull()
+                     && decoder.isFrameCountExact()
+                     && decoder.getFrameCount() == 12,
+                     "interactive decoder drains delayed tail frames and validates EOF"))
+            return 1;
+        if (!require(std::abs(decoder.getFrameTimestampSeconds(0)) < 0.0001
+                     && std::abs(decoder.getFrameTimestampSeconds(11) - 1.1) < 0.0001,
+                     "non-zero stream timestamps are normalized without changing frame ordinals"))
+            return 1;
+
+        decoder.clearCache();
+        decoder.resetPerformanceCounters();
+        if (!require(!decoder.getFrameImage(5).isNull(), "random indexed seek returns target frame"))
+            return 1;
+        for (int frameIndex = 6; frameIndex <= 10; ++frameIndex) {
+            if (!require(!decoder.getFrameImage(frameIndex).isNull(),
+                         "sequential decode continues after indexed seek"))
+                return 1;
+        }
+        if (!require(decoder.getSeekCount() == 1,
+                     "one random jump followed by playback performs one seek"))
+            return 1;
+
+        QThread decodeThread;
+        auto *worker = new VDQtFrameDecodeWorker;
+        worker->moveToThread(&decodeThread);
+        QObject::connect(&decodeThread, &QThread::finished, worker, &QObject::deleteLater);
+        decodeThread.start();
+
+        bool workerOpened = false;
+        QMetaObject::invokeMethod(
+            worker,
+            [&]() {
+                workerOpened = worker->openSource(
+                    fixturePath, QStringLiteral("Autoselect"), 0, 0, 0);
+            },
+            Qt::BlockingQueuedConnection);
+        if (!require(workerOpened, "open playback worker fixture"))
+            return 1;
+
+        quint64 receivedGeneration = 0;
+        int receivedFrame = -1;
+        quint64 receivedSeekCount = 0;
+        int readyCount = 0;
+        QEventLoop workerLoop;
+        QObject::connect(
+            worker, &VDQtFrameDecodeWorker::frameReady, &workerLoop,
+            [&](int frameIndex, quint64 generation, const QImage&, const QImage&,
+                bool, double, int, int, quint64 seekCount, quint64) {
+                ++readyCount;
+                receivedFrame = frameIndex;
+                receivedGeneration = generation;
+                receivedSeekCount = seekCount;
+                workerLoop.quit();
+            });
+
+        worker->requestFrame(0, 1, true, false);
+        QTimer::singleShot(5000, &workerLoop, &QEventLoop::quit);
+        workerLoop.exec();
+        if (!require(receivedGeneration == 1 && receivedFrame == 0,
+                     "playback worker returns its initial frame"))
+            return 1;
+
+        // Both writes occur before the worker event is serviced. Only the last
+        // target should be decoded/presented, and sequential catch-up must not seek.
+        worker->requestFrame(4, 2, true, false);
+        worker->requestFrame(9, 3, true, false);
+        QTimer::singleShot(5000, &workerLoop, &QEventLoop::quit);
+        workerLoop.exec();
+        if (!require(receivedGeneration == 3 && receivedFrame == 9 && readyCount == 2,
+                     "playback worker coalesces obsolete frame requests"))
+            return 1;
+        if (!require(receivedSeekCount == 0,
+                     "dropped presentation frames preserve sequential decoding"))
+            return 1;
+
+        QMetaObject::invokeMethod(
+            worker, [worker]() { worker->closeSource(); }, Qt::BlockingQueuedConnection);
+        decodeThread.quit();
+        decodeThread.wait();
+    }
+
+    {
+        const QString fixturePath = settingsDirectory.filePath(QStringLiteral("ten_bit_ffv1.mkv"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("testsrc2=size=64x48:rate=1:duration=1"),
+                           QStringLiteral("-vf"), QStringLiteral("format=yuv420p10le"),
+                           QStringLiteral("-c:v"), QStringLiteral("ffv1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p10le"),
+                           QStringLiteral("-y"), fixturePath },
+                         &ffmpegError),
+                     "create 10-bit FFV1 fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(fixturePath), "open 10-bit FFV1 fixture"))
+            return 1;
+        const QImage frame = decoder.getFrameImage(0);
+        if (!require(decoder.getSourceBitDepth() == 10
+                     && !decoder.sourceHasAlpha()
+                     && !frame.isNull()
+                     && frame.depth() == 64,
+                     "10-bit source is retained in a 16-bit-per-channel image"))
+            return 1;
+    }
+
+    {
         // Packed AviSynth RGB frames use Windows DIB orientation (bottom-up),
         // unlike YUV/YUY2. A vertically asymmetric clip catches accidental flips.
         const QString originalDirectory = QDir::currentPath();
@@ -199,6 +616,30 @@ int main(int argc, char **argv) {
             if (!require(QDir::currentPath() == originalDirectory,
                          "AviSynth import restores process working directory"))
                 return 1;
+        }
+    }
+
+    {
+        const QString scriptPath =
+            settingsDirectory.filePath(QStringLiteral("buffered_audio.avs"));
+        const QByteArray script =
+            "BlankClip(length=100, width=32, height=16, fps=25, "
+            "audio_rate=48000, channels=2, sample_type=\"16bit\")\n";
+        if (!require(writeFile(scriptPath, script), "write AviSynth audio buffering script"))
+            return 1;
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(scriptPath), "open AviSynth audio buffering script")) {
+            std::cerr << decoder.getLastError().toStdString() << '\n';
+            return 1;
+        }
+
+        QString avsAudioError;
+        if (!require(VDQtRunAvsAudioDecodeAheadDeadlineRegression(
+                         decoder.getAvsClip(), decoder.getAvsVi(), &avsAudioError),
+                     "AviSynth graph evaluation stays off the real-time audio pull path")) {
+            std::cerr << avsAudioError.toStdString() << '\n';
+            return 1;
         }
     }
 

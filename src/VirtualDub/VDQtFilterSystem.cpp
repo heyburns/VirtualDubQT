@@ -3,132 +3,14 @@
 #include <QUuid>
 #include <algorithm>
 #include <cmath>
-#include <optional>
 
 namespace {
 
-constexpr int kFilterSettingsSchemaVersion = 1;
-constexpr int kMaxPersistedFilters = 1024;
 constexpr int kMaxSequencedBobFilters = 6;
-
-QString filterTypeId(VDFilterType type) {
-    switch (type) {
-    case VDFilterType::SixAxis: return QStringLiteral("six_axis");
-    case VDFilterType::BobDoubler: return QStringLiteral("bob_doubler");
-    case VDFilterType::Resize: return QStringLiteral("resize");
-    case VDFilterType::Rotate: return QStringLiteral("rotate");
-    case VDFilterType::FlipHorizontal: return QStringLiteral("flip_horizontal");
-    case VDFilterType::FlipVertical: return QStringLiteral("flip_vertical");
-    case VDFilterType::BrightnessContrast: return QStringLiteral("brightness_contrast");
-    case VDFilterType::Grayscale: return QStringLiteral("grayscale");
-    case VDFilterType::InvertColor: return QStringLiteral("invert_color");
-    case VDFilterType::Blur: return QStringLiteral("blur");
-    case VDFilterType::Sharpen: return QStringLiteral("sharpen");
-    }
-
-    return {};
-}
-
-std::optional<VDFilterType> filterTypeFromId(const QString& id) {
-    if (id == QLatin1String("six_axis")) return VDFilterType::SixAxis;
-    if (id == QLatin1String("bob_doubler")) return VDFilterType::BobDoubler;
-    if (id == QLatin1String("resize")) return VDFilterType::Resize;
-    if (id == QLatin1String("rotate")) return VDFilterType::Rotate;
-    if (id == QLatin1String("flip_horizontal")) return VDFilterType::FlipHorizontal;
-    if (id == QLatin1String("flip_vertical")) return VDFilterType::FlipVertical;
-    if (id == QLatin1String("brightness_contrast")) return VDFilterType::BrightnessContrast;
-    if (id == QLatin1String("grayscale")) return VDFilterType::Grayscale;
-    if (id == QLatin1String("invert_color")) return VDFilterType::InvertColor;
-    if (id == QLatin1String("blur")) return VDFilterType::Blur;
-    if (id == QLatin1String("sharpen")) return VDFilterType::Sharpen;
-    return std::nullopt;
-}
-
-QString filterName(VDFilterType type) {
-    switch (type) {
-    case VDFilterType::SixAxis: return QStringLiteral("6-axis color correction");
-    case VDFilterType::BobDoubler: return QStringLiteral("bob doubler");
-    case VDFilterType::Resize: return QStringLiteral("Resize / Rescale");
-    case VDFilterType::Rotate: return QStringLiteral("Rotate");
-    case VDFilterType::FlipHorizontal: return QStringLiteral("Flip Horizontal");
-    case VDFilterType::FlipVertical: return QStringLiteral("Flip Vertical");
-    case VDFilterType::BrightnessContrast: return QStringLiteral("brightness/contrast");
-    case VDFilterType::Grayscale: return QStringLiteral("Grayscale");
-    case VDFilterType::InvertColor: return QStringLiteral("Invert Color");
-    case VDFilterType::Blur: return QStringLiteral("box blur");
-    case VDFilterType::Sharpen: return QStringLiteral("sharpen");
-    }
-
-    return {};
-}
-
-QMap<QString, double> defaultFilterParameters(VDFilterType type) {
-    QMap<QString, double> params;
-
-    switch (type) {
-    case VDFilterType::SixAxis:
-        params.insert(QStringLiteral("intensity"), 1.0);
-        params.insert(QStringLiteral("red_green"), 0.0);
-        params.insert(QStringLiteral("yellow_blue"), 0.0);
-        params.insert(QStringLiteral("saturation"), 1.0);
-        params.insert(QStringLiteral("red"), 1.0);
-        params.insert(QStringLiteral("orange"), 1.0);
-        params.insert(QStringLiteral("lime"), 1.0);
-        params.insert(QStringLiteral("emerald"), 1.0);
-        params.insert(QStringLiteral("blue"), 1.0);
-        params.insert(QStringLiteral("purple"), 1.0);
-        break;
-    case VDFilterType::BobDoubler:
-        params.insert(QStringLiteral("field_order"), 1.0);
-        params.insert(QStringLiteral("mode"), 0.0);
-        break;
-    case VDFilterType::Resize:
-        params.insert(QStringLiteral("sizeMode"), 1.0);
-        params.insert(QStringLiteral("relW"), 100.0);
-        params.insert(QStringLiteral("relH"), 100.0);
-        params.insert(QStringLiteral("absW"), 1920.0);
-        params.insert(QStringLiteral("absH"), 1080.0);
-        params.insert(QStringLiteral("aspectMode"), 1.0);
-        params.insert(QStringLiteral("aspectW"), 4.0);
-        params.insert(QStringLiteral("aspectH"), 3.0);
-        params.insert(QStringLiteral("filterMode"), 4.0);
-        params.insert(QStringLiteral("interlaced"), 0.0);
-        params.insert(QStringLiteral("framingMode"), 0.0);
-        params.insert(QStringLiteral("codecAdjust"), 0.0);
-        params.insert(QStringLiteral("width"), 1920.0);
-        params.insert(QStringLiteral("height"), 1080.0);
-        break;
-    case VDFilterType::Rotate:
-        params.insert(QStringLiteral("mode"), 0.0);
-        params.insert(QStringLiteral("angle"), 270.0);
-        break;
-    case VDFilterType::BrightnessContrast:
-        params.insert(QStringLiteral("bright"), 0.0);
-        params.insert(QStringLiteral("cont"), 16.0);
-        break;
-    case VDFilterType::Blur:
-        params.insert(QStringLiteral("width"), 1.0);
-        params.insert(QStringLiteral("power"), 1.0);
-        params.insert(QStringLiteral("radius"), 1.0);
-        break;
-    case VDFilterType::Sharpen:
-        params.insert(QStringLiteral("amount"), 16.0);
-        break;
-    case VDFilterType::FlipHorizontal:
-    case VDFilterType::FlipVertical:
-    case VDFilterType::Grayscale:
-    case VDFilterType::InvertColor:
-        break;
-    }
-
-    return params;
-}
 
 } // namespace
 
-VDQtFilterSystem::VDQtFilterSystem() {
-    loadSettings();
-}
+VDQtFilterSystem::VDQtFilterSystem() = default;
 
 VDQtFilterSystem::~VDQtFilterSystem() = default;
 
@@ -138,7 +20,6 @@ void VDQtFilterSystem::clearFilters() {
 
 void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) {
     mActiveChain = chain;
-    saveSettings();
 }
 
 VDQtFilterSystem& VDQtFilterSystem::instance() {
@@ -239,41 +120,35 @@ void VDQtFilterSystem::addFilter(VDFilterType type) {
     }
 
     mActiveChain.append(inst);
-    saveSettings();
 }
 
 void VDQtFilterSystem::removeFilter(int index) {
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain.removeAt(index);
-        saveSettings();
     }
 }
 
 void VDQtFilterSystem::moveFilterUp(int index) {
     if (index > 0 && index < mActiveChain.size()) {
         mActiveChain.swapItemsAt(index, index - 1);
-        saveSettings();
     }
 }
 
 void VDQtFilterSystem::moveFilterDown(int index) {
     if (index >= 0 && index < mActiveChain.size() - 1) {
         mActiveChain.swapItemsAt(index, index + 1);
-        saveSettings();
     }
 }
 
 void VDQtFilterSystem::setFilterEnabled(int index, bool enabled) {
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain[index].enabled = enabled;
-        saveSettings();
     }
 }
 
 void VDQtFilterSystem::updateFilterParams(int index, const QMap<QString, double>& params) {
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain[index].params = params;
-        saveSettings();
     }
 }
 
@@ -314,7 +189,29 @@ bool VDQtFilterSystem::processFrameSequence(const QImage& inputFrame, QList<QIma
 QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask) {
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
 
-    QImage result = inputFrame.convertToFormat(QImage::Format_RGB888);
+    const bool highPrecision = inputFrame.depth() > 32;
+    if (highPrecision) {
+        // Qt's geometric operations retain 16-bit channel data. The legacy
+        // pixel filters below are byte-oriented; reject those combinations
+        // instead of silently quantizing a 10/12/16-bit source to RGB24.
+        for (const auto& filter : mActiveChain) {
+            if (!filter.enabled) continue;
+            if (filter.type != VDFilterType::Resize
+                && filter.type != VDFilterType::Rotate
+                && filter.type != VDFilterType::FlipHorizontal
+                && filter.type != VDFilterType::FlipVertical
+                && filter.type != VDFilterType::InvertColor) {
+                return QImage();
+            }
+        }
+    }
+
+    QImage result = inputFrame;
+    if (!highPrecision) {
+        result = inputFrame.hasAlphaChannel()
+            ? inputFrame.convertToFormat(QImage::Format_RGBA8888)
+            : inputFrame.convertToFormat(QImage::Format_RGB888);
+    }
     int bobFilterIndex = 0;
 
     for (const auto& filter : mActiveChain) {
@@ -366,9 +263,7 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
                 retainedFieldIsOdd = !retainedFieldIsOdd;
             ++bobFilterIndex;
 
-            if (result.format() != QImage::Format_RGB888 && result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
-                result = result.convertToFormat(QImage::Format_RGB888);
-            }
+            if (result.depth() > 32) return QImage();
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
@@ -450,9 +345,7 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             float blueGain = static_cast<float>(filter.params.value("blue", 1.0));
             float purpleGain = static_cast<float>(filter.params.value("purple", 1.0));
 
-            if (result.format() != QImage::Format_RGB888 && result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
-                result = result.convertToFormat(QImage::Format_RGB888);
-            }
+            if (result.depth() > 32) return QImage();
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int h = result.height();
@@ -539,9 +432,7 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
                 table[i] = static_cast<uint8_t>(std::clamp(y, 0, 255));
             }
 
-            if (result.format() != QImage::Format_RGB888 && result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
-                result = result.convertToFormat(QImage::Format_RGB888);
-            }
+            if (result.depth() > 32) return QImage();
 
             int bytesPerPixel = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int h = result.height();
@@ -563,9 +454,7 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             if (power < 1) power = 1;
             if (power > 3) power = 3;
 
-            if (result.format() != QImage::Format_RGB888 && result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
-                result = result.convertToFormat(QImage::Format_RGB888);
-            }
+            if (result.depth() > 32) return QImage();
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
@@ -619,16 +508,18 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             break;
         }
         case VDFilterType::Grayscale: {
+            if (result.depth() > 32) return QImage();
+            const int bpp = result.format() == QImage::Format_RGB888 ? 3 : 4;
             for (int y = 0; y < result.height(); y++) {
                 uchar *scan = result.scanLine(y);
                 for (int x = 0; x < result.width(); x++) {
-                    int r = scan[x * 3];
-                    int g = scan[x * 3 + 1];
-                    int b = scan[x * 3 + 2];
+                    int r = scan[x * bpp];
+                    int g = scan[x * bpp + 1];
+                    int b = scan[x * bpp + 2];
                     uchar gray = static_cast<uchar>(0.299 * r + 0.587 * g + 0.114 * b);
-                    scan[x * 3] = gray;
-                    scan[x * 3 + 1] = gray;
-                    scan[x * 3 + 2] = gray;
+                    scan[x * bpp] = gray;
+                    scan[x * bpp + 1] = gray;
+                    scan[x * bpp + 2] = gray;
                 }
             }
             break;
@@ -641,9 +532,7 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             int v = static_cast<int>(filter.params.value("amount", 16));
             if (v <= 0) break;
 
-            if (result.format() != QImage::Format_RGB888 && result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
-                result = result.convertToFormat(QImage::Format_RGB888);
-            }
+            if (result.depth() > 32) return QImage();
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
@@ -685,73 +574,4 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
     }
 
     return result;
-}
-
-void VDQtFilterSystem::saveSettings() {
-    QSettings settings("VirtualDubPort", "FilterSettings");
-    settings.beginGroup(QStringLiteral("filter_chain"));
-    settings.remove(QString());
-    settings.setValue(QStringLiteral("schema_version"), kFilterSettingsSchemaVersion);
-
-    settings.beginWriteArray(QStringLiteral("filters"), mActiveChain.size());
-    for (int i = 0; i < mActiveChain.size(); ++i) {
-        const VDFilterInstance& filter = mActiveChain.at(i);
-        settings.setArrayIndex(i);
-        settings.setValue(QStringLiteral("id"), filter.id);
-        settings.setValue(QStringLiteral("type"), filterTypeId(filter.type));
-        settings.setValue(QStringLiteral("enabled"), filter.enabled);
-
-        settings.beginGroup(QStringLiteral("parameters"));
-        for (auto it = filter.params.cbegin(); it != filter.params.cend(); ++it) {
-            if (std::isfinite(it.value()))
-                settings.setValue(it.key(), it.value());
-        }
-        settings.endGroup();
-    }
-    settings.endArray();
-    settings.endGroup();
-    settings.sync();
-}
-
-void VDQtFilterSystem::loadSettings() {
-    mActiveChain.clear();
-    QSettings settings("VirtualDubPort", "FilterSettings");
-    settings.beginGroup(QStringLiteral("filter_chain"));
-
-    const int schemaVersion = settings.value(QStringLiteral("schema_version"), 0).toInt();
-    if (schemaVersion <= 0 || schemaVersion > kFilterSettingsSchemaVersion) {
-        settings.endGroup();
-        return;
-    }
-
-    const int storedCount = settings.beginReadArray(QStringLiteral("filters"));
-    const int count = std::min(storedCount, kMaxPersistedFilters);
-    for (int i = 0; i < count; ++i) {
-        settings.setArrayIndex(i);
-        const std::optional<VDFilterType> type = filterTypeFromId(settings.value(QStringLiteral("type")).toString());
-        if (!type)
-            continue;
-
-        VDFilterInstance filter;
-        filter.id = settings.value(QStringLiteral("id")).toString();
-        if (filter.id.isEmpty())
-            filter.id = QUuid::createUuid().toString();
-        filter.type = *type;
-        filter.name = filterName(*type);
-        filter.enabled = settings.value(QStringLiteral("enabled"), true).toBool();
-        filter.params = defaultFilterParameters(*type);
-
-        settings.beginGroup(QStringLiteral("parameters"));
-        const QStringList parameterNames = settings.childKeys();
-        for (const QString& parameterName : parameterNames) {
-            bool ok = false;
-            const double value = settings.value(parameterName).toDouble(&ok);
-            if (ok && std::isfinite(value))
-                filter.params.insert(parameterName, value);
-        }
-        settings.endGroup();
-        mActiveChain.append(filter);
-    }
-    settings.endArray();
-    settings.endGroup();
 }

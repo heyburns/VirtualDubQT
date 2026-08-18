@@ -2,7 +2,6 @@
 #define VDQTCODECSETTINGS_H
 
 #include <QString>
-#include <QSettings>
 
 struct VDVideoCodecConfig {
     QString codecId = "libx264";

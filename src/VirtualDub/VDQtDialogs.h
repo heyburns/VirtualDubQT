@@ -372,16 +372,11 @@ class VDDecodeFormatDialog : public QDialog {
 public:
     explicit VDDecodeFormatDialog(const QString &decoderName, const QString &actualFormat, const VDDecompressionFormatConfig &initialConfig = VDDecompressionFormatConfig(), QWidget *parent = nullptr);
     VDDecompressionFormatConfig getConfig() const;
-    bool isSaveAsDefault() const;
-
-private Q_SLOTS:
-    void onSaveAsDefaultClicked();
 
 private:
     QString mDecoderName;
     QString mActualFormat;
     VDDecompressionFormatConfig mConfig;
-    bool mSaveAsDefault = false;
 
     // Top info
     QLabel *lblDecoderVal;
@@ -421,7 +416,6 @@ private:
     QRadioButton *radRangeLimited;
     QRadioButton *radRangeFull;
 
-    QPushButton *btnSaveDefault;
     QPushButton *btnOk;
     QPushButton *btnCancel;
 };
@@ -436,21 +430,15 @@ class VDDecoderErrorModeDialog : public QDialog {
 public:
     explicit VDDecoderErrorModeDialog(const VDDecoderErrorModeConfig &initialConfig = VDDecoderErrorModeConfig(), QWidget *parent = nullptr);
     VDDecoderErrorModeConfig getConfig() const;
-    bool isSaveAsDefault() const;
-
-private Q_SLOTS:
-    void onSaveAsDefaultClicked();
 
 private:
     VDDecoderErrorModeConfig mConfig;
-    bool mSaveAsDefault = false;
 
     QButtonGroup *grpErrorMode;
     QRadioButton *radReportAll;
     QRadioButton *radConceal;
     QRadioButton *radGarbled;
 
-    QPushButton *btnSaveDefault;
     QPushButton *btnOk;
     QPushButton *btnCancel;
 };

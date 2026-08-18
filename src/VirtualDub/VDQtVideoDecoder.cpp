@@ -15,6 +15,10 @@
 #include <cstddef>
 #include <limits>
 
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
+
 namespace {
 
 QString avErrorString(int errorCode) {
@@ -186,15 +190,22 @@ VDQtVideoDecoder::VDQtVideoDecoder()
       mCurrentFrameIndex(-1),
       mNextDecodeFrameIndex(0),
       mStreamStartTimestamp(AV_NOPTS_VALUE),
+      mPendingSeekTargetTimestamp(AV_NOPTS_VALUE),
       mPacketPending(false),
       mDemuxEof(false),
       mDrainSent(false),
       mLastDecodeReachedEof(false),
       mDiscardUntilKeyFrame(false),
+      mSeekCount(0),
+      mDecodedFrameCount(0),
       mSwsSourceFormat(AV_PIX_FMT_NONE),
       mSwsDestinationFormat(AV_PIX_FMT_NONE),
+      mOutputPixelFormat(AV_PIX_FMT_RGB24),
+      mOutputImageFormat(QImage::Format_RGB888),
       mSwsSourceWidth(0),
       mSwsSourceHeight(0),
+      mSourceBitDepth(8),
+      mSourceHasAlpha(false),
       mErrorMode(0) {
     mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
 }
@@ -263,7 +274,7 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
     int w = mAvsVi->width;
     int h = mAvsVi->height;
 
-    QImage img(w, h, QImage::Format_RGB32);
+    QImage img(w, h, mOutputImageFormat);
     if (img.isNull()) {
         mLastError = QStringLiteral("Could not allocate a %1x%2 image for AviSynth frame %3.")
                          .arg(w)
@@ -305,8 +316,12 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
         srcFmt = AV_PIX_FMT_YUYV422;
         srcSlice[0] = avs_get_read_ptr_p(frame, 0);
         srcStride[0] = avs_get_pitch_p(frame, 0);
-    } else if (avs_is_rgb32(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_BGRA;
+    } else if (avs_is_rgb64(mAvsVi) || avs_is_rgb48(mAvsVi)
+               || avs_is_rgb32(mAvsVi) || avs_is_rgb24(mAvsVi)) {
+        if (avs_is_rgb64(mAvsVi)) srcFmt = AV_PIX_FMT_BGRA64LE;
+        else if (avs_is_rgb48(mAvsVi)) srcFmt = AV_PIX_FMT_BGR48LE;
+        else if (avs_is_rgb32(mAvsVi)) srcFmt = AV_PIX_FMT_BGRA;
+        else srcFmt = AV_PIX_FMT_BGR24;
         const uint8_t *base = avs_get_read_ptr_p(frame, 0);
         const int pitch = avs_get_pitch_p(frame, 0);
         // AviSynth's packed RGB24/RGB32 convention is bottom-up even though
@@ -316,23 +331,15 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
             srcSlice[0] = base + static_cast<ptrdiff_t>(h - 1) * pitch;
             srcStride[0] = -pitch;
         }
-    } else if (avs_is_rgb24(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_BGR24;
-        const uint8_t *base = avs_get_read_ptr_p(frame, 0);
-        const int pitch = avs_get_pitch_p(frame, 0);
-        if (base && pitch > 0) {
-            srcSlice[0] = base + static_cast<ptrdiff_t>(h - 1) * pitch;
-            srcStride[0] = -pitch;
-        }
     }
 
     if (srcFmt != AV_PIX_FMT_NONE && srcSlice[0]) {
         const bool contextMatches = mSwsCtx
             && mSwsSourceFormat == srcFmt
-            && mSwsDestinationFormat == AV_PIX_FMT_BGRA
+            && mSwsDestinationFormat == mOutputPixelFormat
             && mSwsSourceWidth == w
             && mSwsSourceHeight == h;
-        if ((contextMatches || setupSwsContext(srcFmt, w, h, AV_PIX_FMT_BGRA)) && mSwsCtx) {
+        if ((contextMatches || setupSwsContext(srcFmt, w, h, mOutputPixelFormat)) && mSwsCtx) {
             uint8_t *dstSlice[4] = { img.bits(), nullptr, nullptr, nullptr };
             int dstStride[4] = { static_cast<int>(img.bytesPerLine()), 0, 0, 0 };
             const int scaledRows = sws_scale(mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
@@ -441,7 +448,7 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
         mSwsSourceWidth = 0;
         mSwsSourceHeight = 0;
     } else if (mCodecCtx && mCodecCtx->pix_fmt != AV_PIX_FMT_NONE) {
-        setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, AV_PIX_FMT_RGB24);
+        setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, mOutputPixelFormat);
     }
 }
 
@@ -518,6 +525,19 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
             : 0.0;
         mIsOpen = true;
         mIsAvsNative = true;
+        mSourceBitDepth = std::max(8, avs_bits_per_component(newVideoInfo));
+        mSourceHasAlpha = avs_is_yuva(newVideoInfo) || avs_is_planar_rgba(newVideoInfo)
+                       || avs_is_rgb32(newVideoInfo) || avs_is_rgb64(newVideoInfo);
+        if (mSourceBitDepth > 8) {
+            mOutputPixelFormat = AV_PIX_FMT_RGBA64LE;
+            mOutputImageFormat = QImage::Format_RGBA64;
+        } else if (mSourceHasAlpha) {
+            mOutputPixelFormat = AV_PIX_FMT_RGBA;
+            mOutputImageFormat = QImage::Format_RGBA8888;
+        } else {
+            mOutputPixelFormat = AV_PIX_FMT_RGB24;
+            mOutputImageFormat = QImage::Format_RGB888;
+        }
         mCurrentFrameIndex = -1;
         mNextDecodeFrameIndex = 0;
         mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
@@ -643,7 +663,23 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         return false;
     }
 
-    const int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
+    int sourceBitDepth = 8;
+    bool sourceHasAlpha = false;
+    if (const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(newCodecContext->pix_fmt)) {
+        for (int component = 0; component < descriptor->nb_components; ++component) {
+            sourceBitDepth = std::max(
+                sourceBitDepth, static_cast<int>(descriptor->comp[component].depth));
+        }
+        sourceHasAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+    }
+    const AVPixelFormat outputPixelFormat = sourceBitDepth > 8
+        ? AV_PIX_FMT_RGBA64LE
+        : sourceHasAlpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
+    const QImage::Format outputImageFormat = sourceBitDepth > 8
+        ? QImage::Format_RGBA64
+        : sourceHasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+
+    const int bufferSize = av_image_get_buffer_size(outputPixelFormat, width, height, 1);
     if (bufferSize <= 0) {
         mLastError = avOperationError(QStringLiteral("Could not calculate RGB frame buffer size"), bufferSize);
         releaseLocals();
@@ -658,7 +694,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     }
 
     error = av_image_fill_arrays(newRgbFrame->data, newRgbFrame->linesize, newBuffer,
-                                 AV_PIX_FMT_RGB24, width, height, 1);
+                                 outputPixelFormat, width, height, 1);
     if (error < 0) {
         mLastError = avOperationError(QStringLiteral("Could not initialize RGB frame storage"), error);
         releaseLocals();
@@ -730,6 +766,11 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         mDuration = av_rescale_q(mFormatCtx->duration, AV_TIME_BASE_Q, videoStream->time_base);
     }
     mStreamStartTimestamp = streamStartTimestamp;
+    mSourceBitDepth = sourceBitDepth;
+    mSourceHasAlpha = sourceHasAlpha;
+    mOutputPixelFormat = outputPixelFormat;
+    mOutputImageFormat = outputImageFormat;
+    mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
     mCurrentFrameIndex = -1;
     mNextDecodeFrameIndex = 0;
     mPacketPending = false;
@@ -737,10 +778,12 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     mDrainSent = false;
     mLastDecodeReachedEof = false;
     mDiscardUntilKeyFrame = false;
+    mSeekCount = 0;
+    mDecodedFrameCount = 0;
     mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
 
     if (mCodecCtx->pix_fmt != AV_PIX_FMT_NONE
-        && !setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, AV_PIX_FMT_RGB24)) {
+        && !setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, mOutputPixelFormat)) {
         const QString conversionError = mLastError;
         close();
         mLastError = conversionError;
@@ -846,14 +889,21 @@ void VDQtVideoDecoder::close() {
     mFps = 0.0;
     mVideoStreamIndex = -1;
     mDuration = AV_NOPTS_VALUE;
+    mSourceBitDepth = 8;
+    mSourceHasAlpha = false;
+    mOutputPixelFormat = AV_PIX_FMT_RGB24;
+    mOutputImageFormat = QImage::Format_RGB888;
     mCurrentFrameIndex = -1;
     mNextDecodeFrameIndex = 0;
     mStreamStartTimestamp = AV_NOPTS_VALUE;
+    mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
     mPacketPending = false;
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
     mDiscardUntilKeyFrame = false;
+    mSeekCount = 0;
+    mDecodedFrameCount = 0;
 }
 
 bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
@@ -873,18 +923,41 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         return false;
     }
 
-    const bool dimensionsMatch = mFrameRGB && mBuffer
+    int detectedBitDepth = 8;
+    bool detectedAlpha = false;
+    if (const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(sourceFormat)) {
+        for (int component = 0; component < descriptor->nb_components; ++component) {
+            detectedBitDepth = std::max(
+                detectedBitDepth, static_cast<int>(descriptor->comp[component].depth));
+        }
+        detectedAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+    }
+
+    const int sourceBitDepth = std::max(mSourceBitDepth, detectedBitDepth);
+    const bool sourceHasAlpha = mSourceHasAlpha || detectedAlpha;
+    const AVPixelFormat outputPixelFormat = sourceBitDepth > 8
+        ? AV_PIX_FMT_RGBA64LE
+        : sourceHasAlpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
+    const QImage::Format outputImageFormat = sourceBitDepth > 8
+        ? QImage::Format_RGBA64
+        : sourceHasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+    const bool outputFormatMatches = outputPixelFormat == mOutputPixelFormat;
+    const bool storageMatches = outputFormatMatches && mFrameRGB && mBuffer
         && sourceWidth == mWidth && sourceHeight == mHeight;
     const bool contextMatches = mSwsCtx
         && mSwsSourceFormat == sourceFormat
-        && mSwsDestinationFormat == AV_PIX_FMT_RGB24
+        && mSwsDestinationFormat == outputPixelFormat
         && mSwsSourceWidth == sourceWidth
         && mSwsSourceHeight == sourceHeight;
-    if (dimensionsMatch && contextMatches) return true;
+    if (storageMatches && contextMatches) {
+        mSourceBitDepth = sourceBitDepth;
+        mSourceHasAlpha = sourceHasAlpha;
+        return true;
+    }
 
     AVFrame *replacementFrame = nullptr;
     uint8_t *replacementBuffer = nullptr;
-    if (!dimensionsMatch) {
+    if (!storageMatches) {
         replacementFrame = av_frame_alloc();
         if (!replacementFrame) {
             mLastError = QStringLiteral("Could not allocate RGB storage for a resized video frame.");
@@ -892,7 +965,7 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         }
 
         const int bufferSize = av_image_get_buffer_size(
-            AV_PIX_FMT_RGB24, sourceWidth, sourceHeight, 1);
+            outputPixelFormat, sourceWidth, sourceHeight, 1);
         if (bufferSize <= 0) {
             mLastError = avOperationError(QStringLiteral("Could not size resized RGB frame storage"), bufferSize);
             av_frame_free(&replacementFrame);
@@ -908,7 +981,7 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
 
         const int fillResult = av_image_fill_arrays(
             replacementFrame->data, replacementFrame->linesize, replacementBuffer,
-            AV_PIX_FMT_RGB24, sourceWidth, sourceHeight, 1);
+            outputPixelFormat, sourceWidth, sourceHeight, 1);
         if (fillResult < 0) {
             mLastError = avOperationError(QStringLiteral("Could not initialize resized RGB frame storage"), fillResult);
             av_free(replacementBuffer);
@@ -917,13 +990,13 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         }
     }
 
-    if (!setupSwsContext(sourceFormat, sourceWidth, sourceHeight, AV_PIX_FMT_RGB24)) {
+    if (!setupSwsContext(sourceFormat, sourceWidth, sourceHeight, outputPixelFormat)) {
         if (replacementBuffer) av_free(replacementBuffer);
         if (replacementFrame) av_frame_free(&replacementFrame);
         return false;
     }
 
-    if (!dimensionsMatch) {
+    if (!storageMatches) {
         if (mBuffer) av_free(mBuffer);
         if (mFrameRGB) av_frame_free(&mFrameRGB);
         mBuffer = replacementBuffer;
@@ -931,6 +1004,10 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         mWidth = sourceWidth;
         mHeight = sourceHeight;
     }
+    mSourceBitDepth = sourceBitDepth;
+    mSourceHasAlpha = sourceHasAlpha;
+    mOutputPixelFormat = outputPixelFormat;
+    mOutputImageFormat = outputImageFormat;
     return true;
 }
 
@@ -982,6 +1059,7 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
     mDiscardUntilKeyFrame = false;
     mCurrentFrameIndex = -1;
     mNextDecodeFrameIndex = 0;
+    mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
     return true;
 }
 
@@ -1036,7 +1114,9 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     mLastDecodeReachedEof = false;
     mDiscardUntilKeyFrame = false;
     mCurrentFrameIndex = (anchorIndex >= 0) ? (anchorIndex - 1) : -1;
-    mNextDecodeFrameIndex = (anchorIndex >= 0) ? anchorIndex : 0;
+    mNextDecodeFrameIndex = (anchorIndex >= 0) ? anchorIndex : frameIndex;
+    mPendingSeekTargetTimestamp = (anchorIndex >= 0) ? AV_NOPTS_VALUE : targetTimestamp;
+    ++mSeekCount;
     return true;
 }
 
@@ -1053,6 +1133,7 @@ bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors) {
         const int receiveResult = avcodec_receive_frame(mCodecCtx, mFrame);
         if (receiveResult == 0) {
             mLastDecodeReachedEof = false;
+            ++mDecodedFrameCount;
             return true;
         }
         if (receiveResult == AVERROR_EOF) {
@@ -1168,31 +1249,19 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
 
     int frameIndex = mNextDecodeFrameIndex;
-    if (timestamp != AV_NOPTS_VALUE && mFps > 0.0 && mFormatCtx && mVideoStreamIndex >= 0) {
-        int64_t origin = mStreamStartTimestamp;
-        if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE) {
-            origin = mFrameIndex.front().timestamp;
-        }
-        if (origin == AV_NOPTS_VALUE) origin = 0;
-        const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
-        const double sec = static_cast<double>(timestamp - origin) * av_q2d(timeBase);
-        const int calcIndex = std::max(0, static_cast<int>(std::round(sec * mFps)));
-        frameIndex = calcIndex;
-    }
+    const int indexedMatch = findIndexedFrameByTimestamp(timestamp, mNextDecodeFrameIndex);
+    if (indexedMatch >= 0) frameIndex = indexedMatch;
 
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
-    if (frameIndex > indexedCount) {
-        mFrameIndex.resize(frameIndex);
-    }
 
     FrameIndexEntry entry;
     entry.timestamp = timestamp;
     entry.duration = mFrame->duration;
     entry.keyFrame = (mFrame->flags & AV_FRAME_FLAG_KEY) != 0;
 
-    if (frameIndex == mFrameIndex.size()) {
+    if (frameIndex == indexedCount) {
         mFrameIndex.append(entry);
-    } else if (frameIndex < mFrameIndex.size()) {
+    } else if (frameIndex >= 0 && frameIndex < indexedCount) {
         FrameIndexEntry& indexedEntry = mFrameIndex[frameIndex];
         if (indexedEntry.timestamp == AV_NOPTS_VALUE) indexedEntry.timestamp = entry.timestamp;
         if (indexedEntry.duration <= 0) indexedEntry.duration = entry.duration;
@@ -1204,13 +1273,30 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     return frameIndex;
 }
 
+QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
+    if (!ensureConversionResources(mFrame)) return QImage();
+
+    sws_scale(
+        mSwsCtx,
+        const_cast<const uint8_t *const *>(mFrame->data),
+        mFrame->linesize,
+        0,
+        mFrame->height > 0 ? mFrame->height : mHeight,
+        mFrameRGB->data,
+        mFrameRGB->linesize);
+
+    const QImage frameView(
+        mFrameRGB->data[0], mWidth, mHeight, mFrameRGB->linesize[0], mOutputImageFormat);
+    return frameView.copy();
+}
+
 void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     if (mFrameIndex.isEmpty()) return;
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
 }
 
-QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
+QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode) {
     if (!mIsOpen || frameIndex < 0) return QImage();
 
     if (mFrameCountStatus == FrameCountStatus::Exact
@@ -1234,81 +1320,33 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex) {
         return QImage();
     }
 
-    AVStream *videoStream = mFormatCtx->streams[mVideoStreamIndex];
-    double targetSec = mFps > 0.0 ? (frameIndex / mFps) : 0.0;
-    int64_t targetPts = static_cast<int64_t>(targetSec / av_q2d(videoStream->time_base));
+    const bool sequentialRequest = !mLastDecodeReachedEof
+        && (frameIndex == mCurrentFrameIndex + 1
+            || (preserveSequentialDecode && frameIndex > mCurrentFrameIndex));
+    if (!sequentialRequest && !seekToFrame(frameIndex)) return QImage();
 
-    // Direct, fast seek on non-sequential jump or seek backward
-    if (frameIndex != mCurrentFrameIndex + 1 || frameIndex == 0) {
-        av_seek_frame(mFormatCtx, mVideoStreamIndex, targetPts, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(mCodecCtx);
-        mCurrentFrameIndex = -1;
-    }
+    for (;;) {
+        if (!decodeNextFrame()) return QImage();
 
-    AVPacket *packet = mPacket ? mPacket : av_packet_alloc();
-    if (!mPacket) mPacket = packet;
-
-    QImage resultImage;
-    bool frameDecoded = false;
-
-    while (av_read_frame(mFormatCtx, packet) >= 0) {
-        if (packet->stream_index == mVideoStreamIndex) {
-            int ret = avcodec_send_packet(mCodecCtx, packet);
-            if (ret >= 0) {
-                while (avcodec_receive_frame(mCodecCtx, mFrame) == 0) {
-                    int64_t currentPts = mFrame->pts;
-                    if (currentPts == AV_NOPTS_VALUE) {
-                        currentPts = mFrame->best_effort_timestamp;
-                    }
-
-                    int currentFrameIndex = -1;
-                    if (currentPts != AV_NOPTS_VALUE) {
-                        double currentSec = currentPts * av_q2d(videoStream->time_base);
-                        currentFrameIndex = static_cast<int>(std::round(currentSec * mFps));
-                    }
-
-                    int decodedIdx = (currentFrameIndex >= 0) ? currentFrameIndex : (mCurrentFrameIndex + 1);
-                    mCurrentFrameIndex = decodedIdx;
-
-                    // FAST PRE-ROLL: Skip sws_scale & image allocation on intermediate pre-roll frames
-                    if (decodedIdx < frameIndex && (currentPts == AV_NOPTS_VALUE || currentPts < targetPts)) {
-                        continue;
-                    }
-
-                    if (!ensureConversionResources(mFrame)) {
-                        av_packet_unref(packet);
-                        return QImage();
-                    }
-
-                    sws_scale(
-                        mSwsCtx,
-                        (const uint8_t *const *)mFrame->data,
-                        mFrame->linesize,
-                        0,
-                        mFrame->height > 0 ? mFrame->height : mHeight,
-                        mFrameRGB->data,
-                        mFrameRGB->linesize
-                    );
-
-                    const QImage frameView(
-                        mFrameRGB->data[0], mWidth, mHeight, mFrameRGB->linesize[0], QImage::Format_RGB888);
-                    QImage deepCopy = frameView.copy();
-
-                    cacheFrame(decodedIdx, deepCopy);
-
-                    if (decodedIdx >= frameIndex || (currentPts != AV_NOPTS_VALUE && currentPts >= targetPts) || mCurrentFrameIndex == frameIndex) {
-                        resultImage = deepCopy;
-                        frameDecoded = true;
-                        break;
-                    }
-                }
-            }
+        int64_t timestamp = mFrame->best_effort_timestamp;
+        if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
+        if (mPendingSeekTargetTimestamp != AV_NOPTS_VALUE
+            && timestamp != AV_NOPTS_VALUE
+            && timestamp < mPendingSeekTargetTimestamp) {
+            // av_seek_frame() lands on the preceding keyframe. Decode the
+            // dependency chain without allocating/converting throwaway images.
+            continue;
         }
-        av_packet_unref(packet);
-        if (frameDecoded) break;
-    }
+        mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
 
-    return resultImage;
+        const int decodedIndex = registerDecodedFrame();
+        if (decodedIndex < frameIndex) continue;
+
+        QImage image = convertDecodedFrameToImage();
+        if (image.isNull()) return QImage();
+        cacheFrame(decodedIndex, image);
+        return image;
+    }
 }
 
 bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {

@@ -5,7 +5,6 @@
 #include <QImage>
 #include <QList>
 #include <QMap>
-#include <QSettings>
 
 enum class VDFilterType {
     SixAxis,
@@ -57,6 +56,8 @@ public:
     void moveFilterDown(int index);
     void clearFilters();
     void replaceActiveChain(const QList<VDFilterInstance>& chain);
+    // Worker-local preview chains are independent snapshots of the session chain.
+    void replaceActiveChainTransient(const QList<VDFilterInstance>& chain) { mActiveChain = chain; }
     void setFilterEnabled(int index, bool enabled);
     void updateFilterParams(int index, const QMap<QString, double>& params);
 
@@ -66,10 +67,6 @@ public:
     QImage processFrame(const QImage& inputFrame);
     bool processFrameSequence(const QImage& inputFrame, QList<QImage>& outputFrames);
     VDFilterTimingInfo getTimingInfo() const;
-
-    // Persistence across sessions
-    void saveSettings();
-    void loadSettings();
 
 private:
     QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask);

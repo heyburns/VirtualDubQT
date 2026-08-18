@@ -92,7 +92,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			return (int)_InterlockedExchange((volatile long *)dst, v);
 		#elif defined(VD_COMPILER_GCC)
-			return __sync_lock_test_and_set((int *)&dst, v);
+			return __sync_lock_test_and_set(dst, v);
 		#endif
 	}
 
@@ -101,7 +101,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			_InterlockedExchangeAdd((volatile long *)dst, 1);
 		#elif defined(VD_COMPILER_GCC)
-			__sync_fetch_and_add(&dst, 1);
+			__sync_fetch_and_add(dst, 1);
 		#endif
 	}
 
@@ -110,7 +110,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			_InterlockedExchangeAdd((volatile long *)dst, -1);
 		#elif defined(VD_COMPILER_GCC)
-			__sync_fetch_and_sub(&dst, 1);
+			__sync_fetch_and_sub(dst, 1);
 		#endif
 	}
 
@@ -120,7 +120,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			return 1 == _InterlockedExchangeAdd((volatile long *)dst, -1);
 		#elif defined(VD_COMPILER_GCC)
-			return 1 == __sync_fetch_and_sub((int *)&dst, 1);
+			return 1 == __sync_fetch_and_sub(dst, 1);
 		#endif
 	}
 
@@ -130,7 +130,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			return (int)_InterlockedExchangeAdd((volatile long *)dst, v) + v;
 		#elif defined(VD_COMPILER_GCC)
-			return __sync_fetch_and_add((int *)&dst, v) + v;
+			return __sync_fetch_and_add(dst, v) + v;
 		#endif
 	}
 
@@ -140,7 +140,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			return _InterlockedExchangeAdd((volatile long *)dst, v);
 		#elif defined(VD_COMPILER_GCC)
-			return __sync_fetch_and_add((int *)&dst, v);
+			return __sync_fetch_and_add(dst, v);
 		#endif
 	}
 
@@ -151,7 +151,7 @@ public:
 		#if defined(VD_COMPILER_MSVC)
 			return _InterlockedCompareExchange((volatile long *)dst, v, compare);
 		#elif defined(VD_COMPILER_GCC)
-			return __sync_val_compare_and_swap((int *)&dst, compare, v);
+			return __sync_val_compare_and_swap(dst, compare, v);
 		#endif
 	}
 

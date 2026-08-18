@@ -20,6 +20,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/pixdesc.h>
 }
 
 namespace {
@@ -143,7 +144,10 @@ bool writeFrame(QProcess& process, const QImage& image,
                 bool& cancelled) {
     for (int y = 0; y < image.height(); ++y) {
         const char* scanline = reinterpret_cast<const char*>(image.constScanLine(y));
-        qint64 remaining = static_cast<qint64>(image.width()) * 3;
+        const int bytesPerPixel = image.depth() / 8;
+        if (bytesPerPixel != 3 && bytesPerPixel != 4 && bytesPerPixel != 8)
+            return false;
+        qint64 remaining = static_cast<qint64>(image.width()) * bytesPerPixel;
         while (remaining > 0) {
             while (process.bytesToWrite() >= kMaxQueuedFfmpegBytes) {
                 if (process.state() == QProcess::NotRunning) {
@@ -727,9 +731,19 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     QProcess ffmpeg;
     QStringList args;
 
+    QString rawInputPixelFormat = QStringLiteral("rgb24");
+    QImage::Format rawInputImageFormat = QImage::Format_RGB888;
+    if (sampleFrame.depth() > 32) {
+        rawInputPixelFormat = QStringLiteral("rgba64le");
+        rawInputImageFormat = QImage::Format_RGBA64;
+    } else if (decoder.sourceHasAlpha()) {
+        rawInputPixelFormat = QStringLiteral("rgba");
+        rawInputImageFormat = QImage::Format_RGBA8888;
+    }
+
     args << "-y"
          << "-f" << "rawvideo"
-         << "-pix_fmt" << "rgb24"
+         << "-pix_fmt" << rawInputPixelFormat
          << "-s" << QString("%1x%2").arg(outW).arg(outH)
          << "-r" << QString::number(fps, 'f', 12)
          << "-i" << "-"; // input 0: raw video stream from stdin
@@ -767,7 +781,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         outPixFmt = "rgb24";
     } else if (vParams.codecId == "(Uncompressed)" || vParams.codecId.isEmpty()) {
         args << "-c:v" << "rawvideo";
-        outPixFmt = "bgr24";
+        if (decoder.getSourceBitDepth() > 8)
+            outPixFmt = decoder.sourceHasAlpha() ? "rgba64le" : "rgb48le";
+        else
+            outPixFmt = decoder.sourceHasAlpha() ? "rgba" : "bgr24";
         if (container == "mkv" || container == "matroska") {
             args << "-allow_raw_vfw" << "1";
         }
@@ -788,7 +805,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                 args << "-vendor" << vParams.proresVendor;
             }
             if (vParams.proresProfile >= 4) {
-                outPixFmt = "yuv444p10le";
+                outPixFmt = decoder.sourceHasAlpha() ? "yuva444p10le" : "yuv444p10le";
             } else {
                 outPixFmt = "yuv422p10le";
             }
@@ -829,6 +846,36 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     if (!outPixFmt.isEmpty()) {
+        const QByteArray pixelFormatName = outPixFmt.toUtf8();
+        const AVPixelFormat outputFormat = av_get_pix_fmt(pixelFormatName.constData());
+        const AVPixFmtDescriptor *outputDescriptor = av_pix_fmt_desc_get(outputFormat);
+        int outputBitDepth = 0;
+        bool outputHasAlpha = false;
+        if (outputDescriptor) {
+            for (int component = 0; component < outputDescriptor->nb_components; ++component) {
+                outputBitDepth = std::max(
+                    outputBitDepth,
+                    static_cast<int>(outputDescriptor->comp[component].depth));
+            }
+            outputHasAlpha = (outputDescriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+        }
+        if (!outputDescriptor
+            || (decoder.getSourceBitDepth() > 8
+                && outputBitDepth < decoder.getSourceBitDepth())
+            || (decoder.sourceHasAlpha() && !outputHasAlpha)) {
+            if (parentWidget) {
+                QMessageBox::critical(
+                    parentWidget,
+                    "Video Precision Error",
+                    QString("The selected output pixel format '%1' cannot preserve the source's "
+                            "%2-bit%3 video data. Choose a matching high-bit-depth/alpha-capable "
+                            "format or use direct stream copy.")
+                        .arg(outPixFmt)
+                        .arg(decoder.getSourceBitDepth())
+                        .arg(decoder.sourceHasAlpha() ? QStringLiteral(" alpha") : QString()));
+            }
+            return false;
+        }
         args << "-pix_fmt" << outPixFmt;
     }
 
@@ -1040,8 +1087,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                 writeFailed = true;
                 break;
             }
-            if (filtered.format() != QImage::Format_RGB888)
-                filtered = filtered.convertToFormat(QImage::Format_RGB888);
+            if (filtered.format() != rawInputImageFormat)
+                filtered = filtered.convertToFormat(rawInputImageFormat);
 
             if (!writeFrame(ffmpeg, filtered, progress, diagnostics, cancelled)) {
                 writeFailed = !cancelled;

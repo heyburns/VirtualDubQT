@@ -7,12 +7,16 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QElapsedTimer>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QProcess>
 #include <QTemporaryFile>
+#include <QThread>
+#include <QWaitCondition>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -29,6 +33,39 @@ extern "C" {
 }
 
 namespace {
+
+constexpr qint64 kLiveAudioPrebufferUsecs = 750000;
+constexpr qint64 kAudioSinkBufferUsecs = 200000;
+
+qint64 alignedAudioBufferSize(const QAudioFormat& format,
+                              qint64 durationUsecs,
+                              qint64 minimumBytes,
+                              qint64 maximumBytes)
+{
+    const qint64 bytesPerFrame = std::max(1, format.bytesPerFrame());
+    qint64 bytes = std::clamp<qint64>(
+        format.bytesForDuration(durationUsecs), minimumBytes, maximumBytes);
+    bytes -= bytes % bytesPerFrame;
+    return std::max(bytesPerFrame, bytes);
+}
+
+void configureLiveAudioSink(QAudioSink *sink, const QAudioFormat& format)
+{
+    if (!sink) return;
+
+    const qint64 requestedBytes = alignedAudioBufferSize(
+        format, kAudioSinkBufferUsecs, 32 * 1024, 2 * 1024 * 1024);
+    sink->setBufferSize(static_cast<int>(std::min<qint64>(
+        requestedBytes, std::numeric_limits<int>::max())));
+    QObject::connect(sink, &QAudioSink::stateChanged, sink,
+                     [sink](QAudio::State state) {
+        if (state == QAudio::IdleState && sink->error() != QAudio::NoError) {
+            qWarning() << "[VDQtAudioPlayer] Audio output became idle with error"
+                       << static_cast<int>(sink->error())
+                       << "; requested sink buffer:" << sink->bufferSize() << "bytes.";
+        }
+    });
+}
 
 QString avErrorString(int errorCode)
 {
@@ -414,7 +451,9 @@ public:
                 const int64_t frameStart = frameStartSample(mFrame);
                 if (frameStart != AV_NOPTS_VALUE &&
                     mLastPresentationEndSample != AV_NOPTS_VALUE &&
-                    frameStart != mLastPresentationEndSample) {
+                    !samplePositionsAreNear(frameStart,
+                                            mLastPresentationEndSample,
+                                            timestampJitterToleranceSamples())) {
                     // libswresample can retain samples from the preceding frame.
                     // Drain those at the old timeline position before beginning a
                     // discontinuous frame, otherwise a gap/overlap is shifted by
@@ -618,14 +657,29 @@ private:
                      : AV_NOPTS_VALUE;
     }
 
-    int64_t framePresentationEndSample(const AVFrame *frame) const
+    int64_t timestampJitterToleranceSamples() const
     {
-        if (!frame || frame->best_effort_timestamp == AV_NOPTS_VALUE || frame->duration <= 0 ||
-            frame->best_effort_timestamp >
-                std::numeric_limits<int64_t>::max() - frame->duration) {
-            return AV_NOPTS_VALUE;
+        // Packet timestamps are often expressed in a time base that cannot
+        // represent every audio sample exactly. Some MP4 muxers also vary AAC
+        // packet durations by a few dozen samples while every decoded frame
+        // still contains 1024 continuous samples. Follow decoded PCM
+        // across discrepancies of at most two milliseconds; larger differences
+        // remain real gaps/overlaps and are preserved on the media timeline.
+        constexpr int divisor = 500;
+        return std::max<int64_t>(1,
+            (static_cast<int64_t>(mOutputRate) + divisor - 1) / divisor);
+    }
+
+    static bool samplePositionsAreNear(int64_t first,
+                                       int64_t second,
+                                       int64_t tolerance)
+    {
+        if (first >= second) {
+            return second > std::numeric_limits<int64_t>::max() - tolerance ||
+                   first <= second + tolerance;
         }
-        return outputSampleForTimestamp(frame->best_effort_timestamp + frame->duration);
+        return first > std::numeric_limits<int64_t>::max() - tolerance ||
+               second <= first + tolerance;
     }
 
     bool resetResampler()
@@ -659,8 +713,17 @@ private:
         if (convertedSamples < 0) return fail("Audio sample conversion failed", convertedSamples);
 
         int validSamples = convertedSamples;
-        const int64_t frameStart = frameStartSample(mFrame);
-        const int64_t presentationEnd = framePresentationEndSample(mFrame);
+        int64_t frameStart = frameStartSample(mFrame);
+        if (frameStart != AV_NOPTS_VALUE &&
+            mLastPresentationEndSample != AV_NOPTS_VALUE &&
+            frameStart != mLastPresentationEndSample &&
+            samplePositionsAreNear(frameStart,
+                                   mLastPresentationEndSample,
+                                   timestampJitterToleranceSamples())) {
+            // Keep the resampler and PCM stream continuous across harmless
+            // timestamp quantization.
+            frameStart = mLastPresentationEndSample;
+        }
         int64_t chunkStart = AV_NOPTS_VALUE;
         if (frameStart != AV_NOPTS_VALUE) {
             const int64_t delayedOutput = av_rescale_rnd(delayBeforeConversion,
@@ -670,16 +733,20 @@ private:
             chunkStart = frameStart - delayedOutput;
             *startSample = chunkStart;
 
-            // A final compressed frame can contain codec padding beyond its
-            // declared presentation duration. Keep the decoder draining to EOF,
-            // but never expose samples beyond that timestamp boundary.
-            if (presentationEnd != AV_NOPTS_VALUE) {
-                const int64_t maximumValid = std::max<int64_t>(0, presentationEnd - chunkStart);
-                validSamples = static_cast<int>(std::min<int64_t>(validSamples, maximumValid));
-                mLastPresentationEndSample = presentationEnd;
-            } else {
-                mLastPresentationEndSample = AV_NOPTS_VALUE;
-            }
+            // AVFrame::duration is packet presentation metadata, not a safe
+            // per-frame PCM edit point. Some MP4/AAC files vary it while every
+            // decoded frame still contains 1024 continuous samples. Follow the
+            // decoded sample count; FFmpeg already applies codec delay/padding,
+            // and callers clip explicit selections at the final range boundary.
+            const int64_t decodedDuration = av_rescale_rnd(
+                mFrame->nb_samples,
+                mOutputRate,
+                mInputRate,
+                AV_ROUND_NEAR_INF);
+            mLastPresentationEndSample = decodedDuration >= 0 &&
+                frameStart <= std::numeric_limits<int64_t>::max() - decodedDuration
+                ? frameStart + decodedDuration
+                : AV_NOPTS_VALUE;
 
             if (chunkStart <= std::numeric_limits<int64_t>::max() - validSamples) {
                 mLastOutputEndSample = chunkStart + validSamples;
@@ -1058,12 +1125,14 @@ public:
                          int streamIndex,
                          const QAudioFormat &outputFormat,
                          int64_t totalSamples,
+                         int testDecodeDelayMs = 0,
                          QObject *parent = nullptr)
         : QIODevice(parent)
         , mFilePath(filePath)
         , mStreamIndex(streamIndex)
         , mOutputFormat(outputFormat)
         , mTotalSamples(totalSamples)
+        , mTestDecodeDelayMs(std::max(0, testDecodeDelayMs))
     {
     }
 
@@ -1108,34 +1177,37 @@ public:
         mSilenceByte = mOutputFormat.sampleFormat() == QAudioFormat::UInt8
             ? static_cast<char>(0x80)
             : '\0';
+        mBufferTargetBytes = alignedAudioBufferSize(
+            mOutputFormat, kLiveAudioPrebufferUsecs, 64 * 1024, 4 * 1024 * 1024);
         mDecoder = std::move(decoder);
-        return open(QIODevice::ReadOnly);
+        if (!open(QIODevice::ReadOnly)) return false;
+        return startDecodeThreadAndPrime();
     }
 
     bool isSequential() const override { return true; }
 
+    bool atEnd() const override
+    {
+        QMutexLocker locker(&mMutex);
+        return mProducerEof && bufferedBytesUnlocked() == 0;
+    }
+
+    void close() override
+    {
+        stopDecodeThread();
+        QIODevice::close();
+    }
+
     qint64 bytesAvailable() const override
     {
         QMutexLocker locker(&mMutex);
-        const qint64 buffered = std::max<qint64>(0, mPending.size() - mPendingOffset);
-        const bool trailingTimelineData = mTotalOutputSamples > 0 &&
-            currentOutputSampleUnlocked() < mTotalOutputSamples;
-        const qint64 prospective = (!mDecoder ||
-            (mDecoder->atEnd() && mGapBytesRemaining <= 0 && !trailingTimelineData))
-            ? 0
-            : 4096;
-        qint64 available = buffered;
-        const auto addSaturated = [&available](qint64 amount) {
-            if (amount <= 0) return;
-            if (amount > std::numeric_limits<qint64>::max() - available)
-                available = std::numeric_limits<qint64>::max();
-            else
-                available += amount;
-        };
-        addSaturated(mGapBytesRemaining);
-        addSaturated(prospective);
-        addSaturated(QIODevice::bytesAvailable());
-        return available;
+        qint64 buffered = bufferedBytesUnlocked();
+        const qint64 baseAvailable = QIODevice::bytesAvailable();
+        if (baseAvailable > 0 &&
+            baseAvailable <= std::numeric_limits<qint64>::max() - buffered) {
+            buffered += baseAvailable;
+        }
+        return buffered;
     }
 
     qint64 size() const override
@@ -1151,7 +1223,7 @@ public:
 
     bool seekToSample(int64_t sample)
     {
-        QMutexLocker locker(&mMutex);
+        stopDecodeThread();
         if (!mDecoder) return false;
         sample = std::max<int64_t>(0, sample);
         if (mTotalSamples > 0) sample = std::min(sample, mTotalSamples);
@@ -1159,6 +1231,7 @@ public:
             ? av_rescale_rnd(sample, mOutputRate, mSourceRate, AV_ROUND_NEAR_INF)
             : sample;
         if (!mDecoder->seekToSample(outputSample)) {
+            QMutexLocker locker(&mMutex);
             mError = mDecoder->error();
             return false;
         }
@@ -1168,17 +1241,23 @@ public:
         // cannot leak into the new logical position.
         QIODevice::close();
         if (!QIODevice::open(QIODevice::ReadOnly)) {
+            QMutexLocker locker(&mMutex);
             mError = QStringLiteral("Could not reopen the audio playback stream after seeking.");
             return false;
         }
-        mPending.clear();
-        mPendingOffset = 0;
-        mGapBytesRemaining = 0;
-        mBaseOutputSample = outputSample;
-        mBaseSample = sample;
-        mBytesDelivered = 0;
-        mTailSilenceScheduled = false;
-        return true;
+        {
+            QMutexLocker locker(&mMutex);
+            mBuffer.clear();
+            mBufferOffset = 0;
+            mBaseOutputSample = outputSample;
+            mBaseSample = sample;
+            mProducedOutputSample = outputSample;
+            mBytesDelivered = 0;
+            mProducerEof = false;
+            mProducerFailed = false;
+            mError.clear();
+        }
+        return startDecodeThreadAndPrime();
     }
 
     int64_t currentSample() const
@@ -1209,79 +1288,32 @@ protected:
         QMutexLocker locker(&mMutex);
         if (!mDecoder || mBytesPerFrame <= 0) return 0;
 
+        maximumLength -= maximumLength % mBytesPerFrame;
+        if (maximumLength <= 0) return 0;
+
         qint64 copied = 0;
+        bool waitedForProducer = false;
         while (copied < maximumLength) {
-            if (mGapBytesRemaining > 0) {
-                const qint64 amount = std::min(mGapBytesRemaining, maximumLength - copied);
-                std::memset(data + copied, static_cast<unsigned char>(mSilenceByte), amount);
-                copied += amount;
-                mGapBytesRemaining -= amount;
-                mBytesDelivered += amount;
+            const qint64 available = bufferedBytesUnlocked();
+            if (available <= 0) {
+                if (mProducerEof || mProducerFailed || waitedForProducer) break;
+                // A normally primed producer never reaches this wait. Give it
+                // one short scheduling opportunity without doing codec work on
+                // Qt's real-time audio callback.
+                waitedForProducer = true;
+                mBufferChanged.wait(&mMutex, 20);
                 continue;
             }
 
-            if (mPendingOffset < mPending.size()) {
-                const qint64 available = mPending.size() - mPendingOffset;
-                const qint64 amount = std::min(available, maximumLength - copied);
-                std::memcpy(data + copied, mPending.constData() + mPendingOffset, amount);
-                copied += amount;
-                mPendingOffset += amount;
-                mBytesDelivered += amount;
-                if (mPendingOffset == mPending.size()) {
-                    mPending.clear();
-                    mPendingOffset = 0;
-                }
-                continue;
-            }
-
-            int samples = 0;
-            int64_t chunkStart = AV_NOPTS_VALUE;
-            if (!mDecoder->nextChunk(&mPending, &samples, &chunkStart)) {
-                if (mDecoder->failed()) mError = mDecoder->error();
-                const int64_t cursor = currentOutputSampleUnlocked();
-                if (!mDecoder->failed() && !mTailSilenceScheduled &&
-                    mTotalOutputSamples > cursor) {
-                    const int64_t remainingSamples = mTotalOutputSamples - cursor;
-                    if (remainingSamples <= std::numeric_limits<qint64>::max() / mBytesPerFrame) {
-                        mGapBytesRemaining = remainingSamples * mBytesPerFrame;
-                        mTailSilenceScheduled = true;
-                        continue;
-                    }
-                    mError = QStringLiteral("The trailing audio gap is too large.");
-                }
-                break;
-            }
-            mPendingOffset = 0;
-
-            const int64_t cursor = currentOutputSampleUnlocked();
-            if (chunkStart == AV_NOPTS_VALUE) chunkStart = cursor;
-            if (samples < 0 || chunkStart > std::numeric_limits<int64_t>::max() - samples) {
-                mPending.clear();
-                mError = QStringLiteral("The decoded audio timestamp is invalid.");
-                break;
-            }
-            const int64_t chunkEnd = chunkStart + samples;
-            if (chunkEnd <= cursor) {
-                mPending.clear();
-                continue;
-            }
-            if (chunkStart < cursor) {
-                const int64_t samplesToDiscard = cursor - chunkStart;
-                const int64_t bytesToDiscard = samplesToDiscard * mBytesPerFrame;
-                if (bytesToDiscard >= mPending.size()) {
-                    mPending.clear();
-                    continue;
-                }
-                mPendingOffset = static_cast<qsizetype>(bytesToDiscard);
-            } else if (chunkStart > cursor) {
-                const int64_t gapSamples = chunkStart - cursor;
-                if (gapSamples > std::numeric_limits<qint64>::max() / mBytesPerFrame) {
-                    mPending.clear();
-                    mError = QStringLiteral("The decoded audio gap is too large.");
-                    break;
-                }
-                mGapBytesRemaining = gapSamples * mBytesPerFrame;
-            }
+            qint64 amount = std::min(available, maximumLength - copied);
+            amount -= amount % mBytesPerFrame;
+            if (amount <= 0) break;
+            std::memcpy(data + copied, mBuffer.constData() + mBufferOffset, amount);
+            copied += amount;
+            mBufferOffset += static_cast<qsizetype>(amount);
+            mBytesDelivered += amount;
+            compactBufferUnlocked();
+            mBufferChanged.wakeAll();
         }
 
         return copied;
@@ -1290,10 +1322,249 @@ protected:
     qint64 writeData(const char *, qint64) override { return -1; }
 
 private:
-    int64_t currentOutputSampleUnlocked() const
+    static bool samplePositionsAreNear(int64_t first,
+                                       int64_t second,
+                                       int64_t tolerance)
     {
-        return mBaseOutputSample +
-            (mBytesPerFrame > 0 ? mBytesDelivered / mBytesPerFrame : 0);
+        if (first >= second) {
+            return second > std::numeric_limits<int64_t>::max() - tolerance ||
+                   first <= second + tolerance;
+        }
+        return first > std::numeric_limits<int64_t>::max() - tolerance ||
+               second <= first + tolerance;
+    }
+
+    qint64 bufferedBytesUnlocked() const
+    {
+        return std::max<qint64>(0, mBuffer.size() - mBufferOffset);
+    }
+
+    void compactBufferUnlocked()
+    {
+        if (mBufferOffset >= mBuffer.size()) {
+            mBuffer.clear();
+            mBufferOffset = 0;
+        } else if (mBufferOffset > 0 && mBufferOffset >= mBufferTargetBytes / 2) {
+            mBuffer.remove(0, mBufferOffset);
+            mBufferOffset = 0;
+        }
+    }
+
+    bool appendSilence(int64_t *gapSamples)
+    {
+        if (!gapSamples || *gapSamples <= 0) return false;
+        bool notify = false;
+        {
+            QMutexLocker locker(&mMutex);
+            while (!mStopProducer && bufferedBytesUnlocked() >= mBufferTargetBytes)
+                mBufferChanged.wait(&mMutex);
+            if (mStopProducer) return false;
+
+            compactBufferUnlocked();
+            const qint64 freeBytes = std::max<qint64>(
+                0, mBufferTargetBytes - bufferedBytesUnlocked());
+            const int64_t frames = std::min<int64_t>(*gapSamples,
+                                                      freeBytes / mBytesPerFrame);
+            if (frames <= 0) return true;
+            const qsizetype bytes = static_cast<qsizetype>(frames * mBytesPerFrame);
+            const qsizetype oldSize = mBuffer.size();
+            mBuffer.resize(oldSize + bytes);
+            std::memset(mBuffer.data() + oldSize,
+                        static_cast<unsigned char>(mSilenceByte),
+                        static_cast<size_t>(bytes));
+            *gapSamples -= frames;
+            mProducedOutputSample += frames;
+            notify = true;
+            mBufferChanged.wakeAll();
+        }
+        if (notify) Q_EMIT readyRead();
+        return true;
+    }
+
+    bool appendPending(QByteArray *pending, qsizetype *pendingOffset)
+    {
+        if (!pending || !pendingOffset || *pendingOffset >= pending->size()) return false;
+        bool notify = false;
+        {
+            QMutexLocker locker(&mMutex);
+            while (!mStopProducer && bufferedBytesUnlocked() >= mBufferTargetBytes)
+                mBufferChanged.wait(&mMutex);
+            if (mStopProducer) return false;
+
+            compactBufferUnlocked();
+            qint64 amount = std::min<qint64>(
+                pending->size() - *pendingOffset,
+                mBufferTargetBytes - bufferedBytesUnlocked());
+            amount -= amount % mBytesPerFrame;
+            if (amount <= 0) return true;
+            mBuffer.append(pending->constData() + *pendingOffset,
+                           static_cast<qsizetype>(amount));
+            *pendingOffset += static_cast<qsizetype>(amount);
+            mProducedOutputSample += amount / mBytesPerFrame;
+            notify = true;
+            mBufferChanged.wakeAll();
+        }
+        if (notify) Q_EMIT readyRead();
+        if (*pendingOffset >= pending->size()) {
+            pending->clear();
+            *pendingOffset = 0;
+        }
+        return true;
+    }
+
+    void decodeLoop()
+    {
+        QByteArray pending;
+        qsizetype pendingOffset = 0;
+        int64_t gapSamples = 0;
+        bool decoderFinished = false;
+
+        for (;;) {
+            {
+                QMutexLocker locker(&mMutex);
+                if (mStopProducer) return;
+            }
+
+            if (gapSamples > 0) {
+                if (!appendSilence(&gapSamples)) return;
+                continue;
+            }
+            if (pendingOffset < pending.size()) {
+                if (!appendPending(&pending, &pendingOffset)) return;
+                continue;
+            }
+            if (decoderFinished) {
+                {
+                    QMutexLocker locker(&mMutex);
+                    mProducerEof = true;
+                    mBufferChanged.wakeAll();
+                }
+                Q_EMIT readyRead();
+                return;
+            }
+
+            if (mTestDecodeDelayMs > 0)
+                QThread::msleep(static_cast<unsigned long>(mTestDecodeDelayMs));
+
+            QByteArray decoded;
+            int samples = 0;
+            int64_t chunkStart = AV_NOPTS_VALUE;
+            if (!mDecoder->nextChunk(&decoded, &samples, &chunkStart)) {
+                if (mDecoder->failed()) {
+                    {
+                        QMutexLocker locker(&mMutex);
+                        mError = mDecoder->error();
+                        mProducerFailed = true;
+                        mProducerEof = true;
+                        mBufferChanged.wakeAll();
+                    }
+                    Q_EMIT readyRead();
+                    return;
+                }
+
+                int64_t cursor = 0;
+                {
+                    QMutexLocker locker(&mMutex);
+                    cursor = mProducedOutputSample;
+                }
+                if (mTotalOutputSamples > cursor)
+                    gapSamples = mTotalOutputSamples - cursor;
+                decoderFinished = true;
+                continue;
+            }
+
+            int64_t cursor = 0;
+            {
+                QMutexLocker locker(&mMutex);
+                cursor = mProducedOutputSample;
+            }
+            if (chunkStart == AV_NOPTS_VALUE) chunkStart = cursor;
+            const int64_t jitterTolerance = std::max<int64_t>(
+                1, (static_cast<int64_t>(mOutputRate) + 999) / 1000);
+            if (chunkStart != cursor &&
+                samplePositionsAreNear(chunkStart, cursor, jitterTolerance)) {
+                chunkStart = cursor;
+            }
+
+            if (samples < 0 || chunkStart > std::numeric_limits<int64_t>::max() - samples ||
+                samples > std::numeric_limits<qsizetype>::max() / mBytesPerFrame ||
+                decoded.size() < samples * static_cast<qsizetype>(mBytesPerFrame)) {
+                {
+                    QMutexLocker locker(&mMutex);
+                    mError = QStringLiteral("The decoded audio timestamp or buffer is invalid.");
+                    mProducerFailed = true;
+                    mProducerEof = true;
+                    mBufferChanged.wakeAll();
+                }
+                Q_EMIT readyRead();
+                return;
+            }
+
+            const int64_t chunkEnd = chunkStart + samples;
+            if (chunkEnd <= cursor) continue;
+
+            qsizetype discardBytes = 0;
+            if (chunkStart < cursor) {
+                const int64_t discardSamples = cursor - chunkStart;
+                if (discardSamples >= samples) continue;
+                discardBytes = static_cast<qsizetype>(discardSamples * mBytesPerFrame);
+            } else if (chunkStart > cursor) {
+                gapSamples = chunkStart - cursor;
+            }
+            pending = std::move(decoded);
+            pendingOffset = discardBytes;
+        }
+    }
+
+    bool startDecodeThreadAndPrime()
+    {
+        {
+            QMutexLocker locker(&mMutex);
+            if (mDecodeThread || !mDecoder) return false;
+            mStopProducer = false;
+            mProducerEof = false;
+            mProducerFailed = false;
+            mDecodeThread = QThread::create([this]() { decodeLoop(); });
+            if (!mDecodeThread) {
+                mError = QStringLiteral("Could not create the audio decode-ahead thread.");
+                return false;
+            }
+        }
+
+        mDecodeThread->start(QThread::HighPriority);
+
+        QElapsedTimer timer;
+        timer.start();
+        QMutexLocker locker(&mMutex);
+        while (bufferedBytesUnlocked() < mBufferTargetBytes &&
+               !mProducerEof && !mProducerFailed && timer.elapsed() < 5000) {
+            mBufferChanged.wait(&mMutex, 50);
+        }
+        if (mProducerFailed) return false;
+        if (bufferedBytesUnlocked() == 0 && !mProducerEof) {
+            mError = QStringLiteral("Timed out while priming audio playback.");
+            return false;
+        }
+        return true;
+    }
+
+    void stopDecodeThread()
+    {
+        QThread *thread = nullptr;
+        {
+            QMutexLocker locker(&mMutex);
+            thread = mDecodeThread;
+            if (!thread) return;
+            mStopProducer = true;
+            mBufferChanged.wakeAll();
+        }
+        thread->wait();
+        delete thread;
+        {
+            QMutexLocker locker(&mMutex);
+            if (mDecodeThread == thread) mDecodeThread = nullptr;
+            mStopProducer = false;
+        }
     }
 
     QString mFilePath;
@@ -1301,60 +1572,405 @@ private:
     QAudioFormat mOutputFormat;
     int64_t mTotalSamples = 0;
     std::unique_ptr<FFmpegAudioDecoder> mDecoder;
-    QByteArray mPending;
-    qsizetype mPendingOffset = 0;
+    QByteArray mBuffer;
+    qsizetype mBufferOffset = 0;
     int mBytesPerFrame = 0;
     int mSourceRate = 0;
     int mOutputRate = 0;
     int64_t mTotalOutputSamples = 0;
     int64_t mBaseOutputSample = 0;
     int64_t mBaseSample = 0;
+    int64_t mProducedOutputSample = 0;
     int64_t mBytesDelivered = 0;
-    qint64 mGapBytesRemaining = 0;
+    qint64 mBufferTargetBytes = 0;
     char mSilenceByte = '\0';
-    bool mTailSilenceScheduled = false;
+    int mTestDecodeDelayMs = 0;
+    QThread *mDecodeThread = nullptr;
+    bool mStopProducer = false;
+    bool mProducerEof = false;
+    bool mProducerFailed = false;
     QString mError;
+    QWaitCondition mBufferChanged;
     mutable QMutex mMutex;
 };
 
-AVSAudioDevice::AVSAudioDevice(AVS_Clip *clip, const AVS_VideoInfo *vi, QObject *parent)
+#ifdef VDQT_AUDIO_TESTING
+bool VDQtRunAudioBufferRegression(const QString& filePath, QString *errorMessage)
+{
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+
+    VDQtFFmpegAudioDevice device(filePath, -1, format, 0);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+
+    const qint64 halfSecond = format.bytesForDuration(500000);
+    if (device.bytesAvailable() < halfSecond) {
+        if (errorMessage) *errorMessage = QStringLiteral("The playback device was not primed.");
+        return false;
+    }
+
+    const qint64 pullSize = format.bytesForDuration(50000);
+    QByteArray buffer(static_cast<qsizetype>(pullSize), Qt::Uninitialized);
+    const auto readExact = [&device](char *destination, qint64 byteCount) {
+        qint64 totalRead = 0;
+        QElapsedTimer timer;
+        timer.start();
+        while (totalRead < byteCount && timer.elapsed() < 1000) {
+            const qint64 amount = device.read(destination + totalRead,
+                                              byteCount - totalRead);
+            if (amount > 0)
+                totalRead += amount;
+            else
+                QThread::msleep(1);
+        }
+        return totalRead;
+    };
+    std::array<int16_t, 2> previousSamples{};
+    bool havePreviousSamples = false;
+    int maximumSampleStep = 0;
+    for (int pull = 0; pull < 20; ++pull) {
+        if (readExact(buffer.data(), pullSize) != pullSize) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Buffered audio pull %1 returned early: %2")
+                                    .arg(pull)
+                                    .arg(QStringLiteral("%1 (available=%2, current=%3, atEnd=%4)")
+                                             .arg(device.error())
+                                             .arg(device.bytesAvailable())
+                                             .arg(device.currentSample())
+                                             .arg(device.atEnd()));
+            }
+            return false;
+        }
+        const auto *samples = reinterpret_cast<const int16_t *>(buffer.constData());
+        const qsizetype frameCount = buffer.size() / (2 * static_cast<qsizetype>(sizeof(int16_t)));
+        for (qsizetype frame = 0; frame < frameCount; ++frame) {
+            for (int channel = 0; channel < 2; ++channel) {
+                const int16_t sample = samples[frame * 2 + channel];
+                if (havePreviousSamples) {
+                    maximumSampleStep = std::max(
+                        maximumSampleStep,
+                        std::abs(static_cast<int>(sample) - previousSamples[channel]));
+                }
+                previousSamples[channel] = sample;
+            }
+            havePreviousSamples = true;
+        }
+    }
+    if (maximumSampleStep > 1500) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Playback PCM contains a discontinuity of %1 levels.")
+                                .arg(maximumSampleStep);
+        }
+        return false;
+    }
+    const int64_t oneSecondSample = device.currentSample();
+    if (oneSecondSample < 48000 || oneSecondSample > 48000 + 4096) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Playback read-ahead was outside its bounded window: %1.")
+                                .arg(oneSecondSample);
+        }
+        return false;
+    }
+
+    if (!device.seekToSample(24000)) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+    if (device.bytesAvailable() < halfSecond || device.currentSample() != 24000) {
+        if (errorMessage) *errorMessage = QStringLiteral("Seek did not rebuild the decode-ahead window.");
+        return false;
+    }
+    if (readExact(buffer.data(), pullSize) != pullSize ||
+        device.currentSample() < 26400 || device.currentSample() > 26400 + 4096) {
+        if (errorMessage) *errorMessage = QStringLiteral("Playback did not resume continuously after seek.");
+        return false;
+    }
+    return true;
+}
+
+bool VDQtRunAudioDecodeAheadDeadlineRegression(const QString& filePath, QString *errorMessage)
+{
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+
+    // Artificially make each codec pull expensive while leaving it faster than
+    // real time overall. A synchronous QIODevice blocks for 30-45 ms per 50 ms
+    // audio request; the rolling decode-ahead path should only copy buffered PCM.
+    VDQtFFmpegAudioDevice device(filePath, -1, format, 0, 15);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+
+    const qint64 pullSize = format.bytesForDuration(50000);
+    QByteArray buffer(static_cast<qsizetype>(pullSize), Qt::Uninitialized);
+    qint64 maximumReadTimeMs = 0;
+    for (int pull = 0; pull < 20; ++pull) {
+        QElapsedTimer readTimer;
+        readTimer.start();
+        const qint64 bytesRead = device.read(buffer.data(), pullSize);
+        maximumReadTimeMs = std::max(maximumReadTimeMs, readTimer.elapsed());
+        if (bytesRead != pullSize) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Decode-ahead pull %1 returned early: %2")
+                                    .arg(pull)
+                                    .arg(device.error());
+            }
+            return false;
+        }
+        QThread::msleep(50);
+    }
+
+    if (maximumReadTimeMs > 20) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("An audio callback blocked for %1 ms on codec work.")
+                                .arg(maximumReadTimeMs);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool VDQtRunAudioGapRegression(const QString& filePath,
+                               int64_t gapStartSample,
+                               int64_t gapLengthSamples,
+                               QString *errorMessage)
+{
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+
+    VDQtFFmpegAudioDevice device(filePath, -1, format, 0);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+
+    const int64_t endSample = gapStartSample + gapLengthSamples;
+    const int64_t samplesToRead = endSample + 512;
+    const qint64 bytesToRead = samplesToRead * format.bytesPerFrame();
+    if (bytesToRead <= 0 || bytesToRead > std::numeric_limits<qsizetype>::max()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The gap fixture range is invalid.");
+        return false;
+    }
+
+    QByteArray buffer(static_cast<qsizetype>(bytesToRead), Qt::Uninitialized);
+    if (device.read(buffer.data(), bytesToRead) != bytesToRead) {
+        if (errorMessage) *errorMessage = QStringLiteral("The gap fixture ended unexpectedly.");
+        return false;
+    }
+
+    const auto *samples = reinterpret_cast<const int16_t *>(buffer.constData());
+    for (int64_t frame = gapStartSample; frame < endSample; ++frame) {
+        if (samples[frame * 2] != 0 || samples[frame * 2 + 1] != 0) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("A real %1-sample timeline gap was not preserved.")
+                                    .arg(gapLengthSamples);
+            }
+            return false;
+        }
+    }
+
+    int peakBefore = 0;
+    int peakAfter = 0;
+    for (int64_t frame = std::max<int64_t>(0, gapStartSample - 256);
+         frame < gapStartSample;
+         ++frame) {
+        peakBefore = std::max(peakBefore, std::abs(static_cast<int>(samples[frame * 2])));
+    }
+    for (int64_t frame = endSample; frame < samplesToRead; ++frame) {
+        peakAfter = std::max(peakAfter, std::abs(static_cast<int>(samples[frame * 2])));
+    }
+    if (peakBefore < 100 || peakAfter < 100) {
+        if (errorMessage) *errorMessage = QStringLiteral("The gap fixture lacks audio around its gap.");
+        return false;
+    }
+    return true;
+}
+
+bool VDQtRunAvsAudioDecodeAheadDeadlineRegression(AVS_Clip *clip,
+                                                  const AVS_VideoInfo *vi,
+                                                  QString *errorMessage)
+{
+    if (!clip || !vi || !avs_has_audio(vi) || vi->audio_samples_per_second <= 0 ||
+        vi->nchannels <= 0) {
+        if (errorMessage) *errorMessage = QStringLiteral("The AviSynth test clip has no audio.");
+        return false;
+    }
+
+    // Artificial graph latency is paid by the producer thread during priming
+    // and refill. Pulling from the QIODevice must remain a bounded buffer copy.
+    AVSAudioDevice device(clip, vi, 15);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+
+    const int64_t pullSamples = std::max<int64_t>(
+        1, vi->audio_samples_per_second / 20);
+    const qint64 pullBytes = pullSamples * vi->nchannels *
+                             static_cast<qint64>(sizeof(int16_t));
+    if (pullBytes <= 0 || pullBytes > std::numeric_limits<qsizetype>::max()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The AviSynth pull size is invalid.");
+        return false;
+    }
+
+    QByteArray buffer(static_cast<qsizetype>(pullBytes), Qt::Uninitialized);
+    qint64 maximumReadTimeMs = 0;
+    for (int pull = 0; pull < 20; ++pull) {
+        QElapsedTimer readTimer;
+        readTimer.start();
+        const qint64 bytesRead = device.read(buffer.data(), pullBytes);
+        maximumReadTimeMs = std::max(maximumReadTimeMs, readTimer.elapsed());
+        if (bytesRead != pullBytes) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Buffered AviSynth pull %1 returned early: %2")
+                                    .arg(pull)
+                                    .arg(device.error());
+            }
+            return false;
+        }
+        QThread::msleep(50);
+    }
+
+    if (maximumReadTimeMs > 20) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "An AviSynth audio callback blocked for %1 ms on graph evaluation.")
+                                .arg(maximumReadTimeMs);
+        }
+        return false;
+    }
+
+    const int64_t seekSample = std::min<int64_t>(
+        vi->num_audio_samples, vi->audio_samples_per_second / 2);
+    if (!device.seekToSample(seekSample) || device.getCurrentSample() != seekSample ||
+        device.read(buffer.data(), pullBytes) != pullBytes) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("AviSynth seek did not rebuild its decode-ahead window: %1")
+                                .arg(device.error());
+        }
+        return false;
+    }
+    return true;
+}
+#endif
+
+AVSAudioDevice::AVSAudioDevice(AVS_Clip *clip,
+                               const AVS_VideoInfo *vi,
+                               int testDecodeDelayMs,
+                               QObject *parent)
     : QIODevice(parent)
     , m_clip(clip)
     , m_vi(vi)
-    , m_currentSample(0)
+    , m_testDecodeDelayMs(std::max(0, testDecodeDelayMs))
 {
-    open(QIODevice::ReadOnly);
 }
 
-void AVSAudioDevice::setClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
+AVSAudioDevice::~AVSAudioDevice()
 {
-    QIODevice::close();
-    m_clip = clip;
-    m_vi = vi;
-    m_currentSample = 0;
-    QIODevice::open(QIODevice::ReadOnly);
+    close();
 }
 
-void AVSAudioDevice::seekToSample(int64_t sample)
+bool AVSAudioDevice::initialize()
 {
-    const int64_t maximum = (m_vi && avs_has_audio(m_vi)) ? m_vi->num_audio_samples : 0;
-    m_currentSample = std::clamp<int64_t>(sample, 0, std::max<int64_t>(0, maximum));
-    // Clear QIODevice's read-ahead buffer, as the device is intentionally
-    // sequential and its public byte position is unrelated to sample seeking.
+    if (!m_clip || !m_vi || !avs_has_audio(m_vi) || m_vi->nchannels <= 0 ||
+        m_vi->audio_samples_per_second <= 0 || m_vi->num_audio_samples <= 0) {
+        QMutexLocker locker(&m_mutex);
+        m_error = QStringLiteral("The AviSynth clip has no playable audio stream.");
+        return false;
+    }
+
+    m_bytesPerFrame = m_vi->nchannels * static_cast<int>(sizeof(int16_t));
+    QAudioFormat format;
+    format.setSampleRate(m_vi->audio_samples_per_second);
+    format.setChannelCount(m_vi->nchannels);
+    format.setSampleFormat(QAudioFormat::Int16);
+    m_bufferTargetBytes = alignedAudioBufferSize(
+        format, kLiveAudioPrebufferUsecs, 64 * 1024, 4 * 1024 * 1024);
+
+    if (!QIODevice::open(QIODevice::ReadOnly)) {
+        QMutexLocker locker(&m_mutex);
+        m_error = QStringLiteral("Could not open the AviSynth audio playback stream.");
+        return false;
+    }
+    return startDecodeThreadAndPrime();
+}
+
+bool AVSAudioDevice::seekToSample(int64_t sample)
+{
+    stopDecodeThread();
+    if (!m_vi || !avs_has_audio(m_vi)) return false;
+
+    const int64_t maximum = std::max<int64_t>(0, m_vi->num_audio_samples);
+    sample = std::clamp<int64_t>(sample, 0, maximum);
+
+    // Discard any QIODevice read-ahead as well as the producer's decoded PCM.
     QIODevice::close();
-    QIODevice::open(QIODevice::ReadOnly);
+    if (!QIODevice::open(QIODevice::ReadOnly)) {
+        QMutexLocker locker(&m_mutex);
+        m_error = QStringLiteral("Could not reopen the AviSynth audio stream after seeking.");
+        return false;
+    }
+    {
+        QMutexLocker locker(&m_mutex);
+        m_buffer.clear();
+        m_bufferOffset = 0;
+        m_baseSample = sample;
+        m_producerSample = sample;
+        m_bytesDelivered = 0;
+        m_producerEof = sample >= maximum;
+        m_producerFailed = false;
+        m_error.clear();
+    }
+    return startDecodeThreadAndPrime();
+}
+
+int64_t AVSAudioDevice::getCurrentSample() const
+{
+    QMutexLocker locker(&m_mutex);
+    const int64_t deliveredSamples = m_bytesPerFrame > 0
+        ? m_bytesDelivered / m_bytesPerFrame
+        : 0;
+    return m_baseSample + deliveredSamples;
+}
+
+QString AVSAudioDevice::error() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_error;
+}
+
+bool AVSAudioDevice::atEnd() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_producerEof && bufferedBytesUnlocked() == 0;
+}
+
+void AVSAudioDevice::close()
+{
+    stopDecodeThread();
+    QIODevice::close();
 }
 
 qint64 AVSAudioDevice::bytesAvailable() const
 {
-    if (!m_clip || !m_vi || !avs_has_audio(m_vi) || m_vi->nchannels <= 0) return 0;
-    const int64_t remainingSamples = m_vi->num_audio_samples - m_currentSample;
-    if (remainingSamples <= 0) return QIODevice::bytesAvailable();
-    const int64_t bytesPerFrame = static_cast<int64_t>(m_vi->nchannels) * sizeof(int16_t);
-    const int64_t remainingBytes = remainingSamples > std::numeric_limits<qint64>::max() / bytesPerFrame
-        ? std::numeric_limits<qint64>::max()
-        : remainingSamples * bytesPerFrame;
-    return remainingBytes + QIODevice::bytesAvailable();
+    QMutexLocker locker(&m_mutex);
+    qint64 buffered = bufferedBytesUnlocked();
+    const qint64 baseAvailable = QIODevice::bytesAvailable();
+    if (baseAvailable > 0 &&
+        baseAvailable <= std::numeric_limits<qint64>::max() - buffered) {
+        buffered += baseAvailable;
+    }
+    return buffered;
 }
 
 qint64 AVSAudioDevice::size() const
@@ -1370,19 +1986,178 @@ qint64 AVSAudioDevice::size() const
 qint64 AVSAudioDevice::readData(char *data, qint64 maximumLength)
 {
     if (!m_clip || !m_vi || !avs_has_audio(m_vi) || !data ||
-        maximumLength <= 0 || m_vi->nchannels <= 0) {
+        maximumLength <= 0 || m_bytesPerFrame <= 0) {
         return 0;
     }
 
-    const int64_t bytesPerFrame = static_cast<int64_t>(m_vi->nchannels) * sizeof(int16_t);
-    const int64_t requestedSamples = maximumLength / bytesPerFrame;
-    const int64_t remainingSamples = m_vi->num_audio_samples - m_currentSample;
-    const int64_t samplesToRead = std::min(requestedSamples, remainingSamples);
-    if (samplesToRead <= 0) return 0;
+    maximumLength -= maximumLength % m_bytesPerFrame;
+    if (maximumLength <= 0) return 0;
 
-    if (!readAvsAsInt16(m_clip, m_vi, m_currentSample, samplesToRead, data)) return 0;
-    m_currentSample += samplesToRead;
-    return samplesToRead * bytesPerFrame;
+    QMutexLocker locker(&m_mutex);
+    qint64 copied = 0;
+    bool waitedForProducer = false;
+    while (copied < maximumLength) {
+        const qint64 available = bufferedBytesUnlocked();
+        if (available <= 0) {
+            if (m_producerEof || m_producerFailed || waitedForProducer) break;
+            // The callback may briefly yield to the producer, but it never
+            // evaluates the AviSynth graph itself.
+            waitedForProducer = true;
+            m_bufferChanged.wait(&m_mutex, 20);
+            continue;
+        }
+
+        qint64 amount = std::min(available, maximumLength - copied);
+        amount -= amount % m_bytesPerFrame;
+        if (amount <= 0) break;
+        std::memcpy(data + copied, m_buffer.constData() + m_bufferOffset, amount);
+        copied += amount;
+        m_bufferOffset += static_cast<qsizetype>(amount);
+        m_bytesDelivered += amount;
+        compactBufferUnlocked();
+        m_bufferChanged.wakeAll();
+    }
+    return copied;
+}
+
+qint64 AVSAudioDevice::bufferedBytesUnlocked() const
+{
+    return std::max<qint64>(0, m_buffer.size() - m_bufferOffset);
+}
+
+void AVSAudioDevice::compactBufferUnlocked()
+{
+    if (m_bufferOffset >= m_buffer.size()) {
+        m_buffer.clear();
+        m_bufferOffset = 0;
+    } else if (m_bufferOffset > 0 && m_bufferOffset >= m_bufferTargetBytes / 2) {
+        m_buffer.remove(0, m_bufferOffset);
+        m_bufferOffset = 0;
+    }
+}
+
+void AVSAudioDevice::decodeLoop()
+{
+    constexpr int64_t kDecodeChunkSamples = 32768;
+
+    for (;;) {
+        int64_t startSample = 0;
+        int64_t samplesToRead = 0;
+        {
+            QMutexLocker locker(&m_mutex);
+            while (!m_stopProducer && bufferedBytesUnlocked() >= m_bufferTargetBytes)
+                m_bufferChanged.wait(&m_mutex);
+            if (m_stopProducer) return;
+
+            const int64_t remaining = m_vi->num_audio_samples - m_producerSample;
+            if (remaining <= 0) {
+                m_producerEof = true;
+                m_bufferChanged.wakeAll();
+                locker.unlock();
+                Q_EMIT readyRead();
+                return;
+            }
+
+            const qint64 freeBytes = std::max<qint64>(
+                m_bytesPerFrame, m_bufferTargetBytes - bufferedBytesUnlocked());
+            startSample = m_producerSample;
+            samplesToRead = std::min({remaining,
+                                      kDecodeChunkSamples,
+                                      static_cast<int64_t>(freeBytes / m_bytesPerFrame)});
+        }
+
+        if (m_testDecodeDelayMs > 0)
+            QThread::msleep(static_cast<unsigned long>(m_testDecodeDelayMs));
+
+        qsizetype byteCount = 0;
+        if (samplesToRead <= 0 ||
+            !checkedBufferSize(samplesToRead, m_vi->nchannels,
+                               static_cast<int>(sizeof(int16_t)), &byteCount)) {
+            QMutexLocker locker(&m_mutex);
+            m_error = QStringLiteral("The AviSynth playback buffer size is invalid.");
+            m_producerFailed = true;
+            m_producerEof = true;
+            m_bufferChanged.wakeAll();
+            locker.unlock();
+            Q_EMIT readyRead();
+            return;
+        }
+
+        QByteArray decoded(byteCount, Qt::Uninitialized);
+        if (!readAvsAsInt16(m_clip, m_vi, startSample, samplesToRead, decoded.data())) {
+            QMutexLocker locker(&m_mutex);
+            m_error = QStringLiteral("AviSynth failed while decoding playback audio.");
+            m_producerFailed = true;
+            m_producerEof = true;
+            m_bufferChanged.wakeAll();
+            locker.unlock();
+            Q_EMIT readyRead();
+            return;
+        }
+
+        {
+            QMutexLocker locker(&m_mutex);
+            if (m_stopProducer) return;
+            compactBufferUnlocked();
+            m_buffer.append(decoded);
+            m_producerSample += samplesToRead;
+            if (m_producerSample >= m_vi->num_audio_samples)
+                m_producerEof = true;
+            m_bufferChanged.wakeAll();
+        }
+        Q_EMIT readyRead();
+    }
+}
+
+bool AVSAudioDevice::startDecodeThreadAndPrime()
+{
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_decodeThread || !m_clip || !m_vi || m_bytesPerFrame <= 0) return false;
+        if (m_producerEof) return true;
+        m_stopProducer = false;
+        m_producerFailed = false;
+        m_decodeThread = QThread::create([this]() { decodeLoop(); });
+        if (!m_decodeThread) {
+            m_error = QStringLiteral("Could not create the AviSynth audio decode-ahead thread.");
+            return false;
+        }
+    }
+
+    m_decodeThread->start(QThread::HighPriority);
+
+    QElapsedTimer timer;
+    timer.start();
+    QMutexLocker locker(&m_mutex);
+    while (bufferedBytesUnlocked() < m_bufferTargetBytes &&
+           !m_producerEof && !m_producerFailed && timer.elapsed() < 5000) {
+        m_bufferChanged.wait(&m_mutex, 50);
+    }
+    if (m_producerFailed) return false;
+    if (bufferedBytesUnlocked() == 0 && !m_producerEof) {
+        m_error = QStringLiteral("Timed out while priming AviSynth audio playback.");
+        return false;
+    }
+    return true;
+}
+
+void AVSAudioDevice::stopDecodeThread()
+{
+    QThread *thread = nullptr;
+    {
+        QMutexLocker locker(&m_mutex);
+        thread = m_decodeThread;
+        if (!thread) return;
+        m_stopProducer = true;
+        m_bufferChanged.wakeAll();
+    }
+    thread->wait();
+    delete thread;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_decodeThread == thread) m_decodeThread = nullptr;
+        m_stopProducer = false;
+    }
 }
 
 qint64 AVSAudioDevice::writeData(const char *, qint64)
@@ -1451,7 +2226,15 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
         : QAudioDevice();
     if (!defaultDevice.isNull() && defaultDevice.isFormatSupported(format)) {
         mAvsAudioDevice = new AVSAudioDevice(clip, vi);
-        mAudioSink = new QAudioSink(defaultDevice, format);
+        if (mAvsAudioDevice->initialize()) {
+            mAudioSink = new QAudioSink(defaultDevice, format);
+            configureLiveAudioSink(mAudioSink, format);
+        } else {
+            qWarning() << "[VDQtAudioPlayer] AviSynth playback initialization failed:"
+                       << mAvsAudioDevice->error();
+            delete mAvsAudioDevice;
+            mAvsAudioDevice = nullptr;
+        }
     } else if (!defaultDevice.isNull()) {
         qWarning() << "[VDQtAudioPlayer] The audio device does not support"
                    << mSampleRate << "Hz" << mChannels
@@ -1609,6 +2392,7 @@ bool VDQtAudioPlayer::openFile(const QString &filePath)
                                                            mTotalSamplesExact ? mTotalSamples : 0);
             if (mFFmpegAudioDevice->initialize()) {
                 mAudioSink = new QAudioSink(outputDevice, playbackFormat);
+                configureLiveAudioSink(mAudioSink, playbackFormat);
             } else {
                 qWarning() << "[VDQtAudioPlayer] Live playback initialization failed:"
                            << mFFmpegAudioDevice->error();

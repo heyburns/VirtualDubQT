@@ -4,7 +4,6 @@
 #include <QString>
 #include <QList>
 #include <QMap>
-#include <QSettings>
 
 // Video Codec Definitions
 struct VDVideoCodecInfo {

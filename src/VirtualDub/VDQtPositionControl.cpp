@@ -123,11 +123,15 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
     mainLayout->addLayout(controlLayout);
 
     mScrubTimer.setSingleShot(true);
-    connect(&mScrubTimer, &QTimer::timeout, this, [this]() {
+    connect(&mScrubTimer, &QTimer::timeout,
+            this, &VDQtPositionControlWidget::DispatchPendingScrub);
+    connect(mSlider, &QSlider::sliderPressed, this, [this]() {
+        Q_EMIT userScrubStarted();
+    });
+    connect(mSlider, &QSlider::sliderReleased, this, [this]() {
         if (mPendingScrubPos >= 0) {
-            NotifyEvent(VDPositionControlEventData::kEventJump, mPendingScrubPos);
-            Q_EMIT positionChanged(mPendingScrubPos);
-            mPendingScrubPos = -1;
+            mScrubTimer.stop();
+            DispatchPendingScrub();
         }
     });
 }
@@ -144,7 +148,14 @@ void VDQtPositionControlWidget::SetRange(VDPosition lo, VDPosition hi, bool upda
 
 void VDQtPositionControlWidget::SetPosition(VDPosition pos) {
     if (mPosition != pos) {
+        // Programmatic movement (playback, stepping, navigation) is already
+        // committed by the explicit positionChanged() emission below. Do not
+        // let QSlider::valueChanged route it through the user-scrub debounce a
+        // second time.
+        mScrubTimer.stop();
+        mPendingScrubPos = -1;
         mPosition = pos;
+        QSignalBlocker blocker(mSlider);
         mSlider->setValue((int)pos);
         UpdateStatusText();
         Q_EMIT positionChanged((int)mPosition);
@@ -179,8 +190,18 @@ void VDQtPositionControlWidget::onSliderValueChanged(int value) {
     mPendingScrubPos = value;
 
     if (!mScrubTimer.isActive()) {
-        mScrubTimer.start(8); // Limit scrubbing dispatch rate to 120 FPS
+        mScrubTimer.start(16); // Coalesce user dragging to at most ~60 dispatches/sec.
     }
+}
+
+void VDQtPositionControlWidget::DispatchPendingScrub() {
+    if (mPendingScrubPos < 0)
+        return;
+
+    const int position = mPendingScrubPos;
+    mPendingScrubPos = -1;
+    NotifyEvent(VDPositionControlEventData::kEventJump, position);
+    Q_EMIT positionChanged(position);
 }
 
 void VDQtPositionControlWidget::onTransportButtonClicked() {

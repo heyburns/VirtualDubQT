@@ -17,10 +17,7 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #include <cpuid.h>
-#ifdef __cpuid
-#undef __cpuid
-#endif
-inline void __cpuid(int cpuinfo[4], int info_type) {
+inline void vd_cpuid(int cpuinfo[4], int info_type) {
     __cpuid_count(info_type, 0, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
 }
 inline unsigned long long get_xcr0() {
@@ -46,6 +43,10 @@ long CPUCheckForExtensions() {
 #else
 
 #if defined(_MSC_VER)
+inline void vd_cpuid(int cpuinfo[4], int info_type) {
+	__cpuid(cpuinfo, info_type);
+}
+
 unsigned __int64 get_xcr0(){
 	return _xgetbv(0);
 }
@@ -55,7 +56,7 @@ long CPUCheckForExtensions() {
 	long result = 0;
 	int cpuinfo[4];
 
-	__cpuid(cpuinfo, 1);
+	vd_cpuid(cpuinfo, 1);
 	if (IS_BIT_SET(cpuinfo[3], 0))
 		result |= CPUF_SUPPORTS_FPU;
 	if (IS_BIT_SET(cpuinfo[3], 23))
@@ -90,13 +91,13 @@ long CPUCheckForExtensions() {
 			result |= CPUF_SUPPORTS_AVX;
 			if (IS_BIT_SET(cpuinfo[2], 12))
 				result |= CPUF_SUPPORTS_FMA3;
-			__cpuid(cpuinfo, 7);
+			vd_cpuid(cpuinfo, 7);
 			if (IS_BIT_SET(cpuinfo[1], 5))
 				result |= CPUF_SUPPORTS_AVX2;
 		}
 		if((xgetbv0 & (0x7ull << 5)) &&
 			 (xgetbv0 & (0x3ull << 1))) {
-			__cpuid(cpuinfo, 7);
+			vd_cpuid(cpuinfo, 7);
 			if (IS_BIT_SET(cpuinfo[1], 16))
 				result |= CPUF_SUPPORTS_AVX512F;
 			if (IS_BIT_SET(cpuinfo[1], 17))
@@ -119,10 +120,10 @@ long CPUCheckForExtensions() {
 	}
 
 	// 3DNow!, 3DNow!, ISSE, FMA4
-	__cpuid(cpuinfo, 0x80000000);   
+	vd_cpuid(cpuinfo, 0x80000000);
 	if (cpuinfo[0] >= (int)0x80000001)
 	{
-		__cpuid(cpuinfo, 0x80000001);
+		vd_cpuid(cpuinfo, 0x80000001);
 
 		if (IS_BIT_SET(cpuinfo[3], 31))
 			result |= CPUF_SUPPORTS_3DNOW;

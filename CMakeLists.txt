@@ -191,6 +191,8 @@ set(VDFILTERS_SOURCES
 )
 
 set(VIRTUALDUB_QT_SOURCES
+    src/VirtualDub/VDQtFrameDecodeWorker.h
+    src/VirtualDub/VDQtFrameDecodeWorker.cpp
     src/VirtualDub/VDQtVideoDecoder.h
     src/VirtualDub/VDQtVideoDecoder.cpp
     src/VirtualDub/VDQtAudioPlayer.h
@@ -232,6 +234,12 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(VirtualDubQt PRIVATE
         -Wall -Wextra -Wpedantic -Wreturn-type -Wnull-dereference
     )
+endif()
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # The imported VirtualDub sources contain Microsoft's i64/ui64 integer
+    # suffixes. Clang supports them through its documented MS compatibility
+    # mode; without this option an otherwise valid Linux build fails halfway.
+    target_compile_options(VirtualDubQt PRIVATE -fms-extensions)
 endif()
 
 option(ENABLE_SANITIZERS "Build VirtualDubQt with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -286,17 +294,38 @@ endif()
 if (BUILD_TESTING)
     add_executable(stabilization_tests
         src/VirtualDub/test_stabilization.cpp
+        src/VirtualDub/VDQtFrameDecodeWorker.cpp
+        src/VirtualDub/VDQtFrameDecodeWorker.h
+        src/VirtualDub/VDQtAudioPlayer.cpp
+        src/VirtualDub/VDQtAudioPlayer.h
+        src/VirtualDub/VDQtCodecEngine.cpp
+        src/VirtualDub/VDQtCodecEngine.h
+        src/VirtualDub/VDQtCodecSettings.cpp
+        src/VirtualDub/VDQtCodecSettings.h
         src/VirtualDub/VDQtFilterSystem.cpp
         src/VirtualDub/VDQtFilterSystem.h
+        src/VirtualDub/VDQtPositionControl.cpp
+        src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
         src/VirtualDub/VDQtVideoDecoder.h
+        src/system/event.cpp
+        src/system/Fraction.cpp
     )
     target_link_libraries(stabilization_tests PRIVATE
         Qt6::Core
         Qt6::Gui
+        Qt6::Widgets
+        Qt6::Multimedia
         ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
+    target_compile_definitions(stabilization_tests PRIVATE VDQT_AUDIO_TESTING=1)
+    if (ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(stabilization_tests PRIVATE
+            -fno-omit-frame-pointer -fsanitize=address,undefined)
+        target_link_options(stabilization_tests PRIVATE
+            -fno-omit-frame-pointer -fsanitize=address,undefined)
+    endif()
     set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
     add_test(NAME stabilization_tests COMMAND stabilization_tests)
 endif()
