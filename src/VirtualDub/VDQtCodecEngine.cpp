@@ -1,4 +1,5 @@
 #include "VDQtCodecEngine.h"
+#include <algorithm>
 
 VDQtCodecEngine::VDQtCodecEngine() {
     resetToDefaults();
@@ -127,6 +128,102 @@ void VDQtCodecEngine::resetToDefaults() {
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+}
+
+QStringList VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
+    const VDAudioCodecParams& params)
+{
+    QStringList args;
+    QString codec = params.codecId.trimmed().toLower();
+    if (codec.isEmpty()) codec = QStringLiteral("aac");
+    const bool isVbr = params.rateMode.compare(QStringLiteral("vbr"), Qt::CaseInsensitive) == 0;
+
+    if (codec == "aac") {
+        args << "-c:a" << "aac";
+        if (isVbr) {
+            static constexpr double qualities[] = { 0.2, 0.5, 0.9, 1.4, 2.0 };
+            const int index = std::clamp(params.vbrQuality - 1, 0, 4);
+            args << "-q:a" << QString::number(qualities[index], 'f', 2);
+        } else {
+            args << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                    ? params.bitrateKbps : 192);
+        }
+    } else if (codec == "libfdk_aac") {
+        args << "-c:a" << "libfdk_aac";
+        if (isVbr) {
+            args << "-vbr" << QString::number(std::clamp(params.vbrQuality, 1, 5));
+        } else {
+            args << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                    ? params.bitrateKbps : 192);
+        }
+    } else if (codec == "libmp3lame" || codec == "mp3") {
+        args << "-c:a" << "libmp3lame";
+        if (isVbr) {
+            args << "-q:a" << QString::number(std::clamp(params.vbrQuality, 0, 9));
+        } else {
+            args << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                    ? params.bitrateKbps : 192);
+        }
+    } else if (codec == "libopus" || codec == "opus") {
+        const bool haveLibOpus = avcodec_find_encoder_by_name("libopus") != nullptr;
+        args << "-c:a" << (haveLibOpus ? "libopus" : "opus");
+        if (!haveLibOpus) args << "-strict" << "-2";
+        args << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                ? params.bitrateKbps : 160)
+             << "-vbr" << (isVbr ? "on" : "off");
+    } else if (codec == "libvorbis" || codec == "vorbis") {
+        args << "-c:a" << "libvorbis";
+        if (isVbr) {
+            args << "-q:a" << QString::number(std::clamp(params.vbrQuality, 0, 10));
+        } else {
+            args << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                    ? params.bitrateKbps : 160);
+        }
+    } else if (codec == "flac") {
+        args << "-c:a" << "flac"
+             << "-compression_level"
+             << QString::number(std::clamp(params.vbrQuality > 0
+                                               ? params.vbrQuality : 5,
+                                           0, 8));
+    } else if (codec == "ac3") {
+        args << "-c:a" << "ac3"
+             << "-b:a" << QString("%1k").arg(params.bitrateKbps > 0
+                                                ? params.bitrateKbps : 384);
+    } else if (codec == "(uncompressed)" || codec == "uncompressed"
+               || codec.startsWith("pcm")) {
+        QString pcmCodec = codec;
+        if (pcmCodec == "(uncompressed)" || pcmCodec == "uncompressed"
+            || pcmCodec == "pcm") {
+            if (params.bitDepth >= 32) pcmCodec = QStringLiteral("pcm_s32le");
+            else if (params.bitDepth >= 24) pcmCodec = QStringLiteral("pcm_s24le");
+            else pcmCodec = QStringLiteral("pcm_s16le");
+        }
+        args << "-c:a" << pcmCodec;
+    } else {
+        args << "-c:a" << codec;
+        if (params.bitrateKbps > 0)
+            args << "-b:a" << QString("%1k").arg(params.bitrateKbps);
+    }
+
+    if (codec == "libopus" || codec == "opus") {
+        int rate = params.sampleRate;
+        if (rate != 8000 && rate != 12000 && rate != 16000
+            && rate != 24000 && rate != 48000) {
+            rate = 48000;
+        }
+        args << "-ar" << QString::number(rate);
+    } else if (codec == "ac3") {
+        int rate = params.sampleRate;
+        if (rate != 32000 && rate != 44100 && rate != 48000)
+            rate = 48000;
+        args << "-ar" << QString::number(rate);
+    } else if (params.sampleRate > 0 && params.sampleRate <= 192000) {
+        args << "-ar" << QString::number(params.sampleRate);
+    }
+
+    if (params.channels > 0 && params.channels <= 8)
+        args << "-ac" << QString::number(params.channels);
+    return args;
 }
 
 bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString *outError) const {

@@ -1422,8 +1422,41 @@ double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
 
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size() && mVideoStreamIndex >= 0 && mFormatCtx) {
         const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
-        if (mFrameIndex[frameIndex].duration > 0) {
-            return static_cast<double>(mFrameIndex[frameIndex].duration) * av_q2d(timeBase);
+        const FrameIndexEntry& entry = mFrameIndex[frameIndex];
+
+        // AVFrame::duration can reflect decode-order packet spacing rather than
+        // presentation-order dwell time on reordered VFR streams. Adjacent PTS
+        // values are authoritative for every frame except the final one.
+        if (entry.timestamp != AV_NOPTS_VALUE && frameIndex + 1 < mFrameIndex.size()) {
+            const int64_t nextTimestamp = mFrameIndex[frameIndex + 1].timestamp;
+            if (nextTimestamp != AV_NOPTS_VALUE && nextTimestamp > entry.timestamp) {
+                return static_cast<double>(nextTimestamp - entry.timestamp)
+                     * av_q2d(timeBase);
+            }
+        }
+
+        // The final presentation duration is the stream end minus its PTS.
+        // Demuxers commonly report this boundary correctly even when the last
+        // decoded AVFrame inherited the preceding packet's duration.
+        const int64_t streamDuration =
+            mFormatCtx->streams[mVideoStreamIndex]->duration;
+        if (entry.timestamp != AV_NOPTS_VALUE && frameIndex + 1 == mFrameIndex.size()
+            && streamDuration != AV_NOPTS_VALUE && streamDuration > 0) {
+            int64_t origin = mStreamStartTimestamp;
+            if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE)
+                origin = mFrameIndex.front().timestamp;
+            if (origin == AV_NOPTS_VALUE) origin = 0;
+            if (origin <= std::numeric_limits<int64_t>::max() - streamDuration) {
+                const int64_t streamEnd = origin + streamDuration;
+                if (streamEnd > entry.timestamp) {
+                    return static_cast<double>(streamEnd - entry.timestamp)
+                         * av_q2d(timeBase);
+                }
+            }
+        }
+
+        if (entry.duration > 0) {
+            return static_cast<double>(entry.duration) * av_q2d(timeBase);
         }
     }
 

@@ -66,16 +66,25 @@ target_include_directories(VirtualDubQt PRIVATE
     ${AVISYNTH_INCLUDE_DIR}
 )
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(VirtualDubQt PRIVATE
-        -Wall -Wextra -Wpedantic -Wreturn-type -Wnull-dereference
-    )
-endif()
 option(ENABLE_SANITIZERS "Build VirtualDubQt with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-if (ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(VirtualDubQt PRIVATE -fno-omit-frame-pointer -fsanitize=address,undefined)
-    target_link_options(VirtualDubQt PRIVATE -fno-omit-frame-pointer -fsanitize=address,undefined)
-endif()
+
+function(vdqt_enable_diagnostics target_name)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target_name} PRIVATE
+            -Wall -Wextra -Wpedantic -Wreturn-type -Wnull-dereference
+        )
+    endif()
+    if (ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target_name} PRIVATE
+            -fno-omit-frame-pointer -fsanitize=address,undefined
+        )
+        target_link_options(${target_name} PRIVATE
+            -fno-omit-frame-pointer -fsanitize=address,undefined
+        )
+    endif()
+endfunction()
+
+vdqt_enable_diagnostics(VirtualDubQt)
 
 target_link_libraries(VirtualDubQt PRIVATE
     Qt6::Widgets
@@ -104,6 +113,10 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtCodecSettings.h
         src/VirtualDub/VDQtFilterSystem.cpp
         src/VirtualDub/VDQtFilterSystem.h
+        src/VirtualDub/VDQtVideoExporter.cpp
+        src/VirtualDub/VDQtVideoExporter.h
+        src/VirtualDub/VDQtDialogs.cpp
+        src/VirtualDub/VDQtDialogs.h
         src/VirtualDub/VDQtPositionControl.cpp
         src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
@@ -125,12 +138,63 @@ if (BUILD_TESTING)
         ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
-    if (ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(stabilization_tests PRIVATE
-            -fno-omit-frame-pointer -fsanitize=address,undefined)
-        target_link_options(stabilization_tests PRIVATE
-            -fno-omit-frame-pointer -fsanitize=address,undefined)
-    endif()
+    vdqt_enable_diagnostics(stabilization_tests)
     set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
     add_test(NAME stabilization_tests COMMAND stabilization_tests)
+
+    add_executable(playback_performance_tests
+        src/VirtualDub/test_playback_performance.cpp
+        src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtVideoDecoder.h
+    )
+    target_compile_definitions(playback_performance_tests PRIVATE QT_NO_KEYWORDS)
+    target_include_directories(playback_performance_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${AVISYNTH_INCLUDE_DIR}
+    )
+    target_link_libraries(playback_performance_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        ${AVISYNTH_LIBRARY}
+        PkgConfig::FFMPEG
+    )
+    vdqt_enable_diagnostics(playback_performance_tests)
+    set_target_properties(playback_performance_tests PROPERTIES
+        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
+    )
+    add_test(NAME playback_performance_tests COMMAND playback_performance_tests)
+    set_tests_properties(playback_performance_tests PROPERTIES
+        LABELS "performance;playback"
+        TIMEOUT 45
+    )
+
+    add_executable(audio_backend_tests
+        src/VirtualDub/test_audio_backend.cpp
+        src/VirtualDub/VDQtAudioPlayer.cpp
+        src/VirtualDub/VDQtAudioPlayer.h
+        src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtVideoDecoder.h
+    )
+    target_compile_definitions(audio_backend_tests PRIVATE QT_NO_KEYWORDS)
+    target_include_directories(audio_backend_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${AVISYNTH_INCLUDE_DIR}
+    )
+    target_link_libraries(audio_backend_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Multimedia
+        ${AVISYNTH_LIBRARY}
+        PkgConfig::FFMPEG
+    )
+    vdqt_enable_diagnostics(audio_backend_tests)
+    set_target_properties(audio_backend_tests PROPERTIES
+        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
+    )
+    add_test(NAME audio_backend_tests COMMAND audio_backend_tests)
+    set_tests_properties(audio_backend_tests PROPERTIES
+        LABELS "audio;hardware"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 15
+    )
 endif()

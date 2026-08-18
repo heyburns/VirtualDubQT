@@ -9,6 +9,7 @@
 #include "VDQtCodecSettings.h"
 #include "VDQtPositionControl.h"
 #include "VDQtVideoDecoder.h"
+#include "VDQtVideoExporter.h"
 #include <vd2/system/atomic.h>
 #include <vd2/system/binary.h>
 
@@ -45,7 +46,10 @@ bool isMostlyBlue(const QColor& color) {
     return color.blue() > 220 && color.green() < 35 && color.red() < 35;
 }
 
-bool runProcess(const QString& program, const QStringList& arguments, QByteArray *errorOutput = nullptr) {
+bool runProcess(const QString& program,
+                const QStringList& arguments,
+                QByteArray *errorOutput = nullptr,
+                QByteArray *standardOutput = nullptr) {
     QProcess process;
     process.start(program, arguments);
     if (!process.waitForStarted(5000) || !process.waitForFinished(30000)) {
@@ -54,7 +58,17 @@ bool runProcess(const QString& program, const QStringList& arguments, QByteArray
         return false;
     }
     if (errorOutput) *errorOutput = process.readAllStandardError();
+    if (standardOutput) *standardOutput = process.readAllStandardOutput();
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+
+bool containsOptionValue(const QStringList& arguments,
+                         const QString& option,
+                         const QString& value) {
+    const int optionIndex = arguments.indexOf(option);
+    return optionIndex >= 0
+        && optionIndex + 1 < arguments.size()
+        && arguments[optionIndex + 1] == value;
 }
 
 } // namespace
@@ -181,6 +195,40 @@ int main(int argc, char **argv) {
         codecSettings.setAudioConfig(audioConfig);
         if (!require(VDQtCodecSettings::instance().getAudioConfig().bitrateKbps == 256,
                      "audio compression choices persist for the application session"))
+            return 1;
+
+        VDAudioCodecParams directCopyAudio;
+        directCopyAudio.codecId = QStringLiteral("aac");
+        directCopyAudio.rateMode = QStringLiteral("cbr");
+        directCopyAudio.bitrateKbps = 96;
+        directCopyAudio.sampleRate = 44100;
+        directCopyAudio.channels = 1;
+        const QStringList directCopyAudioArgs =
+            VDQtCodecEngine::buildFfmpegAudioEncodeArguments(directCopyAudio);
+        if (!require(containsOptionValue(directCopyAudioArgs,
+                                         QStringLiteral("-b:a"), QStringLiteral("96k"))
+                     && containsOptionValue(directCopyAudioArgs,
+                                            QStringLiteral("-ar"), QStringLiteral("44100"))
+                     && containsOptionValue(directCopyAudioArgs,
+                                            QStringLiteral("-ac"), QStringLiteral("1")),
+                     "all configured direct-copy video audio options reach FFmpeg"))
+            return 1;
+
+        directCopyAudio.rateMode = QStringLiteral("vbr");
+        directCopyAudio.vbrQuality = 5;
+        const QStringList directCopyVbrArgs =
+            VDQtCodecEngine::buildFfmpegAudioEncodeArguments(directCopyAudio);
+        if (!require(containsOptionValue(directCopyVbrArgs,
+                                         QStringLiteral("-q:a"), QStringLiteral("2.00"))
+                     && !directCopyVbrArgs.contains(QStringLiteral("-b:a")),
+                     "configured audio quality mode reaches FFmpeg without a CBR override"))
+            return 1;
+
+        directCopyAudio.codecId = QStringLiteral("uncompressed");
+        directCopyAudio.bitDepth = 24;
+        if (!require(VDQtCodecEngine::buildFfmpegAudioEncodeArguments(directCopyAudio)
+                         .contains(QStringLiteral("pcm_s24le")),
+                     "uncompressed audio honors configured bit depth"))
             return 1;
 
         VDQtCodecSettings freshSettingsSession;
@@ -429,6 +477,79 @@ int main(int argc, char **argv) {
             std::cerr << audioBufferError.toStdString() << '\n';
             return 1;
         }
+
+        const QString lateSelectionFixture =
+            settingsDirectory.filePath(QStringLiteral("late_selection.m4a"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=733:sample_rate=48000:duration=12"),
+                           QStringLiteral("-c:a"), QStringLiteral("aac"),
+                           QStringLiteral("-b:a"), QStringLiteral("160k"),
+                           QStringLiteral("-y"), lateSelectionFixture },
+                         &ffmpegError),
+                     "create late-selection audio fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtAudioPlayer lateSelectionExporter;
+        const QString lateSelectionOutput =
+            settingsDirectory.filePath(QStringLiteral("late_selection.wav"));
+        constexpr int64_t lateStartSample = 8 * 48000;
+        constexpr int64_t lateSampleCount = 48000;
+        if (!require(lateSelectionExporter.openFile(lateSelectionFixture)
+                     && lateSelectionExporter.exportAudioToFile(
+                         lateSelectionOutput, lateStartSample, lateSampleCount),
+                     "export a sample-accurate late audio selection"))
+            return 1;
+        if (!require(lateSelectionExporter.lastExportUsedSeekForTesting()
+                     && lateSelectionExporter.lastExportDecodedSamplesForTesting() < 4 * 48000,
+                     "late audio selections seek with bounded decoder preroll"))
+            return 1;
+
+        const QString fullReferenceWav =
+            settingsDirectory.filePath(QStringLiteral("late_selection_full_reference.wav"));
+        VDQtAudioPlayer fullReferenceExporter;
+        if (!require(fullReferenceExporter.openFile(lateSelectionFixture)
+                     && fullReferenceExporter.exportAudioToFile(fullReferenceWav),
+                     "decode full reference for late audio selection"))
+            return 1;
+
+        const QString lateSelectionPcm =
+            settingsDirectory.filePath(QStringLiteral("late_selection.pcm"));
+        const QString referenceSelectionPcm =
+            settingsDirectory.filePath(QStringLiteral("late_selection_reference.pcm"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), lateSelectionOutput,
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("s16le"),
+                           QStringLiteral("-y"), lateSelectionPcm },
+                         &ffmpegError)
+                     && runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), fullReferenceWav,
+                           QStringLiteral("-ss"), QStringLiteral("8"),
+                           QStringLiteral("-t"), QStringLiteral("1"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("s16le"),
+                           QStringLiteral("-y"), referenceSelectionPcm },
+                         &ffmpegError),
+                     "render comparable late-selection PCM")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        QFile latePcmFile(lateSelectionPcm);
+        QFile referencePcmFile(referenceSelectionPcm);
+        if (!require(latePcmFile.open(QIODevice::ReadOnly)
+                     && referencePcmFile.open(QIODevice::ReadOnly)
+                     && latePcmFile.readAll() == referencePcmFile.readAll(),
+                     "seeked late audio export is sample-identical to full decode"))
+            return 1;
     }
 
     {
@@ -672,6 +793,156 @@ int main(int argc, char **argv) {
         if (!require(decoder.getCachedFrameCostKiB() == 0 && decoder.getCachedFrameCount() == 0,
                      "decoded frame cache releases all accounted memory"))
             return 1;
+    }
+
+    {
+        const QString sourcePath =
+            settingsDirectory.filePath(QStringLiteral("native_vfr_source.mp4"));
+        const QString outputPath =
+            settingsDirectory.filePath(QStringLiteral("native_vfr_output.mp4"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("testsrc2=size=64x48:rate=10:duration=0.3"),
+                           QStringLiteral("-vf"),
+                           QStringLiteral("setpts='if(eq(N,0),0,if(eq(N,1),1,20))/(10*TB)'"),
+                           QStringLiteral("-fps_mode"), QStringLiteral("vfr"),
+                           QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                           QStringLiteral("-an"), QStringLiteral("-y"), sourcePath },
+                         &ffmpegError),
+                     "create native VFR export fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtCodecEngine& codecs = VDQtCodecEngine::instance();
+        codecs.setVideoParams(
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("libx264")));
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(sourcePath), "open native VFR export fixture"))
+            return 1;
+        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream();
+        if (!require(scan.errorMessage.isEmpty()
+                     && std::abs(decoder.getFrameDurationSeconds(0) - 0.1) < 0.00001
+                     && std::abs(decoder.getFrameDurationSeconds(1) - 1.9) < 0.00001
+                     && std::abs(decoder.getFrameDurationSeconds(2) - 0.1) < 0.00001,
+                     "VFR frame durations follow presentation order and stream end"))
+            return 1;
+
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = sourcePath;
+        options.outputPath = outputPath;
+        options.startFrame = 0;
+        options.endFrame = -1;
+        options.videoMode = VideoMode_NormalRecompress;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        options.containerType = QStringLiteral("mp4");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder),
+                     "export native VFR presentation timestamps"))
+            return 1;
+
+        QByteArray timestampOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("frame=best_effort_timestamp_time"),
+                           QStringLiteral("-of"), QStringLiteral("csv=p=0"), outputPath },
+                         &ffmpegError, &timestampOutput),
+                     "probe native VFR export timestamps")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        const QList<QByteArray> timestampLines =
+            timestampOutput.trimmed().split('\n');
+        if (!require(timestampLines.size() == 4
+                     && std::abs(timestampLines[0].trimmed().toDouble() - 0.0) < 0.00001
+                     && std::abs(timestampLines[1].trimmed().toDouble() - 0.1) < 0.00001
+                     && std::abs(timestampLines[2].trimmed().toDouble() - 2.0) < 0.00001
+                     && std::abs(timestampLines[3].trimmed().toDouble() - 2.1) < 0.00001,
+                     "VFR export retains nonuniform frame presentation times")) {
+            std::cerr << timestampOutput.constData() << '\n';
+            return 1;
+        }
+        codecs.resetToDefaults();
+    }
+
+    {
+        const QString sourcePath =
+            settingsDirectory.filePath(QStringLiteral("direct_video_audio_source.mp4"));
+        const QString outputPath =
+            settingsDirectory.filePath(QStringLiteral("direct_video_processed_audio.mkv"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("testsrc2=size=64x48:rate=10:duration=2"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=frequency=997:sample_rate=48000:duration=2"),
+                           QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                           QStringLiteral("-c:a"), QStringLiteral("aac"),
+                           QStringLiteral("-shortest"), QStringLiteral("-y"), sourcePath },
+                         &ffmpegError),
+                     "create direct-video processed-audio fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDAudioCodecParams audioParams;
+        audioParams.codecId = QStringLiteral("aac");
+        audioParams.rateMode = QStringLiteral("cbr");
+        audioParams.bitrateKbps = 96;
+        audioParams.sampleRate = 44100;
+        audioParams.channels = 1;
+        VDQtCodecEngine::instance().setAudioParams(audioParams);
+
+        VDQtVideoDecoder decoder;
+        VDQtAudioPlayer audioPlayer;
+        if (!require(decoder.openFile(sourcePath) && audioPlayer.openFile(sourcePath),
+                     "open direct-video processed-audio fixture"))
+            return 1;
+
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = sourcePath;
+        options.outputPath = outputPath;
+        options.startFrame = 0;
+        options.endFrame = -1;
+        options.videoMode = VideoMode_DirectStreamCopy;
+        options.audioMode = AudioMode_FullProcessing;
+        options.containerType = QStringLiteral("mkv");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder, &audioPlayer),
+                     "export direct video with configured processed audio"))
+            return 1;
+
+        QByteArray audioProbeOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("a:0"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=codec_name,sample_rate,channels,bit_rate"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"), outputPath },
+                         &ffmpegError, &audioProbeOutput),
+                     "probe configured processed audio output")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        if (!require(audioProbeOutput.contains("codec_name=aac")
+                     && audioProbeOutput.contains("sample_rate=44100")
+                     && audioProbeOutput.contains("channels=1"),
+                     "direct-video export honors audio codec, rate, and channels")) {
+            std::cerr << audioProbeOutput.constData() << '\n';
+            return 1;
+        }
+        VDQtCodecEngine::instance().resetToDefaults();
     }
 
     std::cout << "stabilization tests passed\n";

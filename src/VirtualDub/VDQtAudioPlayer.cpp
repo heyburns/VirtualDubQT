@@ -2558,6 +2558,10 @@ bool VDQtAudioPlayer::exportAudioToFile(
     int64_t sampleCount,
     std::function<bool(int progress, int total)> progressCallback)
 {
+#ifdef VDQT_AUDIO_TESTING
+    mLastExportUsedSeek = false;
+    mLastExportDecodedSamples = 0;
+#endif
     if (!mHasAudio || outputPath.isEmpty()) return false;
     if (!mFilePath.isEmpty() &&
         QFileInfo(outputPath).absoluteFilePath() == QFileInfo(mFilePath).absoluteFilePath()) {
@@ -2727,6 +2731,24 @@ bool VDQtAudioPlayer::exportAudioToFile(
         int lastPercent = -1;
         bool ok = true;
 
+        // Seeking with a short decode preroll retains codec/resampler history
+        // while avoiding a decode of the entire file for a late selection.
+        // Timestamp-based trimming below still determines the exact first
+        // output sample, including intentional gaps and stream offsets.
+        constexpr int64_t kSeekPrerollSeconds = 2;
+        constexpr int64_t kMinimumSeekSeconds = 4;
+        if (startSample > static_cast<int64_t>(decoder.outputRate()) * kMinimumSeekSeconds) {
+            const int64_t prerollSamples = static_cast<int64_t>(decoder.outputRate())
+                                         * kSeekPrerollSeconds;
+            const int64_t seekSample = std::max<int64_t>(0, startSample - prerollSamples);
+            if (decoder.seekToSample(seekSample)) {
+                decodedCursor = seekSample;
+#ifdef VDQT_AUDIO_TESTING
+                mLastExportUsedSeek = true;
+#endif
+            }
+        }
+
         const auto progressAtTimelineSample = [startSample, progressTotal](int64_t sample) {
             const int64_t relative = sample > startSample ? sample - startSample : 0;
             return std::min(relative, progressTotal);
@@ -2762,6 +2784,9 @@ bool VDQtAudioPlayer::exportAudioToFile(
         int decodedSamples = 0;
         int64_t decodedTimestamp = AV_NOPTS_VALUE;
         while (decoder.nextChunk(&pcm, &decodedSamples, &decodedTimestamp)) {
+#ifdef VDQT_AUDIO_TESTING
+            mLastExportDecodedSamples += decodedSamples;
+#endif
             const int64_t chunkStart = decodedTimestamp != AV_NOPTS_VALUE
                 ? decodedTimestamp
                 : decodedCursor;

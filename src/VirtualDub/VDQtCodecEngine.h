@@ -2,6 +2,7 @@
 #define VDQTCODECENGINE_H
 
 #include <QString>
+#include <QStringList>
 #include <QList>
 #include <QMap>
 
@@ -99,6 +100,11 @@ public:
 
     bool checkAudioEncoderAvailable(const QString &codecId, QString *outError = nullptr) const;
     bool checkVideoEncoderAvailable(const QString &codecId, QString *outError = nullptr) const;
+
+    // Builds the complete FFmpeg audio encoder option set used by every video
+    // export path. Keeping this centralized prevents direct-video-copy exports
+    // from silently ignoring rate control, resampling, or channel settings.
+    static QStringList buildFfmpegAudioEncodeArguments(const VDAudioCodecParams& params);
 
     void resetToDefaults();
 

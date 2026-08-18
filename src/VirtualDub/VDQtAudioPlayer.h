@@ -101,6 +101,11 @@ public:
     QString getAudioCompressionString() const;
     bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr);
 
+#ifdef VDQT_AUDIO_TESTING
+    bool lastExportUsedSeekForTesting() const { return mLastExportUsedSeek; }
+    int64_t lastExportDecodedSamplesForTesting() const { return mLastExportDecodedSamples; }
+#endif
+
 private:
     bool mIsOpen;
     bool mHasAudio;
@@ -126,6 +131,11 @@ private:
 
     AVS_Clip *mClip = nullptr;
     const AVS_VideoInfo *mVi = nullptr;
+
+#ifdef VDQT_AUDIO_TESTING
+    bool mLastExportUsedSeek = false;
+    int64_t mLastExportDecodedSamples = 0;
+#endif
 };
 
 #ifdef VDQT_AUDIO_TESTING

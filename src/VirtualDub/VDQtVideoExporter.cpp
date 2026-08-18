@@ -9,12 +9,14 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QFile>
+#include <QDir>
 #include <QMessageBox>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <sys/stat.h>
 #include "VDQtDialogs.h"
 extern "C" {
@@ -96,6 +98,21 @@ AudioStreamProbe probeAudioStream(const QString& path) {
     probe.succeeded = true;
     avformat_close_input(&formatContext);
     return probe;
+}
+
+VDAudioCodecParams configuredAudioParams()
+{
+    VDAudioCodecParams params = VDQtCodecEngine::instance().getAudioParams();
+    if (!params.codecId.trimmed().isEmpty()) return params;
+
+    const VDAudioCodecConfig fallback = VDQtCodecSettings::instance().getAudioConfig();
+    params.codecId = fallback.codecId;
+    params.rateMode = fallback.rateControlMode;
+    params.bitrateKbps = fallback.bitrateKbps;
+    params.vbrQuality = fallback.vbrQuality;
+    params.sampleRate = fallback.sampleRate;
+    params.channels = fallback.channels;
+    return params;
 }
 
 void appendBounded(QByteArray& destination, const QByteArray& data) {
@@ -453,6 +470,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         variableFrameTiming = longestFrameDuration
             > shortestFrameDuration * 1.01 + 1e-6;
     }
+    const bool preserveNativeVfr = variableFrameTiming
+        && presentationTimestampsUsable
+        && !options.convertFpsPreserveDuration
+        && options.customFps <= 0.0;
     if (options.convertFpsPreserveDuration && options.customFps > 0.0)
         useTimestampFrameMapping = presentationTimestampsUsable;
 
@@ -471,27 +492,11 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         step = 1;
     } else if (options.customFps > 0.0) {
         fps = options.customFps;
-    } else if (variableFrameTiming && presentationTimestampsUsable
-               && std::isfinite(sourceDurationSeconds) && sourceDurationSeconds > 0.0) {
-        // A rawvideo pipe cannot carry arbitrary input PTS. Resample the VFR
-        // timeline to a bounded CFR grid at the source's highest observed
-        // cadence, duplicating long-dwell frames instead of flattening every
-        // source frame to the same duration.
-        const double observedCadence = 1.0 / shortestFrameDuration;
-        const double nominalOutputRate = std::clamp(
-            std::max(sourceFps, observedCadence) / step, 0.001, 240.0);
-        const long double requestedFrames = static_cast<long double>(sourceDurationSeconds)
-                                          * nominalOutputRate;
-        if (!std::isfinite(requestedFrames)
-            || requestedFrames > std::numeric_limits<int>::max()) {
-            if (parentWidget)
-                QMessageBox::critical(parentWidget, "Export Error", "The variable-frame-rate timeline is too large.");
-            return false;
-        }
-        framesToExport = std::max(1, static_cast<int>(std::llround(requestedFrames)));
+    } else if (preserveNativeVfr) {
+        // The VFR path stages one lossless image per processed source frame and
+        // gives FFmpeg an explicit duration for each image. `fps` remains an
+        // informational/codec fallback value; it no longer determines PTS.
         fps = static_cast<double>(framesToExport) / sourceDurationSeconds;
-        step = 1;
-        useTimestampFrameMapping = true;
     } else if ((indexedForExport || hasFrameSelection)
                && std::isfinite(sourceDurationSeconds) && sourceDurationSeconds > 0.0) {
         // The stdin rawvideo pipe is necessarily CFR. For a VFR selection,
@@ -575,19 +580,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             if (options.audioMode == AudioMode_DirectStreamCopy) {
                 args << "-c:a" << "copy";
             } else {
-                VDAudioCodecParams aParams = VDQtCodecEngine::instance().getAudioParams();
-                QString audioCodec = aParams.codecId.toLower();
-                if (audioCodec == "libfdk_aac") args << "-c:a" << "libfdk_aac" << "-b:a" << "256k";
-                else if (audioCodec == "aac" || audioCodec.isEmpty()) args << "-c:a" << "aac" << "-b:a" << "256k";
-                else if (audioCodec == "libmp3lame" || audioCodec == "mp3") args << "-c:a" << "libmp3lame" << "-b:a" << "192k";
-                else if (audioCodec == "libopus" || audioCodec == "opus") {
-                    if (avcodec_find_encoder_by_name("libopus") != nullptr) args << "-c:a" << "libopus" << "-b:a" << "160k";
-                    else args << "-c:a" << "opus" << "-strict" << "-2" << "-b:a" << "160k";
-                }
-                else if (audioCodec == "libvorbis" || audioCodec == "vorbis") args << "-c:a" << "libvorbis" << "-b:a" << "160k";
-                else if (audioCodec == "flac") args << "-c:a" << "flac";
-                else if (audioCodec == "ac3") args << "-c:a" << "ac3" << "-b:a" << "384k";
-                else args << "-c:a" << "pcm_s16le";
+                args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
+                    configuredAudioParams());
             }
         }
 
@@ -666,10 +660,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             framesToExport *= filterFramesPerInput;
         }
     }
+    const double outputDurationSeconds = preserveNativeVfr
+        ? sourceDurationSeconds
+        : static_cast<double>(framesToExport) / fps;
 
     // Fetch user-configured codec settings
     VDVideoCodecParams vParams = VDQtCodecEngine::instance().getVideoParams();
-    VDAudioCodecParams aParams = VDQtCodecEngine::instance().getAudioParams();
+    const VDAudioCodecParams aParams = configuredAudioParams();
 
     // 1. Audio Source Configuration
     QString audioSrcMedia;
@@ -697,7 +694,6 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         if (sampleRate <= 0) sampleRate = 48000;
 
         const int64_t startSample = static_cast<int64_t>(std::llround(sourceStartSeconds * sampleRate));
-        const double outputDurationSeconds = static_cast<double>(framesToExport) / fps;
         const int64_t sampleCount = static_cast<int64_t>(std::llround(outputDurationSeconds * sampleRate));
 
         QProgressDialog audioProgress(
@@ -741,12 +737,155 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         rawInputImageFormat = QImage::Format_RGBA8888;
     }
 
-    args << "-y"
-         << "-f" << "rawvideo"
-         << "-pix_fmt" << rawInputPixelFormat
-         << "-s" << QString("%1x%2").arg(outW).arg(outH)
-         << "-r" << QString::number(fps, 'f', 12)
-         << "-i" << "-"; // input 0: raw video stream from stdin
+    QTemporaryDir vfrFrameDirectory(
+        QDir::tempPath() + QStringLiteral("/virtualdub-vfr-XXXXXX"));
+    QString vfrManifestPath;
+    if (preserveNativeVfr) {
+        if (!vfrFrameDirectory.isValid()) {
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Export Error",
+                                      "Temporary storage for variable-frame-rate frames could not be created.");
+            return false;
+        }
+
+        QProgressDialog stagingProgress(
+            "Preparing timestamped variable-frame-rate frames...", "Cancel",
+            0, std::max(1, framesToExport), parentWidget);
+        stagingProgress.setWindowModality(Qt::WindowModal);
+        stagingProgress.setMinimumDuration(0);
+
+        QByteArray manifest("ffconcat version 1.0\n");
+        QString lastFrameName;
+        int stagedFrames = 0;
+        bool stagingFailed = false;
+        QString stagingError;
+
+        for (int64_t sourceFrame64 = startFrame;
+             sourceFrame64 <= endFrame;
+             sourceFrame64 += step) {
+            const int sourceFrame = static_cast<int>(sourceFrame64);
+            QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+            if (stagingProgress.wasCanceled()) {
+                stagingError = QStringLiteral("Variable-frame-rate export was cancelled.");
+                stagingFailed = true;
+                break;
+            }
+
+            QImage rawFrame = decoder.getFrameImage(sourceFrame);
+            if (rawFrame.isNull()) {
+                stagingError = QString("Failed to decode source frame %1.").arg(sourceFrame);
+                stagingFailed = true;
+                break;
+            }
+
+            QList<QImage> filteredFrames;
+            if (applyFilters) {
+                if (!VDQtFilterSystem::instance().processFrameSequence(rawFrame, filteredFrames)
+                    || filteredFrames.size() != filterFramesPerInput) {
+                    stagingError = QString("The temporal filter chain failed at source frame %1.")
+                                       .arg(sourceFrame);
+                    stagingFailed = true;
+                    break;
+                }
+            } else {
+                filteredFrames.append(rawFrame);
+            }
+
+            const double frameStart = decoder.getFrameTimestampSeconds(sourceFrame);
+            const int nextSourceFrame = sourceFrame + step;
+            const double frameEnd = nextSourceFrame <= endFrame
+                ? decoder.getFrameTimestampSeconds(nextSourceFrame)
+                : sourceStartSeconds + sourceDurationSeconds;
+            if (!std::isfinite(frameStart) || !std::isfinite(frameEnd)
+                || frameEnd <= frameStart) {
+                stagingError = QString("Source frame %1 has an invalid presentation duration.")
+                                   .arg(sourceFrame);
+                stagingFailed = true;
+                break;
+            }
+            const double phaseDuration = (frameEnd - frameStart) / filteredFrames.size();
+            if (!std::isfinite(phaseDuration) || phaseDuration < 0.000001) {
+                stagingError = QString("Source frame %1 has a presentation phase shorter than one microsecond.")
+                                   .arg(sourceFrame);
+                stagingFailed = true;
+                break;
+            }
+
+            for (const QImage& filteredFrame : std::as_const(filteredFrames)) {
+                if (filteredFrame.isNull()
+                    || filteredFrame.width() != outW
+                    || filteredFrame.height() != outH) {
+                    stagingError = QString("Filter output dimensions changed at frame %1.")
+                                       .arg(sourceFrame);
+                    stagingFailed = true;
+                    break;
+                }
+
+                const QString frameName = QString("frame_%1.png")
+                                              .arg(stagedFrames, 8, 10, QLatin1Char('0'));
+                const QString framePath = vfrFrameDirectory.filePath(frameName);
+                if (!filteredFrame.save(framePath, "PNG")) {
+                    stagingError = QString("Could not stage processed frame %1.").arg(sourceFrame);
+                    stagingFailed = true;
+                    break;
+                }
+
+                manifest += "file '" + frameName.toUtf8() + "'\n";
+                // A microsecond image-demuxer time base preserves source PTS.
+                // A repeated final image below supplies the end timestamp for
+                // the preceding frame; its one-microsecond sentinel duration is
+                // visually inert but allows muxers to retain that final dwell.
+                manifest += "option framerate 1000000\n";
+                manifest += "duration "
+                         + QString::number(phaseDuration, 'f', 12).toLatin1()
+                         + '\n';
+                lastFrameName = frameName;
+                ++stagedFrames;
+
+                if (frameCallback)
+                    frameCallback(sourceFrame, rawFrame, filteredFrame);
+                stagingProgress.setValue(stagedFrames);
+            }
+            if (stagingFailed) break;
+        }
+
+        if (!stagingFailed && stagedFrames != framesToExport) {
+            stagingError = QString("Prepared %1 frames, but %2 were expected.")
+                               .arg(stagedFrames).arg(framesToExport);
+            stagingFailed = true;
+        }
+        if (!stagingFailed) {
+            manifest += "file '" + lastFrameName.toUtf8() + "'\n";
+            manifest += "option framerate 1000000\n";
+            vfrManifestPath = vfrFrameDirectory.filePath(QStringLiteral("timeline.ffconcat"));
+            QFile manifestFile(vfrManifestPath);
+            if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                || manifestFile.write(manifest) != manifest.size()) {
+                stagingError = QStringLiteral("The variable-frame-rate timeline could not be written.");
+                stagingFailed = true;
+            }
+        }
+        stagingProgress.close();
+        if (stagingFailed) {
+            qWarning() << "[Exporter]" << stagingError;
+            if (parentWidget && !stagingProgress.wasCanceled())
+                QMessageBox::critical(parentWidget, "Export Error", stagingError);
+            return false;
+        }
+    }
+
+    args << "-y";
+    if (preserveNativeVfr) {
+        args << "-f" << "concat"
+             << "-safe" << "0"
+             << "-i" << vfrManifestPath;
+    } else {
+        args << "-f" << "rawvideo"
+             << "-pix_fmt" << rawInputPixelFormat
+             << "-s" << QString("%1x%2").arg(outW).arg(outH)
+             << "-r" << QString::number(fps, 'f', 12)
+             << "-i" << "-"; // input 0: raw video stream from stdin
+    }
 
     bool hasAudioInput = false;
     if (isDirectCopyMediaAudio) {
@@ -878,6 +1017,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
         args << "-pix_fmt" << outPixFmt;
     }
+    if (preserveNativeVfr)
+        args << "-fps_mode" << "vfr";
 
     // 5. Audio Codec & Options
     if (hasAudioInput) {
@@ -888,101 +1029,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             // clips. Incompatible destination containers now fail visibly.
             args << "-c:a" << "copy";
         } else {
-            QString audioCodec = aParams.codecId.toLower();
-            if (audioCodec.isEmpty()) {
-                VDAudioCodecConfig aCfg = VDQtCodecSettings::instance().getAudioConfig();
-                audioCodec = aCfg.codecId.toLower();
-                aParams.rateMode = aCfg.rateControlMode;
-                aParams.vbrQuality = aCfg.vbrQuality;
-                if (aParams.bitrateKbps <= 0) aParams.bitrateKbps = aCfg.bitrateKbps;
-                if (aParams.sampleRate <= 0) aParams.sampleRate = aCfg.sampleRate;
-                if (aParams.channels <= 0) aParams.channels = aCfg.channels;
-            }
-
-            bool isVbr = (aParams.rateMode.toLower() == "vbr");
-
-            if (audioCodec == "aac" || audioCodec == "libfdk_aac") {
-                args << "-c:a" << audioCodec;
-                if (isVbr) {
-                    // Map VBR quality slider (1..5) to FFmpeg native AAC -q:a (0.2 .. 2.0)
-                    static const double aacQ[] = { 0.2, 0.5, 0.9, 1.4, 2.0 };
-                    int qIdx = std::clamp(aParams.vbrQuality - 1, 0, 4);
-                    args << "-q:a" << QString::number(aacQ[qIdx], 'f', 2);
-                } else {
-                    int br = (aParams.bitrateKbps > 0) ? aParams.bitrateKbps : 192;
-                    args << "-b:a" << QString("%1k").arg(br);
-                }
-            } else if (audioCodec == "libmp3lame" || audioCodec == "mp3") {
-                args << "-c:a" << "libmp3lame";
-                if (isVbr) {
-                    int vLevel = std::clamp(aParams.vbrQuality, 0, 9);
-                    args << "-q:a" << QString::number(vLevel);
-                } else {
-                    int br = (aParams.bitrateKbps > 0) ? aParams.bitrateKbps : 192;
-                    args << "-b:a" << QString("%1k").arg(br);
-                }
-            } else if (audioCodec == "libopus" || audioCodec == "opus") {
-                if (avcodec_find_encoder_by_name("libopus") != nullptr) {
-                    args << "-c:a" << "libopus";
-                } else {
-                    args << "-c:a" << "opus" << "-strict" << "-2";
-                }
-                int br = (aParams.bitrateKbps > 0) ? aParams.bitrateKbps : 160;
-                args << "-b:a" << QString("%1k").arg(br);
-                if (isVbr) {
-                    args << "-vbr" << "on";
-                } else {
-                    args << "-vbr" << "off";
-                }
-            } else if (audioCodec == "libvorbis" || audioCodec == "vorbis") {
-                args << "-c:a" << "libvorbis";
-                if (isVbr) {
-                    args << "-q:a" << QString::number(aParams.vbrQuality);
-                } else {
-                    int br = (aParams.bitrateKbps > 0) ? aParams.bitrateKbps : 160;
-                    args << "-b:a" << QString("%1k").arg(br);
-                }
-            } else if (audioCodec == "flac") {
-                args << "-c:a" << "flac";
-                int compLevel = std::clamp(aParams.vbrQuality, 0, 8);
-                if (compLevel == 0 && aParams.rateMode != "vbr") compLevel = 5;
-                args << "-compression_level" << QString::number(compLevel);
-            } else if (audioCodec == "ac3") {
-                args << "-c:a" << "ac3";
-                int br = (aParams.bitrateKbps > 0) ? aParams.bitrateKbps : 384;
-                args << "-b:a" << QString("%1k").arg(br);
-            } else if (audioCodec == "pcm_s16le" || audioCodec.contains("pcm") || audioCodec == "(uncompressed)") {
-                args << "-c:a" << "pcm_s16le";
-            } else {
-                args << "-c:a" << audioCodec;
-                if (aParams.bitrateKbps > 0) {
-                    args << "-b:a" << QString("%1k").arg(aParams.bitrateKbps);
-                }
-            }
-
-            if (audioCodec == "libopus" || audioCodec == "opus") {
-                int opusRate = aParams.sampleRate;
-                if (opusRate != 8000 && opusRate != 12000 && opusRate != 16000 && opusRate != 24000 && opusRate != 48000) {
-                    opusRate = 48000;
-                }
-                args << "-ar" << QString::number(opusRate);
-            } else if (audioCodec == "ac3") {
-                int ac3Rate = aParams.sampleRate;
-                if (ac3Rate != 48000 && ac3Rate != 44100 && ac3Rate != 32000) {
-                    ac3Rate = 48000;
-                }
-                args << "-ar" << QString::number(ac3Rate);
-            } else if (aParams.sampleRate > 0 && aParams.sampleRate <= 192000) {
-                args << "-ar" << QString::number(aParams.sampleRate);
-            }
-            if (aParams.channels > 0 && aParams.channels <= 8) {
-                args << "-ac" << QString::number(aParams.channels);
-            }
+            args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(aParams);
         }
 
         // Bound the mux to the generated video duration. Using -shortest here
         // would let a slightly shorter audio stream truncate valid video frames.
-        args << "-t" << QString::number(static_cast<double>(framesToExport) / fps, 'f', 9);
+        const double muxDuration = outputDurationSeconds
+                                 + (preserveNativeVfr ? 0.000001 : 0.0);
+        args << "-t" << QString::number(muxDuration, 'f', 9);
     }
 
     // 6. Container Format & Output Path
@@ -1026,8 +1080,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     QElapsedTimer timer;
     timer.start();
 
-    int doneCount = 0;
-    for (int inputIndex = 0; inputIndex < inputFramesToProcess; ++inputIndex) {
+    int doneCount = preserveNativeVfr ? framesToExport : 0;
+    for (int inputIndex = 0;
+         !preserveNativeVfr && inputIndex < inputFramesToProcess;
+         ++inputIndex) {
         if (progress.wasCanceled()) {
             cancelled = true;
             break;
@@ -1120,7 +1176,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     bool processOk = false;
-    if (cancelled || writeFailed) {
+    if (preserveNativeVfr) {
+        progress.setLabelText("Encoding timestamped variable-frame-rate video...");
+        progress.setValue(50);
+        QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+        processOk = waitForProcess(ffmpeg, progress, diagnostics, cancelled);
+    } else if (cancelled || writeFailed) {
         stopProcess(ffmpeg);
         drainProcessOutput(ffmpeg, diagnostics);
     } else {
