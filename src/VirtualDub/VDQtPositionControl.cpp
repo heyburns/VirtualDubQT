@@ -16,7 +16,7 @@ void VDTimelineSlider::setSelection(int start, int end) {
     }
 }
 
-void VDTimelineSlider::paintEvent(QPaintEvent *ev) {
+void VDTimelineSlider::paintEvent(QPaintEvent *) {
     QStylePainter p(this);
     QStyleOptionSlider opt;
     initStyleOption(&opt);
@@ -102,17 +102,17 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
         return btn;
     };
 
-    btnStart       = createBtn("|<",  "Jump to Start (Home)", PCN_START);
-    btnPrevKey     = createBtn("<<K", "Previous Keyframe (Shift+Left)", PCN_KEYPREV);
-    btnPrev        = createBtn("<",   "Step Backward (Left)", PCN_BACKWARD);
-    btnStop        = createBtn("■",   "Stop (Esc)", PCN_STOP);
-    btnPlay        = createBtn("▶",   "Play Input (Enter)", PCN_PLAY);
-    btnPlayPreview = createBtn("▶|",  "Play Preview (F7)", PCN_PLAYPREVIEW);
-    btnNext        = createBtn(">",   "Step Forward (Right)", PCN_FORWARD);
-    btnNextKey     = createBtn("K>>", "Next Keyframe (Shift+Right)", PCN_KEYNEXT);
-    btnEnd         = createBtn(">|",  "Jump to End (End)", PCN_END);
-    btnMarkIn      = createBtn("[",   "Set Selection Start ([)", PCN_MARKIN);
-    btnMarkOut     = createBtn("]",   "Set Selection End (])", PCN_MARKOUT);
+    btnStart       = createBtn("|<",  "Jump to Start (Home)", VDQT_PCN_START);
+    btnPrevKey     = createBtn("<<K", "Previous Keyframe (Shift+Left)", VDQT_PCN_KEYPREV);
+    btnPrev        = createBtn("<",   "Step Backward (Left)", VDQT_PCN_BACKWARD);
+    btnStop        = createBtn("■",   "Stop (Esc)", VDQT_PCN_STOP);
+    btnPlay        = createBtn("▶",   "Play Input (Enter)", VDQT_PCN_PLAY);
+    btnPlayPreview = createBtn("▶|",  "Play Preview (F7)", VDQT_PCN_PLAYPREVIEW);
+    btnNext        = createBtn(">",   "Step Forward (Right)", VDQT_PCN_FORWARD);
+    btnNextKey     = createBtn("K>>", "Next Keyframe (Shift+Right)", VDQT_PCN_KEYNEXT);
+    btnEnd         = createBtn(">|",  "Jump to End (End)", VDQT_PCN_END);
+    btnMarkIn      = createBtn("[",   "Set Selection Start ([)", VDQT_PCN_MARKIN);
+    btnMarkOut     = createBtn("]",   "Set Selection End (])", VDQT_PCN_MARKOUT);
 
     controlLayout->addSpacing(12);
 
@@ -136,17 +136,14 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
     });
 }
 
-VDQtPositionControlWidget::~VDQtPositionControlWidget() {
-}
-
-void VDQtPositionControlWidget::SetRange(VDPosition lo, VDPosition hi, bool updateNow) {
+void VDQtPositionControlWidget::SetRange(qint64 lo, qint64 hi, bool updateNow) {
     mRangeLo = lo;
     mRangeHi = hi;
     mSlider->setRange((int)lo, (int)hi);
     if (updateNow) UpdateStatusText();
 }
 
-void VDQtPositionControlWidget::SetPosition(VDPosition pos) {
+void VDQtPositionControlWidget::SetPosition(qint64 pos) {
     if (mPosition != pos) {
         // Programmatic movement (playback, stepping, navigation) is already
         // committed by the explicit positionChanged() emission below. Do not
@@ -162,7 +159,7 @@ void VDQtPositionControlWidget::SetPosition(VDPosition pos) {
     }
 }
 
-void VDQtPositionControlWidget::SetPositionSilent(VDPosition pos) {
+void VDQtPositionControlWidget::SetPositionSilent(qint64 pos) {
     if (mPosition != pos) {
         mPosition = pos;
         QSignalBlocker blocker(mSlider);
@@ -171,17 +168,11 @@ void VDQtPositionControlWidget::SetPositionSilent(VDPosition pos) {
     }
 }
 
-void VDQtPositionControlWidget::SetSelection(VDPosition start, VDPosition end, bool updateNow) {
+void VDQtPositionControlWidget::SetSelection(qint64 start, qint64 end, bool updateNow) {
     mSelStart = start;
     mSelEnd = end;
     mSlider->setSelection((int)start, (int)end);
     if (updateNow) UpdateStatusText();
-}
-
-void VDQtPositionControlWidget::SetMessage(const wchar_t* s) {
-    if (s) {
-        mStatusLabel->setText(QString::fromWCharArray(s));
-    }
 }
 
 void VDQtPositionControlWidget::onSliderValueChanged(int value) {
@@ -200,7 +191,6 @@ void VDQtPositionControlWidget::DispatchPendingScrub() {
 
     const int position = mPendingScrubPos;
     mPendingScrubPos = -1;
-    NotifyEvent(VDPositionControlEventData::kEventJump, position);
     Q_EMIT positionChanged(position);
 }
 
@@ -209,31 +199,11 @@ void VDQtPositionControlWidget::onTransportButtonClicked() {
     if (!btn) return;
     int actionCode = btn->property("actionCode").toInt();
 
-    VDPositionControlEventData::EventType ev = VDPositionControlEventData::kEventNone;
-    switch (actionCode) {
-        case PCN_START:       ev = VDPositionControlEventData::kEventJumpToStart; break;
-        case PCN_END:         ev = VDPositionControlEventData::kEventJumpToEnd; break;
-        case PCN_KEYPREV:     ev = VDPositionControlEventData::kEventJumpToPrevKey; break;
-        case PCN_KEYNEXT:     ev = VDPositionControlEventData::kEventJumpToNextKey; break;
-        case PCN_BACKWARD:    ev = VDPositionControlEventData::kEventJumpToPrev; break;
-        case PCN_FORWARD:     ev = VDPositionControlEventData::kEventJumpToNext; break;
-        case PCN_MARKIN:      mSelStart = mPosition; break;
-        case PCN_MARKOUT:     mSelEnd = mPosition; break;
-    }
-
-    NotifyEvent(ev, mPosition);
     Q_EMIT transportActionTriggered(actionCode);
 }
 
-void VDQtPositionControlWidget::NotifyEvent(VDPositionControlEventData::EventType type, VDPosition pos) {
-    VDPositionControlEventData data;
-    data.mEventType = type;
-    data.mPosition = pos;
-    mEventPositionUpdated.Raise(this, data);
-}
-
 void VDQtPositionControlWidget::UpdateStatusText() {
-    double fps = mFrameRate.asDouble();
+    double fps = mFrameRate;
     if (fps <= 0.0) fps = 29.97;
     double seconds = (fps > 0) ? ((double)mPosition / fps) : 0.0;
     int hrs = (int)(seconds / 3600.0);

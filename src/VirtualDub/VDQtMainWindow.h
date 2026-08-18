@@ -39,23 +39,12 @@ private Q_SLOTS:
     // Menu Handlers
     void onFileOpen();
     void onFileReopen();
-    void onFileAppendSegment();
     void onFileClose();
     void onFileInformation();
-    void onFileSetTextInformation();
-    void onFileLoadProject();
-    void onFileSaveProject();
-    void onFileSaveProjectAs();
     void onFileSaveAVI();
     void onFileSaveAudio();
     void onFileRunAnalysisPass();
-    void onFileExportRawVideo();
     void onFileSaveImageSequence();
-    void onFileExportAnimatedGIF();
-    void onFileBatchWizard();
-    void onFileStartFrameServer();
-    void onFileLoadProcessingSettings();
-    void onFileSaveProcessingSettings();
     void onFileRunScript();
     void onOpenRecentFile();
     void onFileQuit();
@@ -70,11 +59,8 @@ private Q_SLOTS:
     void onViewLogWindow();
 
     void onVideoModeDirectStream();
-    void onVideoModeFastRecompress();
     void onVideoModeNormalRecompress();
     void onVideoModeFullProcessing();
-    void onVideoSmartRendering();
-    void onVideoPreserveEmptyFrames();
     void onVideoDecodeFormat();
     void onVideoCompression();
     void onVideoFilters();
@@ -91,9 +77,6 @@ private Q_SLOTS:
     void onAudioModeFullProcessing();
     void onAudioCompression();
 
-    void onOptionsPreferences();
-
-    void onToolsJobControl();
     void onHelpAbout();
 
     void onPositionChanged(int frame);
@@ -158,11 +141,8 @@ private:
     QAction *mRecentSeparator;
 
     QAction *actVideoDirectStream;
-    QAction *actVideoFastRecompress;
     QAction *actVideoNormalRecompress;
     QAction *actVideoFullProcessing;
-    QAction *actVideoSmartRendering;
-    QAction *actVideoPreserveEmptyFrames;
     QAction *actVideoCompression;
     QAction *actVideoFilters;
 

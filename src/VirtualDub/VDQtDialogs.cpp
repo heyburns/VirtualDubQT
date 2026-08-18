@@ -1,14 +1,12 @@
-#include "stdafx.h"
 #include "VDQtDialogs.h"
+#include <algorithm>
+#include <cmath>
 #include <QDialogButtonBox>
 #include <QMessageBox>
 #include <QClipboard>
 #include <QApplication>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <vd2/plugin/vdplugin.h>
-#include <vd2/plugin/vdvideofilt.h>
-#include <vd2/VDFilters/VFList.h>
 
 // Style sheet snippet for dark polished Qt dialog look matching VirtualDub2 aesthetics
 static const char* kDialogStyle =
@@ -64,11 +62,7 @@ VDVideoFiltersDialog::VDVideoFiltersDialog(int sourceWidth, int sourceHeight, co
     btnDelete = new QPushButton("Delete", this);
     btnMoveUp = new QPushButton("Move Up", this);
     btnMoveDown = new QPushButton("Move Down", this);
-    btnCrop = new QPushButton("Cropping...", this);
     btnConfigure = new QPushButton("Configure...", this);
-    btnBlending = new QPushButton("Blending...", this);
-    btnOptions = new QPushButton("Options...", this);
-    btnSave = new QPushButton("Save", this);
 
     btnLayout->addWidget(btnAdd);
     btnLayout->addWidget(btnDelete);
@@ -76,27 +70,11 @@ VDVideoFiltersDialog::VDVideoFiltersDialog(int sourceWidth, int sourceHeight, co
     btnLayout->addWidget(btnMoveUp);
     btnLayout->addWidget(btnMoveDown);
     btnLayout->addSpacing(10);
-    btnLayout->addWidget(btnCrop);
     btnLayout->addWidget(btnConfigure);
-    btnLayout->addWidget(btnBlending);
-    btnLayout->addSpacing(10);
-    btnLayout->addWidget(btnOptions);
-    btnLayout->addWidget(btnSave);
     btnLayout->addStretch();
 
     mainLayout->addLayout(btnLayout);
     outerLayout->addLayout(mainLayout);
-
-    // Bottom checkboxes (matching VirtualDub2 screenshot)
-    QHBoxLayout *chkLayout = new QHBoxLayout();
-    chkFormats = new QCheckBox("Show image formats", this);
-    chkRatios = new QCheckBox("Show pixel aspect ratios", this);
-    chkRates = new QCheckBox("Show frame rates", this);
-    chkLayout->addWidget(chkFormats);
-    chkLayout->addWidget(chkRatios);
-    chkLayout->addWidget(chkRates);
-    chkLayout->addStretch();
-    outerLayout->addLayout(chkLayout);
 
     connect(btnAdd, &QPushButton::clicked, this, &VDVideoFiltersDialog::onAddClicked);
     connect(btnDelete, &QPushButton::clicked, this, &VDVideoFiltersDialog::onDeleteClicked);
@@ -391,15 +369,6 @@ void VDVideoFiltersDialog::onConfigureClicked() {
     } else {
         QMessageBox::information(this, "Filter Config", QString("'%1' filter is active.").arg(filter.name));
     }
-}
-
-void VDVideoFiltersDialog::onCroppingClicked() {
-    int row = mFilterTable->currentRow();
-    if (row < 0) {
-        QMessageBox::information(this, "Cropping", "Please select a filter from the list first.");
-        return;
-    }
-    QMessageBox::information(this, "Filter Cropping", "Cropping bounds configuration for selected filter.");
 }
 
 // -----------------------------------------------------------------------------
@@ -1324,8 +1293,6 @@ void VDBoxBlurFilterDialog::updatePreviewImage() {
     int power = static_cast<int>(p.value("power", 1));
 
     QImage blurImage = mSourceFrame.convertToFormat(QImage::Format_RGB888);
-    int imgW = blurImage.width();
-    int imgH = blurImage.height();
 
     auto boxBlurPass = [](QImage &img, int radius) {
         if (radius <= 0) return;
@@ -2466,81 +2433,10 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
     vFormatsLayout->addWidget(radAutoselect);
     vFormatsLayout->addSpacing(4);
 
-    QGridLayout *gridFormats = new QGridLayout();
-    gridFormats->setHorizontalSpacing(24);
-    gridFormats->setVerticalSpacing(3);
-
     radRGB24 = new QRadioButton("RGB24", this);
-    radRGBA32 = new QRadioButton("RGBA32", this);
-    radRGBA64 = new QRadioButton("RGBA64", this);
-    radUYVY = new QRadioButton("4:2:2 YCbCr (UYVY)", this);
-    radYUY2 = new QRadioButton("4:2:2 YCbCr (YUYV, YUY2)", this);
-    radV210 = new QRadioButton("4:2:2 YCbCr 10-bit (v210)", this);
-    radYV24 = new QRadioButton("4:4:4 planar YCbCr (YV24)", this);
-    radYV24_16 = new QRadioButton("4:4:4 planar YCbCr 16-bit", this);
-    radYV16 = new QRadioButton("4:2:2 planar YCbCr (YV16)", this);
-    radYV16_16 = new QRadioButton("4:2:2 planar YCbCr 16-bit", this);
-    radYV12 = new QRadioButton("4:2:0 planar YCbCr (YV12)", this);
-    radYV12_16 = new QRadioButton("4:2:0 planar YCbCr 16-bit", this);
-    radYVU9 = new QRadioButton("4:1:0 planar YCbCr (YVU9)", this);
-    radY8 = new QRadioButton("Luminance only (Y8, 16-235)", this);
-    radY16 = new QRadioButton("Luminance only 16-bit", this);
-    radGray = new QRadioButton("Grayscale (0-255)", this);
-    radHDYC = new QRadioButton("4:2:2 YCbCr HD (HDYC)", this);
-    radNV12 = new QRadioButton("4:2:0 YCbCr (NV12)", this);
-    radOther = new QRadioButton("Other...", this);
-
-    const QList<QRadioButton *> unsupportedFormats = {
-        radRGBA32, radRGBA64, radUYVY, radYUY2, radV210, radYV24,
-        radYV24_16, radYV16, radYV16_16, radYV12, radYV12_16,
-        radYVU9, radY8, radY16, radGray, radHDYC, radNV12, radOther
-    };
-    for (QRadioButton *format : unsupportedFormats) {
-        format->setEnabled(false);
-        format->setToolTip("Native output in this pixel format is not implemented yet.");
-    }
-
     grpFormats->addButton(radRGB24);
-    grpFormats->addButton(radRGBA32);
-    grpFormats->addButton(radRGBA64);
-    grpFormats->addButton(radUYVY);
-    grpFormats->addButton(radYUY2);
-    grpFormats->addButton(radV210);
-    grpFormats->addButton(radYV24);
-    grpFormats->addButton(radYV24_16);
-    grpFormats->addButton(radYV16);
-    grpFormats->addButton(radYV16_16);
-    grpFormats->addButton(radYV12);
-    grpFormats->addButton(radYV12_16);
-    grpFormats->addButton(radYVU9);
-    grpFormats->addButton(radY8);
-    grpFormats->addButton(radY16);
-    grpFormats->addButton(radGray);
-    grpFormats->addButton(radHDYC);
-    grpFormats->addButton(radNV12);
-    grpFormats->addButton(radOther);
-
-    gridFormats->addWidget(radRGB24, 0, 0);
-    gridFormats->addWidget(radRGBA32, 1, 0);
-    gridFormats->addWidget(radRGBA64, 1, 1);
-    gridFormats->addWidget(radUYVY, 2, 0);
-    gridFormats->addWidget(radYUY2, 3, 0);
-    gridFormats->addWidget(radV210, 3, 1);
-    gridFormats->addWidget(radYV24, 4, 0);
-    gridFormats->addWidget(radYV24_16, 4, 1);
-    gridFormats->addWidget(radYV16, 5, 0);
-    gridFormats->addWidget(radYV16_16, 5, 1);
-    gridFormats->addWidget(radYV12, 6, 0);
-    gridFormats->addWidget(radYV12_16, 6, 1);
-    gridFormats->addWidget(radYVU9, 7, 0);
-    gridFormats->addWidget(radY8, 8, 0);
-    gridFormats->addWidget(radY16, 8, 1);
-    gridFormats->addWidget(radGray, 9, 0);
-    gridFormats->addWidget(radHDYC, 10, 0);
-    gridFormats->addWidget(radNV12, 11, 0);
-    gridFormats->addWidget(radOther, 12, 0);
-
-    vFormatsLayout->addLayout(gridFormats);
+    vFormatsLayout->addWidget(radRGB24);
+    vFormatsLayout->addStretch();
     hMidLayout->addLayout(vFormatsLayout, 1);
 
     // Right Section: Interpret YCbCr properties
@@ -2634,24 +2530,6 @@ VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QSt
 VDDecompressionFormatConfig VDDecodeFormatDialog::getConfig() const {
     VDDecompressionFormatConfig cfg;
     if (radRGB24->isChecked()) cfg.formatName = "RGB24";
-    else if (radRGBA32->isChecked()) cfg.formatName = "RGBA32";
-    else if (radRGBA64->isChecked()) cfg.formatName = "RGBA64";
-    else if (radUYVY->isChecked()) cfg.formatName = "UYVY";
-    else if (radYUY2->isChecked()) cfg.formatName = "YUY2";
-    else if (radV210->isChecked()) cfg.formatName = "v210";
-    else if (radYV24->isChecked()) cfg.formatName = "YV24";
-    else if (radYV24_16->isChecked()) cfg.formatName = "YV24_16";
-    else if (radYV16->isChecked()) cfg.formatName = "YV16";
-    else if (radYV16_16->isChecked()) cfg.formatName = "YV16_16";
-    else if (radYV12->isChecked()) cfg.formatName = "YV12";
-    else if (radYV12_16->isChecked()) cfg.formatName = "YV12_16";
-    else if (radYVU9->isChecked()) cfg.formatName = "YVU9";
-    else if (radY8->isChecked()) cfg.formatName = "Y8";
-    else if (radY16->isChecked()) cfg.formatName = "Y16";
-    else if (radGray->isChecked()) cfg.formatName = "Gray";
-    else if (radHDYC->isChecked()) cfg.formatName = "HDYC";
-    else if (radNV12->isChecked()) cfg.formatName = "NV12";
-    else if (radOther->isChecked()) cfg.formatName = "Other";
     else cfg.formatName = "Autoselect";
 
     if (radCSRec601->isChecked()) cfg.colorSpace = 1;
@@ -2927,13 +2805,6 @@ VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &d
 
     mainLayout->addWidget(grpCodec);
 
-    // Checkbox: Don't run this job now; add it to job queue...
-    chkJobQueue = new QCheckBox("Don't run this job now; add it to job queue so I can run it later in batch mode", this);
-    chkJobQueue->setChecked(false);
-    chkJobQueue->setEnabled(false);
-    chkJobQueue->setToolTip("The native Linux job queue is not implemented yet.");
-    mainLayout->addWidget(chkJobQueue);
-
     // Buttons
     QHBoxLayout *hButtons = new QHBoxLayout();
     btnSave = new QPushButton("Save", this);
@@ -2989,7 +2860,6 @@ VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &d
     if (sCfg.fileTypeIndex >= 0 && sCfg.fileTypeIndex < cboFileType->count()) {
         cboFileType->setCurrentIndex(sCfg.fileTypeIndex);
     }
-    chkJobQueue->setChecked(false);
 
     onRateControlModeChanged();
 }
@@ -3199,7 +3069,6 @@ void VDSaveAudioDialog::onSaveClicked() {
     sCfg.sampleRate = cfg.sampleRate;
     sCfg.channels = cfg.channels;
     sCfg.fileTypeIndex = cboFileType->currentIndex();
-    sCfg.jobQueue = chkJobQueue->isChecked();
     VDQtCodecSettings::instance().setSaveAudioSessionConfig(sCfg);
 
     accept();
@@ -3209,10 +3078,6 @@ QString VDSaveAudioDialog::getSelectedFilePath() const {
     QString name = txtFileName->text().trimmed();
     if (QFileInfo(name).isAbsolute()) return name;
     return QDir(mDirectory).filePath(name);
-}
-
-bool VDSaveAudioDialog::isAddToJobQueue() const {
-    return chkJobQueue->isChecked();
 }
 
 VDAudioCodecConfig VDSaveAudioDialog::getAudioConfig() const {
@@ -3317,54 +3182,6 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
 
     topLayout->addWidget(infoGroup, 1);
     mainLayout->addLayout(topLayout);
-
-    // VFW Legacy Controls (Greyed out to match VDub2 screenshot)
-    QVBoxLayout *legacyLayout = new QVBoxLayout();
-
-    QHBoxLayout *qLayout = new QHBoxLayout();
-    QLabel *lblQuality = new QLabel("Quality", this);
-    lblQuality->setEnabled(false);
-    mQualitySlider = new QSlider(Qt::Horizontal, this);
-    mQualitySlider->setRange(0, 100);
-    mQualitySlider->setValue(100);
-    mQualitySlider->setEnabled(false);
-    mQualitySpin = new QSpinBox(this);
-    mQualitySpin->setValue(100);
-    mQualitySpin->setEnabled(false);
-    qLayout->addWidget(lblQuality);
-    qLayout->addWidget(mQualitySlider);
-    qLayout->addWidget(mQualitySpin);
-    legacyLayout->addLayout(qLayout);
-
-    QHBoxLayout *drLayout = new QHBoxLayout();
-    mCheckDataRate = new QCheckBox("Use target data rate of", this);
-    mCheckDataRate->setEnabled(false);
-    mEditDataRate = new QLineEdit(this);
-    mEditDataRate->setFixedWidth(100);
-    mEditDataRate->setEnabled(false);
-    QLabel *lblKbs = new QLabel("kilobytes/second", this);
-    lblKbs->setEnabled(false);
-    drLayout->addWidget(mCheckDataRate);
-    drLayout->addWidget(mEditDataRate);
-    drLayout->addWidget(lblKbs);
-    drLayout->addStretch();
-    legacyLayout->addLayout(drLayout);
-
-    QHBoxLayout *kfLayout = new QHBoxLayout();
-    mCheckKeyframes = new QCheckBox("Force keyframes every", this);
-    mCheckKeyframes->setEnabled(false);
-    mEditKeyframes = new QLineEdit(this);
-    mEditKeyframes->setFixedWidth(100);
-    mEditKeyframes->setEnabled(false);
-    QLabel *lblFrames = new QLabel("frames", this);
-    lblFrames->setEnabled(false);
-    kfLayout->addWidget(mCheckKeyframes);
-    kfLayout->addWidget(mEditKeyframes);
-    kfLayout->addWidget(lblFrames);
-    kfLayout->addStretch();
-    legacyLayout->addLayout(kfLayout);
-
-    mainLayout->addLayout(legacyLayout);
 
     // Bottom Controls & Radio Buttons
     QHBoxLayout *bottomRow = new QHBoxLayout();
@@ -3999,85 +3816,6 @@ int VDGoToFrameDialog::getFrameNumber() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDPreferencesDialog
-// -----------------------------------------------------------------------------
-VDPreferencesDialog::VDPreferencesDialog(QWidget *parent)
-    : QDialog(parent) {
-    setWindowTitle("Preferences");
-    resize(560, 400);
-    setStyleSheet(kDialogStyle);
-
-    QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mTabWidget = new QTabWidget(this);
-
-    QWidget *genTab = new QWidget(this);
-    QFormLayout *genForm = new QFormLayout(genTab);
-    genForm->addRow("Undo Buffer Size (MB):", new QSpinBox(this));
-    genForm->addRow("Temporary File Directory:", new QLineEdit("/tmp", this));
-    mTabWidget->addTab(genTab, "General");
-
-    QWidget *dispTab = new QWidget(this);
-    QFormLayout *dispForm = new QFormLayout(dispTab);
-    QComboBox *renderCombo = new QComboBox(this);
-    renderCombo->addItems({"OpenGL 3.3 Core (Accelerated)", "Qt Painter Software"});
-    dispForm->addRow("Display Renderer:", renderCombo);
-    mTabWidget->addTab(dispTab, "Display");
-
-    QWidget *cpuTab = new QWidget(this);
-    QFormLayout *cpuForm = new QFormLayout(cpuTab);
-    QSpinBox *threadSpin = new QSpinBox(this);
-    threadSpin->setRange(1, 64);
-    threadSpin->setValue(8);
-    cpuForm->addRow("Pipeline Worker Threads:", threadSpin);
-    cpuForm->addRow("Enable SSE/AVX SIMD:", new QCheckBox(this));
-    mTabWidget->addTab(cpuTab, "CPU & SIMD");
-
-    mainLayout->addWidget(mTabWidget);
-
-    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    connect(box, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    mainLayout->addWidget(box);
-}
-
-// -----------------------------------------------------------------------------
-// VDJobControlDialog
-// -----------------------------------------------------------------------------
-VDJobControlDialog::VDJobControlDialog(QWidget *parent)
-    : QDialog(parent) {
-    setWindowTitle("Job Control - Batch Processing Queue");
-    resize(640, 360);
-    setStyleSheet(kDialogStyle);
-
-    QHBoxLayout *mainLayout = new QHBoxLayout(this);
-    mJobTable = new QTableWidget(0, 5, this);
-    mJobTable->setHorizontalHeaderLabels({"ID", "Input File", "Output File", "Status", "Progress"});
-    mJobTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    mJobTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    mainLayout->addWidget(mJobTable, 1);
-
-    QVBoxLayout *btnLayout = new QVBoxLayout();
-    btnStart = new QPushButton("Start Queue", this);
-    btnStop = new QPushButton("Stop Queue", this);
-    btnAdd = new QPushButton("Add Job...", this);
-    btnDelete = new QPushButton("Delete Job", this);
-    btnClear = new QPushButton("Clear List", this);
-
-    btnLayout->addWidget(btnStart);
-    btnLayout->addWidget(btnStop);
-    btnLayout->addWidget(btnAdd);
-    btnLayout->addWidget(btnDelete);
-    btnLayout->addWidget(btnClear);
-    btnLayout->addStretch();
-
-    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    btnLayout->addWidget(box);
-
-    mainLayout->addLayout(btnLayout);
-}
-
-// -----------------------------------------------------------------------------
 // VDAboutDialog
 // -----------------------------------------------------------------------------
 VDAboutDialog::VDAboutDialog(QWidget *parent)
@@ -4268,20 +4006,14 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, const QString
 
     mainLayout->addLayout(infoRow);
 
-    // Checkbox & Buttons
+    // Buttons
     QHBoxLayout *bottomRow = new QHBoxLayout();
-    mJobQueueCheck = new QCheckBox("Add to job queue", this);
-    mJobQueueCheck->setChecked(false);
-    mJobQueueCheck->setEnabled(false);
-    mJobQueueCheck->setToolTip("The native Linux job queue is not implemented yet.");
-    bottomRow->addWidget(mJobQueueCheck);
 
     QDialogButtonBox *btnBox = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(btnBox, &QDialogButtonBox::accepted, this, [this]() {
         VDSaveVideoSessionConfig vCfg;
         vCfg.fileTypeIndex = mFileTypeCombo->currentIndex();
         vCfg.lastFileName = mFileNameEdit->text();
-        vCfg.jobQueue = mJobQueueCheck->isChecked();
         VDQtCodecSettings::instance().setSaveVideoSessionConfig(vCfg);
         accept();
     });
@@ -4306,7 +4038,7 @@ void VDSaveVideoDialog::onBrowseClicked() {
     }
 }
 
-void VDSaveVideoDialog::onFileTypeIndexChanged(int index) {
+void VDSaveVideoDialog::onFileTypeIndexChanged(int) {
     QString currentName = mFileNameEdit->text();
     QFileInfo fi(currentName);
     QString baseName = fi.completeBaseName();
@@ -4344,8 +4076,4 @@ QString VDSaveVideoDialog::getSelectedContainerType() const {
 bool VDSaveVideoDialog::isFastStartEnabled() const {
     QString typeKey = mFileTypeCombo->currentData().toString();
     return (typeKey == "mov_faststart" || typeKey == "mp4_faststart");
-}
-
-bool VDSaveVideoDialog::isJobQueueEnabled() const {
-    return mJobQueueCheck->isChecked();
 }

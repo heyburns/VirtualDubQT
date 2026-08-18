@@ -12,7 +12,6 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QRadioButton>
-#include <QTabWidget>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -35,7 +34,6 @@ private Q_SLOTS:
     void onMoveUpClicked();
     void onMoveDownClicked();
     void onConfigureClicked();
-    void onCroppingClicked();
 
 private:
     void refreshFilterTable();
@@ -51,14 +49,6 @@ private:
     QPushButton *btnMoveUp;
     QPushButton *btnMoveDown;
     QPushButton *btnConfigure;
-    QPushButton *btnCrop;
-    QPushButton *btnBlending;
-    QPushButton *btnOptions;
-    QPushButton *btnSave;
-
-    QCheckBox *chkFormats;
-    QCheckBox *chkRatios;
-    QCheckBox *chkRates;
 };
 
 // Filter Preview Floating Dialog
@@ -386,24 +376,6 @@ private:
     QButtonGroup *grpFormats;
     QRadioButton *radAutoselect;
     QRadioButton *radRGB24;
-    QRadioButton *radRGBA32;
-    QRadioButton *radRGBA64;
-    QRadioButton *radUYVY;
-    QRadioButton *radYUY2;
-    QRadioButton *radYV24;
-    QRadioButton *radYV16;
-    QRadioButton *radYV12;
-    QRadioButton *radYVU9;
-    QRadioButton *radY8;
-    QRadioButton *radGray;
-    QRadioButton *radHDYC;
-    QRadioButton *radNV12;
-    QRadioButton *radV210;
-    QRadioButton *radYV24_16;
-    QRadioButton *radYV16_16;
-    QRadioButton *radYV12_16;
-    QRadioButton *radY16;
-    QRadioButton *radOther;
 
     // YCbCr Properties
     QButtonGroup *grpColorSpace;
@@ -452,7 +424,6 @@ class VDSaveAudioDialog : public QDialog {
 public:
     explicit VDSaveAudioDialog(const QString &defaultDir, const QString &defaultFileName, const QString &compressionInfo, const QString &sampleLayoutInfo, QWidget *parent = nullptr);
     QString getSelectedFilePath() const;
-    bool isAddToJobQueue() const;
     VDAudioCodecConfig getAudioConfig() const;
 
 private Q_SLOTS:
@@ -466,7 +437,6 @@ private:
     QString mDirectory;
     QLineEdit *txtFileName;
     QComboBox *cboFileType;
-    QCheckBox *chkJobQueue;
 
     // Codec & Processing controls
     QComboBox *cboCodec;
@@ -512,14 +482,6 @@ private:
     QPushButton *btnPixelFormat;
     QPushButton *btnAbout;
     
-    // VFW legacy controls (greyed out to match VDub2 screenshot)
-    QSlider *mQualitySlider;
-    QSpinBox *mQualitySpin;
-    QCheckBox *mCheckDataRate;
-    QLineEdit *mEditDataRate;
-    QCheckBox *mCheckKeyframes;
-    QLineEdit *mEditKeyframes;
-    
     // Radio buttons
     QRadioButton *mRadioFiltered;
     QRadioButton *mRadioShowAll;
@@ -562,31 +524,6 @@ private:
     QLineEdit *mTimeEdit;
 };
 
-// Preferences Dialog
-class VDPreferencesDialog : public QDialog {
-    Q_OBJECT
-public:
-    explicit VDPreferencesDialog(QWidget *parent = nullptr);
-
-private:
-    QTabWidget *mTabWidget;
-};
-
-// Job Control Dialog
-class VDJobControlDialog : public QDialog {
-    Q_OBJECT
-public:
-    explicit VDJobControlDialog(QWidget *parent = nullptr);
-
-private:
-    QTableWidget *mJobTable;
-    QPushButton *btnStart;
-    QPushButton *btnStop;
-    QPushButton *btnAdd;
-    QPushButton *btnDelete;
-    QPushButton *btnClear;
-};
-
 // About Dialog
 class VDAboutDialog : public QDialog {
     Q_OBJECT
@@ -616,7 +553,6 @@ public:
     QString getSelectedFilePath() const;
     QString getSelectedContainerType() const;
     bool isFastStartEnabled() const;
-    bool isJobQueueEnabled() const;
 
 private Q_SLOTS:
     void onBrowseClicked();
@@ -635,7 +571,6 @@ private:
     QLabel *mAudioCompressionLabel;
     QLabel *mAudioSampleLayoutLabel;
 
-    QCheckBox *mJobQueueCheck;
 };
 
 #endif // VDQTDIALOGS_H

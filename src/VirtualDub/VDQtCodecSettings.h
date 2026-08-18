@@ -50,14 +50,12 @@ struct VDSaveAudioSessionConfig {
     int sampleRate = 0;
     int channels = 0;
     int fileTypeIndex = 0;
-    bool jobQueue = false;
 };
 
 struct VDSaveVideoSessionConfig {
     QString directory;
     int fileTypeIndex = 6; // Default MP4
     QString lastFileName = "output.mp4";
-    bool jobQueue = false;
 };
 
 class VDQtCodecSettings {

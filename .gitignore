@@ -18,7 +18,6 @@ cmake-build-*/
 # Executables
 VirtualDub_Port
 VirtualDubQt
-test_all_codecs_suite
 
 # Qt Autogen Files
 *.moc

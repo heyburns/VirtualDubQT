@@ -9,8 +9,20 @@
 #include <QVBoxLayout>
 #include <QTimer>
 #include <algorithm>
-#include "PositionControl.h"
-#include <vd2/system/Fraction.h>
+
+enum VDQtTransportAction {
+    VDQT_PCN_STOP = 0,
+    VDQT_PCN_PLAY = 1,
+    VDQT_PCN_MARKIN = 2,
+    VDQT_PCN_MARKOUT = 3,
+    VDQT_PCN_START = 4,
+    VDQT_PCN_BACKWARD = 5,
+    VDQT_PCN_FORWARD = 6,
+    VDQT_PCN_END = 7,
+    VDQT_PCN_KEYPREV = 8,
+    VDQT_PCN_KEYNEXT = 9,
+    VDQT_PCN_PLAYPREVIEW = 10
+};
 
 class VDTimelineSlider : public QSlider {
     Q_OBJECT
@@ -26,27 +38,22 @@ private:
     int mSelEnd = 0;
 };
 
-class VDQtPositionControlWidget : public QWidget, public IVDPositionControl {
+class VDQtPositionControlWidget : public QWidget {
     Q_OBJECT
 public:
     explicit VDQtPositionControlWidget(QWidget *parent = nullptr);
-    virtual ~VDQtPositionControlWidget();
+    ~VDQtPositionControlWidget() override = default;
 
-    // IVDPositionControl implementation
-    int GetNiceHeight() override { return 70; }
-    void SetFrameTypeCallback(IVDPositionControlCallback *pCB) override { mpCB = pCB; }
-    void SetRange(VDPosition lo, VDPosition hi, bool updateNow = true) override;
-    void SetRangeZoom(bool v, bool updateNow = true) override { (void)v; (void)updateNow; }
-    VDPosition GetRangeBegin() override { return mRangeLo; }
-    VDPosition GetRangeEnd() override { return mRangeHi; }
-    VDPosition GetPosition() override { return mPosition; }
-    void SetPosition(VDPosition pos) override;
-    void SetPositionSilent(VDPosition pos);
+    void SetRange(qint64 lo, qint64 hi, bool updateNow = true);
+    qint64 GetRangeBegin() const { return mRangeLo; }
+    qint64 GetRangeEnd() const { return mRangeHi; }
+    qint64 GetPosition() const { return mPosition; }
+    void SetPosition(qint64 pos);
+    void SetPositionSilent(qint64 pos);
     void SetCurrentFrameKey(bool keyFrame) { mCurrentFrameIsKey = keyFrame; UpdateStatusText(); }
-    void SetDisplayedPosition(VDPosition pos) override { SetPosition(pos); }
-    bool GetSelection(VDPosition& start, VDPosition& end) override { start = mSelStart; end = mSelEnd; return mSelStart < mSelEnd; }
-    VDPosition GetSelectionStart() const { return mSelStart; }
-    VDPosition GetSelectionEnd() const { return mSelEnd; }
+    bool GetSelection(qint64& start, qint64& end) const { start = mSelStart; end = mSelEnd; return mSelStart < mSelEnd; }
+    qint64 GetSelectionStart() const { return mSelStart; }
+    qint64 GetSelectionEnd() const { return mSelEnd; }
     bool hasSelection() const { return mSelStart < mSelEnd; }
     int getEffectiveStartFrame(int totalFrames) const {
         if (totalFrames <= 0) return 0;
@@ -63,20 +70,8 @@ public:
         }
         return std::max(0, totalFrames - 1);
     }
-    void SetSelection(VDPosition start, VDPosition end, bool updateNow = true) override;
-    bool GetSelection2(VDPosition& start, VDPosition& end) override { return GetSelection(start, end); }
-    void SetSelection2(VDPosition start, VDPosition end, bool updateNow = true) override { SetSelection(start, end, updateNow); }
-    void SetTimeline(VDTimeline& t) override { (void)t; }
-    void SetFrameRate(const VDFraction& frameRate) override { mFrameRate = frameRate; UpdateStatusText(); }
-    void SetAutoPositionUpdate(bool autoUpdate) override { (void)autoUpdate; }
-    void SetAutoStep(bool autoStep) override { (void)autoStep; }
-    void ResetShuttle() override {}
-    VDEvent<IVDPositionControl, VDPositionControlEventData>& PositionUpdated() override { return mEventPositionUpdated; }
-    void SetMessage(const wchar_t* s) override;
-
-    // IVDRefCount implementation
-    int AddRef() override { return ++mRefCount; }
-    int Release() override { int r = --mRefCount; if (r <= 0) delete this; return r; }
+    void SetSelection(qint64 start, qint64 end, bool updateNow = true);
+    void SetFrameRate(double frameRate) { mFrameRate = frameRate; UpdateStatusText(); }
 
 Q_SIGNALS:
     void positionChanged(int frame);
@@ -90,17 +85,13 @@ private Q_SLOTS:
 private:
     void DispatchPendingScrub();
     void UpdateStatusText();
-    void NotifyEvent(VDPositionControlEventData::EventType type, VDPosition pos);
 
-    VDPosition mRangeLo = 0;
-    VDPosition mRangeHi = 1000;
-    VDPosition mPosition = 0;
-    VDPosition mSelStart = 0;
-    VDPosition mSelEnd = 0;
-    VDFraction mFrameRate = VDFraction(30000, 1001);
-    IVDPositionControlCallback *mpCB = nullptr;
-    VDEvent<IVDPositionControl, VDPositionControlEventData> mEventPositionUpdated;
-    int mRefCount = 1;
+    qint64 mRangeLo = 0;
+    qint64 mRangeHi = 1000;
+    qint64 mPosition = 0;
+    qint64 mSelStart = 0;
+    qint64 mSelEnd = 0;
+    double mFrameRate = 30000.0 / 1001.0;
 
     VDTimelineSlider *mSlider;
     QLabel *mStatusLabel;

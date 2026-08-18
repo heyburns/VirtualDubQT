@@ -1,5 +1,4 @@
 #include <QApplication>
-#include "vdwin32_shim.h"
 #include "VirtualDub/VDQtMainWindow.h"
 
 int main(int argc, char *argv[]) {

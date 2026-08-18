@@ -214,51 +214,26 @@ void VDQtMainWindow::applyTheme() {
 
 void VDQtMainWindow::createMenus() {
     QMenuBar *bar = menuBar();
-    const auto disableIncomplete = [](QAction *action) {
-        action->setEnabled(false);
-        action->setToolTip("This feature is not implemented in the native Linux port yet.");
-        return action;
-    };
 
     // -------------------------------------------------------------------------
     // FILE MENU (Matching VirtualDub Screenshot)
     // -------------------------------------------------------------------------
     mFileMenu = bar->addMenu("&File");
 
-    actFileOpen = mFileMenu->addAction("&Open video file...", this, &VDQtMainWindow::onFileOpen, QKeySequence::Open);
-    actFileReopen = mFileMenu->addAction("&Reopen video file", this, &VDQtMainWindow::onFileReopen, QKeySequence(Qt::Key_F2));
-    disableIncomplete(mFileMenu->addAction("Append video segment...", this, &VDQtMainWindow::onFileAppendSegment));
-    actFileClose = mFileMenu->addAction("&Close video file", this, &VDQtMainWindow::onFileClose, QKeySequence::Close);
+    actFileOpen = mFileMenu->addAction("&Open video file...", QKeySequence::Open, this, &VDQtMainWindow::onFileOpen);
+    actFileReopen = mFileMenu->addAction("&Reopen video file", QKeySequence(Qt::Key_F2), this, &VDQtMainWindow::onFileReopen);
+    actFileClose = mFileMenu->addAction("&Close video file", QKeySequence::Close, this, &VDQtMainWindow::onFileClose);
     mFileMenu->addAction("File &Information...", this, &VDQtMainWindow::onFileInformation);
-    disableIncomplete(mFileMenu->addAction("Set text information...", this, &VDQtMainWindow::onFileSetTextInformation));
     mFileMenu->addSeparator();
 
-    disableIncomplete(mFileMenu->addAction("Load Project...", this, &VDQtMainWindow::onFileLoadProject));
-    disableIncomplete(mFileMenu->addAction("Save Project", this, &VDQtMainWindow::onFileSaveProject));
-    disableIncomplete(mFileMenu->addAction("Save Project As...", this, &VDQtMainWindow::onFileSaveProjectAs));
-    mFileMenu->addSeparator();
-
-    actFileSaveAVI = mFileMenu->addAction("Save video...", this, &VDQtMainWindow::onFileSaveAVI, QKeySequence(Qt::Key_F7));
+    actFileSaveAVI = mFileMenu->addAction("Save video...", QKeySequence(Qt::Key_F7), this, &VDQtMainWindow::onFileSaveAVI);
     mFileMenu->addAction("&Save audio...", this, &VDQtMainWindow::onFileSaveAudio);
     mFileMenu->addAction("Run video analysis pass", this, &VDQtMainWindow::onFileRunAnalysisPass);
 
     QMenu *mExport = mFileMenu->addMenu("Export");
-    disableIncomplete(mExport->addAction("Raw video...", this, &VDQtMainWindow::onFileExportRawVideo));
     mExport->addAction("Image sequence...", this, &VDQtMainWindow::onFileSaveImageSequence);
-    disableIncomplete(mExport->addAction("Animated GIF...", this, &VDQtMainWindow::onFileExportAnimatedGIF));
-
-    QMenu *mBatch = mFileMenu->addMenu("Queue batch operation");
-    mBatch->addAction("Batch wizard...", this, &VDQtMainWindow::onFileBatchWizard);
-    mBatch->addAction("Save video...", this, &VDQtMainWindow::onFileSaveAVI);
-    mBatch->addAction("Save audio...", this, &VDQtMainWindow::onFileSaveAudio);
-    disableIncomplete(mBatch->menuAction());
-
-    disableIncomplete(mFileMenu->addAction("Job control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4)));
-    disableIncomplete(mFileMenu->addAction("Start frame server...", this, &VDQtMainWindow::onFileStartFrameServer));
     mFileMenu->addSeparator();
 
-    disableIncomplete(mFileMenu->addAction("Load processing settings...", this, &VDQtMainWindow::onFileLoadProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_L)));
-    disableIncomplete(mFileMenu->addAction("Save processing settings...", this, &VDQtMainWindow::onFileSaveProcessingSettings, QKeySequence(Qt::CTRL | Qt::Key_S)));
     mFileMenu->addAction("Run script...", this, &VDQtMainWindow::onFileRunScript);
     mFileMenu->addSeparator();
 
@@ -271,7 +246,7 @@ void VDQtMainWindow::createMenus() {
         mRecentFileActions.append(action);
     }
 
-    actFileQuit = mFileMenu->addAction("&Quit", this, &VDQtMainWindow::onFileQuit, QKeySequence::Quit);
+    actFileQuit = mFileMenu->addAction("&Quit", QKeySequence::Quit, this, &VDQtMainWindow::onFileQuit);
 
     updateRecentFilesMenu();
 
@@ -279,9 +254,9 @@ void VDQtMainWindow::createMenus() {
     // EDIT MENU
     // -------------------------------------------------------------------------
     QMenu *mEdit = bar->addMenu("&Edit");
-    mEdit->addAction("Set selection &start", this, &VDQtMainWindow::onEditSetSelectionStart, QKeySequence(Qt::Key_BracketLeft));
-    mEdit->addAction("Set selection &end", this, &VDQtMainWindow::onEditSetSelectionEnd, QKeySequence(Qt::Key_BracketRight));
-    mEdit->addAction("Select &All", this, &VDQtMainWindow::onEditSelectAll, QKeySequence::SelectAll);
+    mEdit->addAction("Set selection &start", QKeySequence(Qt::Key_BracketLeft), this, &VDQtMainWindow::onEditSetSelectionStart);
+    mEdit->addAction("Set selection &end", QKeySequence(Qt::Key_BracketRight), this, &VDQtMainWindow::onEditSetSelectionEnd);
+    mEdit->addAction("Select &All", QKeySequence::SelectAll, this, &VDQtMainWindow::onEditSelectAll);
 
     // -------------------------------------------------------------------------
     // VIEW MENU
@@ -291,7 +266,7 @@ void VDQtMainWindow::createMenus() {
     mView->addAction("&Input Video Only", this, &VDQtMainWindow::onViewInputOnly);
     mView->addAction("&Output Video Only", this, &VDQtMainWindow::onViewOutputOnly);
     mView->addSeparator();
-    mView->addAction("&Auto Size Window to Video", this, &VDQtMainWindow::autoFitWindowToVideo, QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
+    mView->addAction("&Auto Size Window to Video", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A), this, &VDQtMainWindow::autoFitWindowToVideo);
     mView->addSeparator();
     mView->addAction("&Log Window...", this, &VDQtMainWindow::onViewLogWindow);
 
@@ -299,10 +274,10 @@ void VDQtMainWindow::createMenus() {
     // VIDEO MENU (Matching VirtualDub Screenshot)
     // -------------------------------------------------------------------------
     QMenu *mVideo = bar->addMenu("&Video");
-    actVideoFilters = mVideo->addAction("&Filters...", this, &VDQtMainWindow::onVideoFilters, QKeySequence(Qt::CTRL | Qt::Key_F));
-    mVideo->addAction("Frame &Rate...", this, &VDQtMainWindow::onVideoFrameRate, QKeySequence(Qt::CTRL | Qt::Key_R));
+    actVideoFilters = mVideo->addAction("&Filters...", QKeySequence(Qt::CTRL | Qt::Key_F), this, &VDQtMainWindow::onVideoFilters);
+    mVideo->addAction("Frame &Rate...", QKeySequence(Qt::CTRL | Qt::Key_R), this, &VDQtMainWindow::onVideoFrameRate);
     mVideo->addAction("&Decode Format...", this, &VDQtMainWindow::onVideoDecodeFormat);
-    actVideoCompression = mVideo->addAction("&Compression...", this, &VDQtMainWindow::onVideoCompression, QKeySequence(Qt::CTRL | Qt::Key_P));
+    actVideoCompression = mVideo->addAction("&Compression...", QKeySequence(Qt::CTRL | Qt::Key_P), this, &VDQtMainWindow::onVideoCompression);
     mVideo->addAction("&Select Range...", this, &VDQtMainWindow::onVideoSelectRange);
 
     mVideo->addSeparator();
@@ -313,12 +288,6 @@ void VDQtMainWindow::createMenus() {
     actVideoDirectStream = mVideo->addAction("&Direct stream copy", this, &VDQtMainWindow::onVideoModeDirectStream);
     actVideoDirectStream->setCheckable(true);
     grpVideoMode->addAction(actVideoDirectStream);
-
-    actVideoFastRecompress = mVideo->addAction("Fast recompress", this, &VDQtMainWindow::onVideoModeFastRecompress);
-    actVideoFastRecompress->setCheckable(true);
-    actVideoFastRecompress->setEnabled(false);
-    actVideoFastRecompress->setToolTip("Native-planar fast recompress is not implemented yet; use Normal recompress.");
-    grpVideoMode->addAction(actVideoFastRecompress);
 
     actVideoNormalRecompress = mVideo->addAction("Normal recompress", this, &VDQtMainWindow::onVideoModeNormalRecompress);
     actVideoNormalRecompress->setCheckable(true);
@@ -331,22 +300,8 @@ void VDQtMainWindow::createMenus() {
 
     mVideo->addSeparator();
 
-    actVideoSmartRendering = mVideo->addAction("Smart rendering", this, &VDQtMainWindow::onVideoSmartRendering);
-    actVideoSmartRendering->setCheckable(true);
-    actVideoSmartRendering->setChecked(false);
-    actVideoSmartRendering->setEnabled(false);
-    actVideoSmartRendering->setToolTip("Smart rendering is not implemented in the native pipeline yet.");
-
-    actVideoPreserveEmptyFrames = mVideo->addAction("Preserve empty frames", this, &VDQtMainWindow::onVideoPreserveEmptyFrames);
-    actVideoPreserveEmptyFrames->setCheckable(true);
-    actVideoPreserveEmptyFrames->setChecked(false);
-    actVideoPreserveEmptyFrames->setEnabled(false);
-    actVideoPreserveEmptyFrames->setToolTip("Empty-frame preservation is not implemented in the native pipeline yet.");
-
-    mVideo->addSeparator();
-
-    mVideo->addAction("Copy source frame to clipboard", this, &VDQtMainWindow::onVideoCopySourceFrame, QKeySequence(Qt::CTRL | Qt::Key_1));
-    mVideo->addAction("Copy output frame to clipboard", this, &VDQtMainWindow::onVideoCopyOutputFrame, QKeySequence(Qt::CTRL | Qt::Key_2));
+    mVideo->addAction("Copy source frame to clipboard", QKeySequence(Qt::CTRL | Qt::Key_1), this, &VDQtMainWindow::onVideoCopySourceFrame);
+    mVideo->addAction("Copy output frame to clipboard", QKeySequence(Qt::CTRL | Qt::Key_2), this, &VDQtMainWindow::onVideoCopyOutputFrame);
     mVideo->addAction("Copy source frame number to clipboard", this, &VDQtMainWindow::onVideoCopySourceFrameNum);
     mVideo->addAction("Copy output frame number to clipboard", this, &VDQtMainWindow::onVideoCopyOutputFrameNum);
     mVideo->addAction("Scan video stream for errors....", this, &VDQtMainWindow::onVideoScanErrors);
@@ -365,18 +320,6 @@ void VDQtMainWindow::createMenus() {
 
     mAudio->addSeparator();
     actAudioCompression = mAudio->addAction("&Compression...", this, &VDQtMainWindow::onAudioCompression);
-
-    // -------------------------------------------------------------------------
-    // OPTIONS MENU
-    // -------------------------------------------------------------------------
-    QMenu *mOptions = bar->addMenu("&Options");
-    disableIncomplete(mOptions->addAction("&Preferences...", this, &VDQtMainWindow::onOptionsPreferences));
-
-    // -------------------------------------------------------------------------
-    // TOOLS MENU
-    // -------------------------------------------------------------------------
-    QMenu *mTools = bar->addMenu("&Tools");
-    disableIncomplete(mTools->addAction("&Job Control...", this, &VDQtMainWindow::onToolsJobControl, QKeySequence(Qt::Key_F4)));
 
     // -------------------------------------------------------------------------
     // HELP MENU
@@ -448,7 +391,7 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
         mPositionControl->SetPosition(0);
 
         updateFrameDisplay(0);
-        mPositionControl->SetFrameRate(VDFraction(mVideoDecoder.getFps()));
+        mPositionControl->SetFrameRate(mVideoDecoder.getFps());
         autoFitWindowToVideo();
 
         setWindowTitle(QString("VirtualDubQt v0.1 - [%1]").arg(QFileInfo(filePath).fileName()));
@@ -523,10 +466,6 @@ void VDQtMainWindow::onFileOpen() {
     }
 }
 
-void VDQtMainWindow::onFileAppendSegment() {
-    QFileDialog::getOpenFileName(this, "Append Video Segment", QString(), "Video Files (*.avi *.mp4 *.mkv)");
-}
-
 void VDQtMainWindow::onFileClose() {
     mPlaybackTimer->stop();
     closeInteractiveDecoder();
@@ -561,30 +500,6 @@ void VDQtMainWindow::onFileInformation() {
         .arg(mAudioPlayer.getAudioLayoutString());
 
     QMessageBox::information(this, "File Information", info);
-}
-
-void VDQtMainWindow::onFileSetTextInformation() {
-    QMessageBox::information(this, "Set Text Information", "Set stream commentary, title, copyright, and author tags.");
-}
-
-void VDQtMainWindow::onFileLoadProject() {
-    QString fileName = QFileDialog::getOpenFileName(this, "Load Project", QString(), "VirtualDub Project (*.vcf *.vdscript);;All Files (*)");
-    if (!fileName.isEmpty()) {
-        VDLogWindow::instance(this)->appendLog(QString("[Project] Loaded project: %1").arg(fileName));
-        statusBar()->showMessage(QString("Loaded project: %1").arg(fileName));
-    }
-}
-
-void VDQtMainWindow::onFileSaveProject() {
-    onFileSaveProjectAs();
-}
-
-void VDQtMainWindow::onFileSaveProjectAs() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Save Project As", QString(), "VirtualDub Project (*.vcf);;All Files (*)");
-    if (!fileName.isEmpty()) {
-        VDLogWindow::instance(this)->appendLog(QString("[Project] Saved project: %1").arg(fileName));
-        statusBar()->showMessage(QString("Project saved: %1").arg(fileName));
-    }
 }
 
 void VDQtMainWindow::onFileSaveAudio() {
@@ -656,13 +571,6 @@ void VDQtMainWindow::onFileSaveAudio() {
 
         if (mPositionControl->hasSelection()
             && !ensureExactFrameRange(QStringLiteral("audio selection range"))) {
-            return;
-        }
-
-        if (dlg.isAddToJobQueue()) {
-            VDLogWindow::instance(this)->appendLog(QString("[Batch] Added audio export job to queue: %1").arg(outPath));
-            statusBar()->showMessage("Audio export job added to queue.");
-            QMessageBox::information(this, "Job Queue", "Job has been added to the job queue.");
             return;
         }
 
@@ -997,38 +905,6 @@ void VDQtMainWindow::onFileRunAnalysisPass() {
         return;
     }
     onVideoScanErrors();
-}
-
-void VDQtMainWindow::onFileExportRawVideo() {
-    QMessageBox::information(this, "Export Raw Video", "Export uncompressed YUV / RGB raw video stream.");
-}
-
-void VDQtMainWindow::onFileExportAnimatedGIF() {
-    QMessageBox::information(this, "Export Animated GIF", "Export current selection as Animated GIF.");
-}
-
-void VDQtMainWindow::onFileBatchWizard() {
-    QMessageBox::information(this, "Batch Wizard", "Batch Processing Wizard:\nSelect input directory and output presets to convert multiple files.");
-}
-
-void VDQtMainWindow::onFileStartFrameServer() {
-    QMessageBox::information(this, "Frame Server", "VirtualDub Frame Server:\nServe video frames to third party applications (e.g. encoders, NLEs).");
-}
-
-void VDQtMainWindow::onFileLoadProcessingSettings() {
-    QString fileName = QFileDialog::getOpenFileName(this, "Load Processing Settings", QString(), "VirtualDub Processing Settings (*.vcf);;All Files (*)");
-    if (!fileName.isEmpty()) {
-        VDLogWindow::instance(this)->appendLog(QString("[Settings] Loaded processing settings from: %1").arg(fileName));
-        statusBar()->showMessage(QString("Processing settings loaded: %1").arg(fileName));
-    }
-}
-
-void VDQtMainWindow::onFileSaveProcessingSettings() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Save Processing Settings", QString(), "VirtualDub Processing Settings (*.vcf);;All Files (*)");
-    if (!fileName.isEmpty()) {
-        VDLogWindow::instance(this)->appendLog(QString("[Settings] Saved processing settings to: %1").arg(fileName));
-        statusBar()->showMessage(QString("Processing settings saved: %1").arg(fileName));
-    }
 }
 
 void VDQtMainWindow::onFileRunScript() {
@@ -1447,7 +1323,7 @@ void VDQtMainWindow::onEditSetSelectionStart() {
 }
 
 void VDQtMainWindow::onEditSetSelectionEnd() {
-    VDPosition start, end;
+    qint64 start, end;
     mPositionControl->GetSelection(start, end);
     mPositionControl->SetSelection(start, mPositionControl->GetPosition());
 }
@@ -1706,13 +1582,6 @@ void VDQtMainWindow::onVideoModeDirectStream() {
     VDLogWindow::instance(this)->appendLog("[Video] Mode set to Direct Stream Copy");
 }
 
-void VDQtMainWindow::onVideoModeFastRecompress() {
-    mVideoMode = VideoMode_FastRecompress;
-    actVideoFastRecompress->setChecked(true);
-    statusBar()->showMessage("Video Mode: Fast Recompress (Bypasses video filters)");
-    VDLogWindow::instance(this)->appendLog("[Video] Mode set to Fast Recompress");
-}
-
 void VDQtMainWindow::onVideoModeNormalRecompress() {
     mVideoMode = VideoMode_NormalRecompress;
     actVideoNormalRecompress->setChecked(true);
@@ -1725,16 +1594,6 @@ void VDQtMainWindow::onVideoModeFullProcessing() {
     actVideoFullProcessing->setChecked(true);
     statusBar()->showMessage("Video Mode: Full Processing Mode (All video filters active)");
     VDLogWindow::instance(this)->appendLog("[Video] Mode set to Full Processing Mode");
-}
-
-void VDQtMainWindow::onVideoSmartRendering() {
-    bool enabled = actVideoSmartRendering->isChecked();
-    statusBar()->showMessage(QString("Smart rendering: %1").arg(enabled ? "Enabled" : "Disabled"));
-}
-
-void VDQtMainWindow::onVideoPreserveEmptyFrames() {
-    bool enabled = actVideoPreserveEmptyFrames->isChecked();
-    statusBar()->showMessage(QString("Preserve empty frames: %1").arg(enabled ? "Enabled" : "Disabled"));
 }
 
 void VDQtMainWindow::onVideoDecodeFormat() {
@@ -1778,7 +1637,7 @@ void VDQtMainWindow::onVideoSelectRange() {
     QMessageBox::information(this, "Select Range", QString("Current selection range:\nStart: Frame %1\nEnd: Frame %2 (exclusive)\nTotal frames: %3")
         .arg(mPositionControl->GetSelectionStart())
         .arg(mPositionControl->GetSelectionEnd())
-        .arg(std::max<sint64>(0, mPositionControl->GetSelectionEnd() - mPositionControl->GetSelectionStart())));
+        .arg(std::max<qint64>(0, mPositionControl->GetSelectionEnd() - mPositionControl->GetSelectionStart())));
 }
 
 void VDQtMainWindow::onVideoCopySourceFrame() {
@@ -1960,16 +1819,6 @@ void VDQtMainWindow::onAudioCompression() {
     dlg.exec();
 }
 
-void VDQtMainWindow::onOptionsPreferences() {
-    VDPreferencesDialog dlg(this);
-    dlg.exec();
-}
-
-void VDQtMainWindow::onToolsJobControl() {
-    VDJobControlDialog dlg(this);
-    dlg.exec();
-}
-
 void VDQtMainWindow::onHelpAbout() {
     VDAboutDialog dlg(this);
     dlg.exec();
@@ -1992,13 +1841,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     if (!mVideoDecoder.isOpen()) return;
 
     switch (actionCode) {
-    case PCN_STOP: // 0 - Stop
+    case VDQT_PCN_STOP: // 0 - Stop
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         updateFrameDisplay(mPositionControl->GetPosition());
         break;
 
-    case PCN_PLAY: // 1 - Play Input Pane Only
+    case VDQT_PCN_PLAY: // 1 - Play Input Pane Only
         mPlaybackPreview = false;
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
@@ -2019,7 +1868,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         }
         break;
 
-    case PCN_PLAYPREVIEW: // 10 - Play Preview (Both Input & Output Panes)
+    case VDQT_PCN_PLAYPREVIEW: // 10 - Play Preview (Both Input & Output Panes)
         mPlaybackPreview = true;
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
@@ -2040,13 +1889,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         }
         break;
 
-    case PCN_START: // 4 - Jump to Start (|<)
+    case VDQT_PCN_START: // 4 - Jump to Start (|<)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         mPositionControl->SetPosition(0);
         break;
 
-    case PCN_END: // 7 - Jump to End (>|)
+    case VDQT_PCN_END: // 7 - Jump to End (>|)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         if (!ensureExactFrameRange(QStringLiteral("end of stream"))) break;
@@ -2059,13 +1908,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         }
         break;
 
-    case PCN_BACKWARD: // 5 - Step Backward 1 frame (<)
+    case VDQT_PCN_BACKWARD: // 5 - Step Backward 1 frame (<)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
-        mPositionControl->SetPosition(std::max((sint64)0, mPositionControl->GetPosition() - 1));
+        mPositionControl->SetPosition(std::max<qint64>(0, mPositionControl->GetPosition() - 1));
         break;
 
-    case PCN_FORWARD: // 6 - Step Forward 1 frame (>)
+    case VDQT_PCN_FORWARD: // 6 - Step Forward 1 frame (>)
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
@@ -2080,7 +1929,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         break;
     }
 
-    case PCN_KEYPREV: // 8 - Previous Keyframe (<<K)
+    case VDQT_PCN_KEYPREV: // 8 - Previous Keyframe (<<K)
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
@@ -2089,7 +1938,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         break;
     }
 
-    case PCN_KEYNEXT: // 9 - Next Keyframe (K>>)
+    case VDQT_PCN_KEYNEXT: // 9 - Next Keyframe (K>>)
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
@@ -2098,10 +1947,10 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         break;
     }
 
-    case PCN_MARKIN: // 2 - Mark In ([)
+    case VDQT_PCN_MARKIN: // 2 - Mark In ([)
     {
-        sint64 position = mPositionControl->GetPosition();
-        sint64 end = mPositionControl->GetSelectionEnd();
+        qint64 position = mPositionControl->GetPosition();
+        qint64 end = mPositionControl->GetSelectionEnd();
         if (end <= position) {
             if (!ensureExactFrameRange(QStringLiteral("selection range"))) break;
             position = std::min(position, mPositionControl->GetRangeEnd());
@@ -2111,7 +1960,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         break;
     }
 
-    case PCN_MARKOUT: // 3 - Mark Out (])
+    case VDQT_PCN_MARKOUT: // 3 - Mark Out (])
         mPositionControl->SetSelection(mPositionControl->GetSelectionStart(), mPositionControl->GetPosition());
         break;
 

@@ -54,11 +54,9 @@ void VDQtCodecSettings::resetToDefaults() {
     mSaveAudioConfig.sampleRate = 0;
     mSaveAudioConfig.channels = 0;
     mSaveAudioConfig.fileTypeIndex = 0;
-    mSaveAudioConfig.jobQueue = false;
 
     // Save Video dialog session defaults
     mSaveVideoConfig.directory = QDir::homePath();
     mSaveVideoConfig.fileTypeIndex = 6; // MP4
     mSaveVideoConfig.lastFileName = "output.mp4";
-    mSaveVideoConfig.jobQueue = false;
 }
