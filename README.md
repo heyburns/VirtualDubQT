@@ -28,20 +28,26 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
   * Native export to MP4, MKV, WebM, MOV, NUT, and AVI containers with customizable FastStart and rate control modes (CRF, CBR/VBR, Lossless).
   * Headerless raw-video export with selectable RGB/YUV layouts, bit depth, scanline alignment, chroma-plane order, and vertical orientation.
   * Animated GIF and image-sequence export, container text metadata, VFR/null-frame timing preservation, and optional gap collapse for video-only recompression.
+  * Image-sequence and headerless raw-video input with explicit frame rate, pixel layout, geometry, and header-byte offset.
   * Conservative smart rendering: clean GOP-aligned selections are stream copied; selections requiring exact cuts, retiming, audio processing, or filters safely use the selected recompression mode.
 * **High-Fidelity Audio Compression & Processing**:
   * Audio extraction and transcode support for AAC, MP3 (`libmp3lame`), Opus (`libopus`), Ogg Vorbis (`libvorbis`), Dolby Digital AC-3 (`ac3`), FLAC (levels 0–8), and raw PCM.
   * Dynamic downsampling, channel conversion, and constrained VBR / hard CBR modes.
+  * Selectable embedded streams, native AviSynth audio, external audio files, or explicit video-only output.
+  * Ordered audio filters for gain, low/high-pass filtering, resampling, channel mixing, pitch shift, time stretch, center cut/mix, and chorus; the same graph is used by processed exports.
 * **Native AviSynth+ Integration**:
   * Direct `.avs` script hosting through native AviSynth+, including planar/interleaved pixel-format negotiation.
   * Optional `.vpy` hosting through FFmpeg's VapourSynth input module.
 * **Video Filter Engine**:
-  * Session-based filter chain with 6-axis color correction, bob doubling, box blur, brightness/contrast, horizontal and vertical flip, grayscale, invert, resize, rotate, and sharpen.
+  * Session-based filter chain with 6-axis color correction, bob doubling, box blur, brightness/contrast, horizontal and vertical flip, grayscale, invert, resize, rotate, sharpen, deinterlace, emboss, field swap, HSV, levels, threshold, posterize, gamma, spatial smoothing, crop, chroma shift, and pixelation.
+  * Parallel scanline/block processing, a cached interpolated 6-axis color LUT, and separable sliding-window blur keep heavy Play Preview chains responsive while retaining 16-bit image precision.
 * **Editing Sessions and Automation**:
+  * Non-destructive frame edit lists with cut/copy/paste/delete/crop, undo/redo, selection navigation, scene-change search, and frame-accurate audio/video rendering of reordered or repeated ranges.
   * Strictly validated append-segment timelines with source-overwrite protection and multi-segment project round-tripping.
   * Versioned `.vdqproject` project files and `.vdqsettings` processing snapshots, both using atomic writes and relative media paths where possible.
   * Session job control, batch job creation, and portable `.vdqjobs` scripts with per-job processing snapshots, retry, cancellation, and atomic destination replacement.
-  * Filtered video frame serving through a temporary RGB/NUT named pipe for local Linux applications.
+  * Filtered audio/video frame serving through a temporary RGB/PCM NUT named pipe for local Linux applications.
+  * Linux V4L2/ALSA capture with staged output, plus runtime FFmpeg codec/filter/device and native AviSynth plugin catalogs.
   * Codec, filter, decoder, raw-export, smart-render, and preference choices remain live for the application session and reset on the next launch unless explicitly saved to a project/settings file.
 
 ---

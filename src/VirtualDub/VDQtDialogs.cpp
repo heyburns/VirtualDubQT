@@ -28,6 +28,74 @@ static const char* kDialogStyle =
 #include <QButtonGroup>
 #include <QPainter>
 
+namespace {
+
+bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
+    if (!filter || filter->params.isEmpty()) return true;
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Filter: %1").arg(filter->name));
+    dialog.setStyleSheet(kDialogStyle);
+    auto *form = new QFormLayout(&dialog);
+    QMap<QString, QDoubleSpinBox *> controls;
+    for (auto it = filter->params.cbegin(); it != filter->params.cend(); ++it) {
+        auto *control = new QDoubleSpinBox(&dialog);
+        control->setDecimals(3);
+        control->setRange(-1000000.0, 1000000.0);
+        control->setSingleStep(0.1);
+        const QString key = it.key();
+        if (key == QStringLiteral("mode")) {
+            control->setDecimals(0); control->setRange(0.0, 2.0);
+            control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("hueDegrees")) {
+            control->setRange(-360.0, 360.0); control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("saturation")
+                   || key == QStringLiteral("value")) {
+            control->setRange(0.0, 8.0);
+        } else if (key == QStringLiteral("inputBlack")
+                   || key == QStringLiteral("inputWhite")
+                   || key == QStringLiteral("outputBlack")
+                   || key == QStringLiteral("outputWhite")
+                   || key == QStringLiteral("threshold")) {
+            control->setRange(0.0, 255.0); control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("gamma")) {
+            control->setRange(0.05, 20.0);
+        } else if (key == QStringLiteral("levels")) {
+            control->setDecimals(0); control->setRange(2.0, 256.0);
+            control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("amount")) {
+            control->setRange(0.0, 1.0);
+        } else if (key == QStringLiteral("left") || key == QStringLiteral("top")
+                   || key == QStringLiteral("right") || key == QStringLiteral("bottom")) {
+            control->setDecimals(0); control->setRange(0.0, 16384.0);
+            control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("x") || key == QStringLiteral("y")) {
+            control->setDecimals(0); control->setRange(-256.0, 256.0);
+            control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("blockSize")) {
+            control->setDecimals(0); control->setRange(2.0, 256.0);
+            control->setSingleStep(1.0);
+        } else if (key == QStringLiteral("strength")) {
+            control->setRange(0.0, 8.0);
+        }
+        control->setValue(it.value());
+        form->addRow(key, control);
+        controls.insert(key, control);
+    }
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted,
+                     &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected,
+                     &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted) return false;
+    for (auto it = controls.cbegin(); it != controls.cend(); ++it)
+        filter->params[it.key()] = it.value()->value();
+    return true;
+}
+
+} // namespace
+
 // -----------------------------------------------------------------------------
 // VDVideoFiltersDialog Implementation
 // -----------------------------------------------------------------------------
@@ -163,6 +231,20 @@ void VDVideoFiltersDialog::refreshFilterTable() {
         } else if (filter.type == VDFilterType::Sharpen) {
             int amount = static_cast<int>(filter.params.value("amount", 16));
             filterText = QString("sharpen (by %1)").arg(amount);
+        } else if (filter.type == VDFilterType::Crop) {
+            const int left = static_cast<int>(filter.params.value("left", 0));
+            const int top = static_cast<int>(filter.params.value("top", 0));
+            const int right = static_cast<int>(filter.params.value("right", 0));
+            const int bottom = static_cast<int>(filter.params.value("bottom", 0));
+            outW = std::max(1, inW - left - right);
+            outH = std::max(1, inH - top - bottom);
+            filterText = QString("crop (%1,%2,%3,%4)")
+                .arg(left).arg(top).arg(right).arg(bottom);
+        } else if (!filter.params.isEmpty()) {
+            QStringList values;
+            for (auto it = filter.params.cbegin(); it != filter.params.cend(); ++it)
+                values.append(QString("%1=%2").arg(it.key()).arg(it.value(), 0, 'g', 4));
+            filterText = QString("%1 (%2)").arg(filter.name, values.join(", "));
         }
 
         // Col 0: Checkbox
@@ -285,6 +367,18 @@ void VDVideoFiltersDialog::onAddClicked() {
             }
         } else {
             VDQtFilterSystem::instance().addFilter(type);
+            const int lastIndex =
+                VDQtFilterSystem::instance().getActiveChain().size() - 1;
+            if (lastIndex >= 0) {
+                VDFilterInstance added =
+                    VDQtFilterSystem::instance().getActiveChain().at(lastIndex);
+                if (!configureGenericVideoFilter(&added, this)) {
+                    VDQtFilterSystem::instance().removeFilter(lastIndex);
+                    return;
+                }
+                VDQtFilterSystem::instance().updateFilterParams(
+                    lastIndex, added.params);
+            }
             refreshFilterTable();
         }
     }
@@ -368,7 +462,10 @@ void VDVideoFiltersDialog::onConfigureClicked() {
             refreshFilterTable();
         }
     } else {
-        QMessageBox::information(this, "Filter Config", QString("'%1' filter is active.").arg(filter.name));
+        if (configureGenericVideoFilter(&filter, this)) {
+            VDQtFilterSystem::instance().updateFilterParams(row, filter.params);
+            refreshFilterTable();
+        }
     }
 }
 
@@ -794,12 +891,28 @@ QMap<QString, double> VDResizeFilterDialog::getParams() const {
     p["codecAdjust"] = codecAdjust;
 
     // Target output dimensions
-    int targetW = spinAbsW->value();
-    int targetH = spinAbsH->value();
+    int targetW = radRelative->isChecked()
+        ? std::max(1, static_cast<int>(std::llround(
+            mSourceW * spinRelW->value() / 100.0)))
+        : spinAbsW->value();
+    int targetH = radRelative->isChecked()
+        ? std::max(1, static_cast<int>(std::llround(
+            mSourceH * spinRelH->value() / 100.0)))
+        : spinAbsH->value();
+    if (aspectMode == 1 && mSourceW > 0 && mSourceH > 0) {
+        targetH = std::max(1, static_cast<int>(std::llround(
+            targetW * static_cast<double>(mSourceH) / mSourceW)));
+    } else if (aspectMode == 2 && spinAspectW->value() > 0) {
+        targetH = std::max(1, static_cast<int>(std::llround(
+            targetW * static_cast<double>(spinAspectH->value())
+            / spinAspectW->value())));
+    }
 
     if (codecAdjust > 1) {
-        targetW = (targetW / codecAdjust) * codecAdjust;
-        targetH = (targetH / codecAdjust) * codecAdjust;
+        targetW = std::max(codecAdjust,
+                           (targetW / codecAdjust) * codecAdjust);
+        targetH = std::max(codecAdjust,
+                           (targetH / codecAdjust) * codecAdjust);
     }
 
     p["width"] = targetW;
@@ -3118,12 +3231,12 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
         { "FFMPEG / Apple ProRes (iCodec Pro)", "prores_ks", "apch", "yuv422p10le", false },
         { "FFMPEG / VP8", "libvpx", "VP80", "yuv420p", true },
         { "FFMPEG / VP9", "libvpx-vp9", "VP90", "yuv420p", true },
+        { "FFMPEG / SVT-AV1", "libsvtav1", "AV01", "yuv420p", true },
         { "FFMPEG / x265", "libx265", "hvc1", "yuv420p", true },
         { "FFMPEG / x265 lossless", "libx265_lossless", "hvc1", "yuv420p", false },
         { "FFMPEG FFV1 lossless codec", "ffv1", "ffv1", "yuv420p", false },
         { "FFMPEG Huffyuv lossless codec", "huffyuv", "hfyu", "yuv422p", false },
         { "GoPro CineForm (native)", "cfhd", "CFHD", "yuv422p10le", false },
-        { "Lagarith Lossless Codec", "lagarith", "LAGS", "yuv420p", false },
         { "x264 10 bit - H.264/MPEG-4 AVC codec", "libx264_10bit", "avc1", "yuv420p10le", true },
         { "x264 8 bit - H.264/MPEG-4 AVC codec", "libx264", "avc1", "yuv420p", true }
     };
@@ -3153,7 +3266,7 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
     gridInfo->addWidget(mLabelFourCC, 1, 1);
 
     gridInfo->addWidget(new QLabel("Driver name", this), 2, 0);
-    mLabelDriverName = new QLabel("avlib-1.vdplugin", this);
+    mLabelDriverName = new QLabel("FFmpeg / libavcodec", this);
     gridInfo->addWidget(mLabelDriverName, 2, 1);
 
     topInfoRow->addLayout(gridInfo);
@@ -3211,7 +3324,7 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
             QMessageBox::information(this, "About Codec", QString("Codec: %1\nFOURCC: %2\nDriver: %3")
                 .arg(item->text())
                 .arg(item->data(Qt::UserRole + 1).toString())
-                .arg("avlib-1.vdplugin"));
+                .arg("FFmpeg / libavcodec"));
         }
     });
 
@@ -3455,6 +3568,7 @@ VDAudioCompressionDialog::VDAudioCompressionDialog(QWidget *parent)
         const char *id;
     } const kAudioCodecs[] = {
         { "PCM Uncompressed (pcm_s16le)", "pcm_s16le" },
+        { "PCM Uncompressed 24-bit (pcm_s24le)", "pcm_s24le" },
         { "AAC (Advanced Audio Coding)", "aac" },
         { "MP3 (libmp3lame)", "libmp3lame" },
         { "Opus Audio Codec", "libopus" },

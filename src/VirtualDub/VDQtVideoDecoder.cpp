@@ -5,8 +5,6 @@
 #include <QRegularExpression>
 #include <QFileInfo>
 #include <QDir>
-#include <QPainter>
-#include <QFont>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
@@ -410,42 +408,6 @@ VDQtVideoDecoder::auditScriptDependencies(const QString& scriptPath) {
     report.unresolvedPathLiterals.removeDuplicates();
     report.diagnostics.removeDuplicates();
     return report;
-}
-
-QImage VDQtVideoDecoder::generateSyntheticFrame(int frameIndex) {
-    QImage img(mWidth > 0 ? mWidth : 1920, mHeight > 0 ? mHeight : 1080, QImage::Format_RGB888);
-    img.fill(QColor(24, 24, 32));
-
-    QPainter painter(&img);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    // Render SMPTE Color Bars
-    int barWidth = img.width() / 7;
-    QColor colors[7] = {
-        Qt::white, Qt::yellow, Qt::cyan, Qt::green,
-        Qt::magenta, Qt::red, Qt::blue
-    };
-
-    for (int i = 0; i < 7; i++) {
-        painter.fillRect(i * barWidth, 0, barWidth, img.height() * 0.7, colors[i]);
-    }
-
-    // Text Overlay: AviSynth Script Generator Info
-    painter.setPen(Qt::white);
-    QFont font = painter.font();
-    font.setPixelSize(28);
-    font.setBold(true);
-    painter.setFont(font);
-
-    QString text = QString("AviSynth Script Preview | Frame %1 / %2 (%3 FPS)")
-        .arg(frameIndex)
-        .arg(mFrameCount)
-        .arg(mFps, 0, 'f', 2);
-
-    painter.drawText(img.rect().adjusted(20, static_cast<int>(img.height() * 0.7) + 20, -20, -20), Qt::AlignLeft | Qt::AlignTop, text);
-    painter.end();
-
-    return img;
 }
 
 QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
@@ -1084,7 +1046,6 @@ void VDQtVideoDecoder::close() {
 
     mIsOpen = false;
     mFilePath.clear();
-    mIsSyntheticScript = false;
     mIsAvsNative = false;
     mWidth = 0;
     mHeight = 0;
@@ -1527,10 +1488,6 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
         return image;
     }
 
-    if (mIsSyntheticScript) {
-        return generateSyntheticFrame(frameIndex);
-    }
-
     if (!mFormatCtx || !mCodecCtx || !mFrame || !mFrameRGB || mVideoStreamIndex < 0) {
         return QImage();
     }
@@ -1566,7 +1523,7 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
 
 bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {
     if (!mIsOpen || frameIndex < 0) return false;
-    if (mIsAvsNative || mIsSyntheticScript) {
+    if (mIsAvsNative) {
         return mFrameCountStatus != FrameCountStatus::Exact || frameIndex < mFrameCount;
     }
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size()) {
@@ -1577,7 +1534,7 @@ bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {
 
 int VDQtVideoDecoder::getPreviousKeyFrame(int frameIndex) {
     if (!mIsOpen) return -1;
-    if (mIsAvsNative || mIsSyntheticScript) return std::max(0, frameIndex - 1);
+    if (mIsAvsNative) return std::max(0, frameIndex - 1);
 
     int candidate = std::min(frameIndex - 1, boundedFrameCount(mFrameIndex.size()) - 1);
     for (; candidate >= 0; --candidate) {
@@ -1589,7 +1546,7 @@ int VDQtVideoDecoder::getPreviousKeyFrame(int frameIndex) {
 
 int VDQtVideoDecoder::getNextKeyFrame(int frameIndex) {
     if (!mIsOpen) return -1;
-    if (mIsAvsNative || mIsSyntheticScript) {
+    if (mIsAvsNative) {
         if (mFrameCountStatus == FrameCountStatus::Exact && mFrameCount > 0) {
             return std::min(frameIndex + 1, mFrameCount - 1);
         }
@@ -1610,7 +1567,7 @@ int VDQtVideoDecoder::getNextKeyFrame(int frameIndex) {
 double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
     const double unavailable = std::numeric_limits<double>::quiet_NaN();
     if (!mIsOpen || frameIndex < 0) return unavailable;
-    if (mIsAvsNative || mIsSyntheticScript) {
+    if (mIsAvsNative) {
         return mFps > 0.0 ? frameIndex / mFps : unavailable;
     }
 
@@ -1633,7 +1590,7 @@ double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
 double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
     const double unavailable = std::numeric_limits<double>::quiet_NaN();
     if (!mIsOpen || frameIndex < 0) return unavailable;
-    if (mIsAvsNative || mIsSyntheticScript) return mFps > 0.0 ? 1.0 / mFps : unavailable;
+    if (mIsAvsNative) return mFps > 0.0 ? 1.0 / mFps : unavailable;
 
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size() && mVideoStreamIndex >= 0 && mFormatCtx) {
         const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
@@ -1724,16 +1681,6 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
                 res.maskedFrames++;
             } else {
                 avs_release_video_frame(frame);
-            }
-        }
-        return res;
-    }
-
-    if (mIsSyntheticScript) {
-        for (int i = 0; i < mFrameCount; ++i) {
-            if (progressCallback && !progressCallback(i + 1, mFrameCount)) {
-                res.cancelled = true;
-                break;
             }
         }
         return res;

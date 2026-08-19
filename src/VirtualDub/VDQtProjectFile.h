@@ -3,7 +3,9 @@
 
 #include "VDQtCodecEngine.h"
 #include "VDQtDialogs.h"
+#include "VDQtAudioFilterSystem.h"
 #include "VDQtFilterSystem.h"
+#include "VDQtTimeline.h"
 #include "VDQtVideoExporter.h"
 
 #include <QMap>
@@ -22,21 +24,42 @@ struct VDQtProcessingState {
     VDVideoCodecParams videoCodec;
     VDAudioCodecParams audioCodec;
     QList<VDFilterInstance> filters;
+    QList<VDAudioFilterInstance> audioFilters;
     QMap<QString, QString> textMetadata;
 };
 
 struct VDQtProjectState {
     QString sourcePath;
     QStringList sourcePaths;
+    double imageSequenceFps = 0.0;
+    QString rawPixelFormat;
+    int rawWidth = 0;
+    int rawHeight = 0;
+    double rawFrameRate = 0.0;
+    qint64 rawByteOffset = 0;
+    QString audioSourcePath;
+    int audioStreamIndex = -1;
+    bool audioDisabled = false;
     qint64 position = 0;
     bool hasSelection = false;
     qint64 selectionStart = 0;
     qint64 selectionEnd = 0;
+    qint64 sourceFrameCount = 0;
+    QList<VDQtTimelineSegment> timelineSegments;
     VDQtProcessingState processing;
 };
 
 struct VDQtJobState {
     QStringList sourcePaths;
+    double imageSequenceFps = 0.0;
+    QString rawPixelFormat;
+    int rawWidth = 0;
+    int rawHeight = 0;
+    double rawFrameRate = 0.0;
+    qint64 rawByteOffset = 0;
+    QString audioSourcePath;
+    int audioStreamIndex = -1;
+    bool audioDisabled = false;
     VDQtVideoExporter::ExportOptions options;
     VDQtProcessingState processing;
 };

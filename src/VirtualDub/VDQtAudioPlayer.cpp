@@ -1,4 +1,5 @@
 #include "VDQtAudioPlayer.h"
+#include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
 
 #include <QAudioDevice>
@@ -11,7 +12,9 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QProcess>
+#include <QSaveFile>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QWaitCondition>
 
@@ -1059,10 +1062,12 @@ bool reportProgress(const std::function<bool(int, int)> &callback,
 bool transcodeTemporaryWav(const QString &wavPath,
                            const QString &outputPath,
                            int sourceBits,
+                           const QString& filterGraph,
                            const std::function<bool(int, int)> &progressCallback)
 {
     QStringList arguments;
     arguments << "-nostdin" << "-y" << "-i" << wavPath;
+    if (!filterGraph.isEmpty()) arguments << "-af" << filterGraph;
 
     if (outputPath.endsWith(".m4a", Qt::CaseInsensitive)) {
         arguments << "-c:a" << "aac" << "-b:a" << "256k";
@@ -1071,6 +1076,8 @@ bool transcodeTemporaryWav(const QString &wavPath,
     } else if (outputPath.endsWith(".aiff", Qt::CaseInsensitive) ||
                outputPath.endsWith(".aif", Qt::CaseInsensitive)) {
         arguments << "-c:a" << (sourceBits > 16 ? "pcm_s24be" : "pcm_s16be");
+    } else if (!filterGraph.isEmpty()) {
+        arguments << "-c:a" << (sourceBits > 16 ? "pcm_s24le" : "pcm_s16le");
     } else {
         arguments << "-c:a" << "copy";
     }
@@ -2187,6 +2194,7 @@ VDQtAudioPlayer::VDQtAudioPlayer()
     , mAudioSink(nullptr)
     , mFFmpegAudioDevice(nullptr)
     , mAvsAudioDevice(nullptr)
+    , mFilteredAudioDevice(nullptr)
     , mClip(nullptr)
     , mVi(nullptr)
 {
@@ -2195,6 +2203,68 @@ VDQtAudioPlayer::VDQtAudioPlayer()
 VDQtAudioPlayer::~VDQtAudioPlayer()
 {
     close();
+}
+
+QString VDAudioStreamInfo::displayName() const
+{
+    QStringList details;
+    details << QStringLiteral("Stream %1").arg(streamIndex);
+    if (!codecName.isEmpty()) details << codecName.toUpper();
+    if (sampleRate > 0) details << QStringLiteral("%1 Hz").arg(sampleRate);
+    if (channels > 0) details << QStringLiteral("%1 ch").arg(channels);
+    if (!language.isEmpty()) details << language;
+    if (!title.isEmpty()) details << title;
+    if (isDefault) details << QStringLiteral("default");
+    return details.join(QStringLiteral(" · "));
+}
+
+QList<VDAudioStreamInfo> VDQtAudioPlayer::probeAudioStreams(
+    const QString& filePath, QString *errorMessage)
+{
+    QList<VDAudioStreamInfo> streams;
+    AVFormatContext *format = nullptr;
+    const AVInputFormat *inputFormat = nullptr;
+    AVDictionary *options = nullptr;
+    if (filePath.endsWith(QStringLiteral(".ffconcat"), Qt::CaseInsensitive)) {
+        inputFormat = av_find_input_format("concat");
+        av_dict_set(&options, "safe", "0", 0);
+    } else if (filePath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)) {
+        inputFormat = av_find_input_format("avisynth");
+    } else if (filePath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive)) {
+        inputFormat = av_find_input_format("vapoursynth");
+    }
+    const QByteArray encodedPath = QFile::encodeName(filePath);
+    int result = avformat_open_input(
+        &format, encodedPath.constData(), inputFormat, &options);
+    av_dict_free(&options);
+    if (result >= 0) result = avformat_find_stream_info(format, nullptr);
+    if (result < 0) {
+        if (errorMessage) *errorMessage = avErrorString(result);
+        if (format) avformat_close_input(&format);
+        return streams;
+    }
+    for (unsigned int index = 0; index < format->nb_streams; ++index) {
+        const AVStream *stream = format->streams[index];
+        if (!stream || !stream->codecpar
+            || stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        VDAudioStreamInfo info;
+        info.streamIndex = static_cast<int>(index);
+        info.codecName = QString::fromUtf8(
+            avcodec_get_name(stream->codecpar->codec_id));
+        info.sampleRate = stream->codecpar->sample_rate;
+        info.channels = stream->codecpar->ch_layout.nb_channels;
+        info.isDefault = (stream->disposition & AV_DISPOSITION_DEFAULT) != 0;
+        if (const AVDictionaryEntry *entry = av_dict_get(
+                stream->metadata, "language", nullptr, 0))
+            info.language = QString::fromUtf8(entry->value);
+        if (const AVDictionaryEntry *entry = av_dict_get(
+                stream->metadata, "title", nullptr, 0))
+            info.title = QString::fromUtf8(entry->value);
+        streams.append(info);
+    }
+    avformat_close_input(&format);
+    if (errorMessage) errorMessage->clear();
+    return streams;
 }
 
 bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
@@ -2233,6 +2303,10 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
     if (!defaultDevice.isNull() && defaultDevice.isFormatSupported(format)) {
         mAvsAudioDevice = new AVSAudioDevice(clip, vi);
         if (mAvsAudioDevice->initialize()) {
+            mFilteredAudioDevice = new VDQtAudioFilterDevice(
+                mAvsAudioDevice, format.sampleRate(), format.channelCount());
+            mFilteredAudioDevice->setFilterChain(
+                VDQtAudioFilterSystem::instance().activeChain());
             mAudioSink = new QAudioSink(defaultDevice, format);
             configureLiveAudioSink(mAudioSink, format);
         } else {
@@ -2255,7 +2329,7 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
     return true;
 }
 
-bool VDQtAudioPlayer::openFile(const QString &filePath)
+bool VDQtAudioPlayer::openFile(const QString &filePath, int requestedStreamIndex)
 {
     close();
     mFilePath = filePath;
@@ -2270,7 +2344,7 @@ bool VDQtAudioPlayer::openFile(const QString &filePath)
         if (!inputFormat) {
             const QString resolvedMedia = VDQtVideoDecoder::parseScriptSource(filePath);
             if (!resolvedMedia.isEmpty() && QFile::exists(resolvedMedia)) {
-                return openFile(resolvedMedia);
+                return openFile(resolvedMedia, requestedStreamIndex);
             }
             mIsOpen = true;
             mHasAudio = false;
@@ -2304,12 +2378,24 @@ bool VDQtAudioPlayer::openFile(const QString &filePath)
         return false;
     }
 
-    mAudioStreamIndex = av_find_best_stream(mFormatCtx,
-                                            AVMEDIA_TYPE_AUDIO,
-                                            -1,
-                                            -1,
-                                            nullptr,
-                                            0);
+    if (requestedStreamIndex >= 0
+        && requestedStreamIndex < static_cast<int>(mFormatCtx->nb_streams)
+        && mFormatCtx->streams[requestedStreamIndex]->codecpar->codec_type
+            == AVMEDIA_TYPE_AUDIO) {
+        mAudioStreamIndex = requestedStreamIndex;
+    } else if (requestedStreamIndex >= 0) {
+        qWarning() << "[VDQtAudioPlayer] Requested audio stream is unavailable:"
+                   << requestedStreamIndex;
+        close();
+        return false;
+    } else {
+        mAudioStreamIndex = av_find_best_stream(mFormatCtx,
+                                                AVMEDIA_TYPE_AUDIO,
+                                                -1,
+                                                -1,
+                                                nullptr,
+                                                0);
+    }
     if (mAudioStreamIndex < 0) {
         qDebug() << "[VDQtAudioPlayer] No audio stream found in:" << filePath;
         mAudioStreamIndex = -1;
@@ -2403,6 +2489,14 @@ bool VDQtAudioPlayer::openFile(const QString &filePath)
                                                            playbackFormat,
                                                            mTotalSamplesExact ? mTotalSamples : 0);
             if (mFFmpegAudioDevice->initialize()) {
+                if (playbackFormat.sampleFormat() == QAudioFormat::Int16) {
+                    mFilteredAudioDevice = new VDQtAudioFilterDevice(
+                        mFFmpegAudioDevice,
+                        playbackFormat.sampleRate(),
+                        playbackFormat.channelCount());
+                    mFilteredAudioDevice->setFilterChain(
+                        VDQtAudioFilterSystem::instance().activeChain());
+                }
                 mAudioSink = new QAudioSink(outputDevice, playbackFormat);
                 configureLiveAudioSink(mAudioSink, playbackFormat);
             } else {
@@ -2431,6 +2525,11 @@ void VDQtAudioPlayer::close()
         mAudioSink->reset();
         delete mAudioSink;
         mAudioSink = nullptr;
+    }
+    if (mFilteredAudioDevice) {
+        mFilteredAudioDevice->close();
+        delete mFilteredAudioDevice;
+        mFilteredAudioDevice = nullptr;
     }
     if (mFFmpegAudioDevice) {
         mFFmpegAudioDevice->close();
@@ -2467,7 +2566,9 @@ void VDQtAudioPlayer::play()
     if (mAudioSink->state() == QAudio::SuspendedState) {
         mAudioSink->resume();
     } else if (mAudioSink->state() != QAudio::ActiveState) {
-        if (mIsAvsAudio && mAvsAudioDevice) {
+        if (mFilteredAudioDevice) {
+            mAudioSink->start(mFilteredAudioDevice);
+        } else if (mIsAvsAudio && mAvsAudioDevice) {
             mAudioSink->start(mAvsAudioDevice);
         } else if (mFFmpegAudioDevice) {
             mAudioSink->start(mFFmpegAudioDevice);
@@ -2496,6 +2597,7 @@ void VDQtAudioPlayer::stop()
     } else if (mFFmpegAudioDevice) {
         mFFmpegAudioDevice->seekToSample(0);
     }
+    if (mFilteredAudioDevice) mFilteredAudioDevice->resetProcessor();
     mIsPlaying = false;
 }
 
@@ -2525,7 +2627,22 @@ void VDQtAudioPlayer::seekToTimeSeconds(double timeSeconds)
     } else if (mFFmpegAudioDevice) {
         mFFmpegAudioDevice->seekToSample(sample);
     }
+    if (mFilteredAudioDevice) mFilteredAudioDevice->resetProcessor();
     mIsPlaying = false;
+}
+
+void VDQtAudioPlayer::refreshAudioFilters()
+{
+    if (!mFilteredAudioDevice) return;
+    const bool resumePlayback = mIsPlaying;
+    if (mAudioSink) {
+        mAudioSink->stop();
+        mAudioSink->reset();
+    }
+    mFilteredAudioDevice->setFilterChain(
+        VDQtAudioFilterSystem::instance().activeChain());
+    mIsPlaying = false;
+    if (resumePlayback) play();
 }
 
 double VDQtAudioPlayer::getCurrentAudioTimeSeconds() const
@@ -2604,7 +2721,10 @@ bool VDQtAudioPlayer::exportAudioToFile(
     }
     if (sampleCount == 0 || maximumAvailable == 0) return false;
 
-    const bool needsTranscode = !outputPath.endsWith(".wav", Qt::CaseInsensitive);
+    const QString audioFilterGraph =
+        VDQtAudioFilterSystem::instance().ffmpegFilterGraph(mSampleRate);
+    const bool needsTranscode = !outputPath.endsWith(".wav", Qt::CaseInsensitive)
+        || !audioFilterGraph.isEmpty();
     QTemporaryFile temporaryWav(QDir::tempPath() + "/virtualdub2-audio-XXXXXX.wav");
     temporaryWav.setAutoRemove(true);
     QString wavPath = stagedOutputPath;
@@ -2891,6 +3011,7 @@ bool VDQtAudioPlayer::exportAudioToFile(
         outputSucceeded = transcodeTemporaryWav(wavPath,
                                                 stagedOutputPath,
                                                 exportedBits,
+                                                audioFilterGraph,
                                                 progressCallback);
     } else if (progressCallback && !progressCallback(100, 100)) {
         outputSucceeded = false;
@@ -2901,4 +3022,87 @@ bool VDQtAudioPlayer::exportAudioToFile(
         return false;
     }
     return true;
+}
+
+bool VDQtAudioPlayer::exportAudioRangesToFile(
+    const QString& outputPath,
+    const QList<QPair<int64_t, int64_t>>& sampleRanges,
+    std::function<bool(int progress, int total)> progressCallback)
+{
+    if (sampleRanges.isEmpty() || outputPath.isEmpty()) return false;
+    for (const auto& range : sampleRanges) {
+        if (range.first < 0 || range.second <= 0) return false;
+    }
+    if (sampleRanges.size() == 1) {
+        return exportAudioToFile(outputPath, sampleRanges.first().first,
+                                 sampleRanges.first().second,
+                                 std::move(progressCallback));
+    }
+    QTemporaryDir directory;
+    if (!directory.isValid()) return false;
+    QStringList segmentPaths;
+    for (int index = 0; index < sampleRanges.size(); ++index) {
+        const QString segmentPath = directory.filePath(
+            QStringLiteral("segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
+        const auto range = sampleRanges.at(index);
+        if (!exportAudioToFile(
+                segmentPath, range.first, range.second,
+                [&, index](int current, int total) {
+                    if (!progressCallback) return true;
+                    const double fraction = total > 0
+                        ? static_cast<double>(current) / total : 0.0;
+                    const int aggregate = static_cast<int>(std::llround(
+                        90.0 * (index + fraction) / sampleRanges.size()));
+                    return progressCallback(std::clamp(aggregate, 0, 90), 100);
+                })) {
+            return false;
+        }
+        segmentPaths.append(segmentPath);
+    }
+    QSaveFile manifest(directory.filePath(QStringLiteral("segments.ffconcat")));
+    QByteArray contents("ffconcat version 1.0\n");
+    for (const QString& segmentPath : segmentPaths) {
+        contents += "file ";
+        contents += QFileInfo(segmentPath).fileName().toUtf8();
+        contents += '\n';
+    }
+    if (!manifest.open(QIODevice::WriteOnly)
+        || manifest.write(contents) != contents.size() || !manifest.commit())
+        return false;
+
+    QTemporaryFile staged(stagedOutputTemplate(outputPath));
+    staged.setAutoRemove(true);
+    if (!staged.open()) return false;
+    const QString stagedPath = staged.fileName();
+    staged.close();
+    QProcess process;
+    process.setWorkingDirectory(directory.path());
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(
+        QStringLiteral("ffmpeg"),
+        {QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
+         QStringLiteral("-loglevel"), QStringLiteral("error"),
+         QStringLiteral("-f"), QStringLiteral("concat"),
+         QStringLiteral("-safe"), QStringLiteral("1"),
+         QStringLiteral("-i"), QStringLiteral("segments.ffconcat"),
+         QStringLiteral("-c:a"), QStringLiteral("copy"),
+         QStringLiteral("-y"), stagedPath});
+    if (!process.waitForStarted(5000)) return false;
+    bool cancelled = false;
+    while (!process.waitForFinished(50)) {
+        if (progressCallback && !progressCallback(95, 100)) {
+            cancelled = true;
+            process.terminate();
+            if (!process.waitForFinished(1000)) {
+                process.kill();
+                process.waitForFinished(1000);
+            }
+            break;
+        }
+    }
+    if (cancelled || process.exitStatus() != QProcess::NormalExit
+        || process.exitCode() != 0 || QFileInfo(stagedPath).size() <= 0)
+        return false;
+    if (progressCallback && !progressCallback(100, 100)) return false;
+    return replaceWithStagedFile(stagedPath, outputPath);
 }

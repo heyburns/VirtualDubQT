@@ -173,7 +173,6 @@ private:
     int mSourceBitDepth;
     bool mSourceHasAlpha;
     int mErrorMode;
-    bool mIsSyntheticScript = false;
     bool mIsAvsNative = false;
 
     QString mForcedFormatName = "Autoselect";
@@ -187,7 +186,6 @@ private:
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
 
-    QImage generateSyntheticFrame(int frameIndex);
     QImage renderAvsFrame(int frameIndex);
 };
 

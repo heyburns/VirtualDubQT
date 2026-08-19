@@ -13,6 +13,7 @@
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoExporter.h"
 #include "VDQtSourceSafety.h"
+#include "VDQtTimeline.h"
 #include <vd2/system/atomic.h>
 #include <vd2/system/binary.h>
 
@@ -87,6 +88,179 @@ int main(int argc, char **argv) {
     QApplication application(argc, argv);
 
     {
+        VDQtAudioFilterSystem& audioFilters = VDQtAudioFilterSystem::instance();
+        VDAudioFilterInstance gain = audioFilters.createFilter(
+            VDAudioFilterType::Gain);
+        gain.params[QStringLiteral("decibels")] = 6.0;
+        VDQtAudioFilterProcessor processor;
+        processor.configure({gain}, 48000, 2);
+        std::array<qint16, 4> samples{1000, -1000, 2000, -2000};
+        processor.processInt16(reinterpret_cast<char *>(samples.data()),
+                               sizeof(samples));
+        if (!require(samples[0] >= 1994 && samples[0] <= 1996
+                        && samples[1] <= -1994 && samples[1] >= -1996,
+                     "live audio filter processor applies gain to interleaved PCM"))
+            return 1;
+
+        VDAudioFilterInstance pitch = audioFilters.createFilter(
+            VDAudioFilterType::PitchShift);
+        pitch.params[QStringLiteral("semitones")] = 1.5;
+        VDAudioFilterInstance chorus = audioFilters.createFilter(
+            VDAudioFilterType::Chorus);
+        audioFilters.replaceActiveChain({gain, pitch, chorus});
+        const QString graph = audioFilters.ffmpegFilterGraph(48000);
+        QByteArray filterError;
+        if (!require(!graph.contains(QStringLiteral("sample_rate"))
+                        && runProcess(
+                            QStringLiteral("ffmpeg"),
+                            {QStringLiteral("-hide_banner"),
+                             QStringLiteral("-loglevel"), QStringLiteral("error"),
+                             QStringLiteral("-f"), QStringLiteral("lavfi"),
+                             QStringLiteral("-i"),
+                             QStringLiteral("sine=frequency=440:duration=0.05:sample_rate=48000"),
+                             QStringLiteral("-af"), graph,
+                             QStringLiteral("-f"), QStringLiteral("null"),
+                             QStringLiteral("-")},
+                            &filterError),
+                     "audio export filter graph is accepted by FFmpeg")) {
+            std::cerr << filterError.constData() << '\n';
+            return 1;
+        }
+        audioFilters.clear();
+    }
+
+    {
+        VDQtTimeline timeline;
+        timeline.reset(100, true);
+        if (!require(timeline.frameCount() == 100 && timeline.isIdentity(),
+                     "timeline starts as an identity mapping")
+            || !require(timeline.mapOutputToSource(0) == 0
+                        && timeline.mapOutputToSource(99) == 99
+                        && timeline.mapOutputToSource(100) == -1,
+                        "identity timeline maps only valid output frames"))
+            return 1;
+
+        QString timelineError;
+        const QList<VDQtTimelineSegment> copied =
+            timeline.copyRange(10, 20, &timelineError);
+        if (!require(copied.size() == 1
+                        && copied.first().sourceStartFrame == 10
+                        && copied.first().frameCount == 10,
+                     "timeline copies half-open frame ranges")
+            || !require(timeline.deleteRange(10, 20, &timelineError),
+                        "timeline deletes a frame range")
+            || !require(timeline.frameCount() == 90
+                        && timeline.mapOutputToSource(9) == 9
+                        && timeline.mapOutputToSource(10) == 20,
+                        "timeline deletion joins source mappings without copying frames")
+            || !require(timeline.insert(30, copied, &timelineError),
+                        "timeline inserts copied segments")
+            || !require(timeline.frameCount() == 100
+                        && timeline.mapOutputToSource(30) == 10
+                        && timeline.mapOutputToSource(39) == 19
+                        && timeline.mapOutputToSource(40) == 40,
+                        "timeline paste preserves source frame identity")
+            || !require(timeline.cropToRange(25, 45, &timelineError),
+                        "timeline crops to a selection")
+            || !require(timeline.frameCount() == 20
+                        && timeline.mapOutputToSource(5) == 10,
+                        "timeline crop retains composed mapping")
+            || !require(timeline.canUndo() && timeline.undo()
+                        && timeline.frameCount() == 100
+                        && timeline.canRedo() && timeline.redo()
+                        && timeline.frameCount() == 20,
+                        "timeline undo and redo restore normalized edit lists")
+            || !require(timeline.resetEdits(&timelineError)
+                        && timeline.isIdentity()
+                        && timeline.frameCount() == 100,
+                        "timeline reset restores the complete source")) {
+            std::cerr << timelineError.toStdString() << '\n';
+            return 1;
+        }
+
+        VDQtTimeline estimated;
+        estimated.reset(40, false);
+        estimated.setSourceFrameCount(75, true);
+        if (!require(estimated.isIdentity() && estimated.frameCount() == 75,
+                     "unmodified estimated timelines grow to an exact source length"))
+            return 1;
+    }
+
+    {
+        const QString sourcePath = settingsDirectory.filePath(
+            QStringLiteral("edited_timeline_source.nut"));
+        const QString outputPath = settingsDirectory.filePath(
+            QStringLiteral("edited_timeline_output.nut"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         {QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                          QStringLiteral("error"), QStringLiteral("-f"),
+                          QStringLiteral("lavfi"), QStringLiteral("-i"),
+                          QStringLiteral("testsrc=size=32x24:rate=6:duration=1"),
+                          QStringLiteral("-vf"), QStringLiteral("format=rgb24"),
+                          QStringLiteral("-c:v"), QStringLiteral("rawvideo"),
+                          QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                          QStringLiteral("-f"), QStringLiteral("nut"),
+                          QStringLiteral("-y"), sourcePath},
+                         &ffmpegError),
+                     "create edited timeline render fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoDecoder sourceDecoder;
+        if (!require(sourceDecoder.openFile(sourcePath),
+                     "open edited timeline render fixture"))
+            return 1;
+        const auto sourceScan = sourceDecoder.scanVideoStream();
+        if (!require(sourceScan.errorMessage.isEmpty()
+                        && sourceDecoder.getFrameCount() == 6,
+                     "index edited timeline render fixture"))
+            return 1;
+        const QList<int> expectedSourceFrames = {0, 1, 4, 5};
+        QList<QImage> expectedImages;
+        for (const int frame : expectedSourceFrames)
+            expectedImages.append(sourceDecoder.getFrameImage(frame));
+
+        VDVideoCodecParams rawVideoParams;
+        rawVideoParams.codecId = QStringLiteral("rawvideo");
+        rawVideoParams.pixFmt = QStringLiteral("rgb24");
+        VDQtCodecEngine::instance().setVideoParams(rawVideoParams);
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = sourcePath;
+        options.outputPath = outputPath;
+        options.videoMode = VideoMode_NormalRecompress;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        options.includeAudio = false;
+        options.containerType = QStringLiteral("nut");
+        options.timelineSegments = {{0, 2}, {4, 2}};
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &sourceDecoder, nullptr),
+                     "render a non-contiguous edited timeline"))
+            return 1;
+
+        VDQtVideoDecoder outputDecoder;
+        if (!require(outputDecoder.openFile(outputPath),
+                     "open edited timeline render output"))
+            return 1;
+        const auto outputScan = outputDecoder.scanVideoStream();
+        if (!require(outputScan.errorMessage.isEmpty()
+                        && outputDecoder.getFrameCount() == 4,
+                     "edited timeline render contains only composed frames"))
+            return 1;
+        for (int index = 0; index < expectedImages.size(); ++index) {
+            if (!require(outputDecoder.getFrameImage(index)
+                             .convertToFormat(QImage::Format_RGB888)
+                         == expectedImages.at(index)
+                                .convertToFormat(QImage::Format_RGB888),
+                         "edited timeline render preserves source frame ordering"))
+                return 1;
+        }
+        VDQtCodecEngine::instance().resetToDefaults();
+    }
+
+    {
         VDQtProcessingState state;
         state.videoMode = VideoMode_FastRecompress;
         state.audioMode = AudioMode_FullProcessing;
@@ -119,6 +293,13 @@ int main(int argc, char **argv) {
         filter.params.insert(QStringLiteral("width"), 1280.0);
         filter.params.insert(QStringLiteral("height"), 720.0);
         state.filters.append(filter);
+        VDAudioFilterInstance audioFilter;
+        audioFilter.id = QStringLiteral("roundtrip-audio-filter");
+        audioFilter.name = QStringLiteral("gain");
+        audioFilter.type = VDAudioFilterType::Gain;
+        audioFilter.enabled = true;
+        audioFilter.params.insert(QStringLiteral("decibels"), -3.0);
+        state.audioFilters.append(audioFilter);
         state.textMetadata.insert(QStringLiteral("title"), QStringLiteral("Round trip"));
 
         const QString settingsPath = settingsDirectory.filePath(
@@ -146,6 +327,9 @@ int main(int argc, char **argv) {
                         && loaded.videoCodec.codecId == QStringLiteral("ffv1")
                         && loaded.audioCodec.codecId == QStringLiteral("flac")
                         && loaded.filters.size() == 1
+                        && loaded.audioFilters.size() == 1
+                        && loaded.audioFilters.first().params.value(
+                               QStringLiteral("decibels")) == -3.0
                         && loaded.filters.first().params.value(QStringLiteral("width")) == 1280.0
                         && loaded.textMetadata.value(QStringLiteral("title"))
                                == QStringLiteral("Round trip"),
@@ -158,10 +342,16 @@ int main(int argc, char **argv) {
             project.sourcePath,
             settingsDirectory.filePath(QStringLiteral("media/source_2.mkv"))
         };
+        project.imageSequenceFps = 23.976;
+        project.audioSourcePath = settingsDirectory.filePath(
+            QStringLiteral("media/commentary.flac"));
+        project.audioStreamIndex = 2;
         project.position = 42;
         project.hasSelection = true;
         project.selectionStart = 10;
         project.selectionEnd = 50;
+        project.sourceFrameCount = 100;
+        project.timelineSegments = {{0, 10}, {20, 30}, {80, 20}};
         project.processing = state;
         const QString projectPath = settingsDirectory.filePath(
             QStringLiteral("roundtrip.vdqproject"));
@@ -176,16 +366,55 @@ int main(int argc, char **argv) {
                         && loadedProject.sourcePaths.size() == 2
                         && loadedProject.sourcePaths.at(1)
                                == QDir::cleanPath(project.sourcePaths.at(1))
+                        && std::abs(loadedProject.imageSequenceFps - 23.976) < 1e-9
+                        && loadedProject.rawPixelFormat.isEmpty()
+                        && loadedProject.audioSourcePath
+                               == QDir::cleanPath(project.audioSourcePath)
+                        && loadedProject.audioStreamIndex == 2
+                        && !loadedProject.audioDisabled
                         && loadedProject.position == 42
                         && loadedProject.hasSelection
+                        && loadedProject.sourceFrameCount == 100
+                        && loadedProject.timelineSegments == project.timelineSegments
                         && loadedProject.selectionStart == 10
                         && loadedProject.selectionEnd == 50
-                        && loadedProject.processing.filters.size() == 1,
+                        && loadedProject.processing.filters.size() == 1
+                        && loadedProject.processing.audioFilters.size() == 1,
                         "project snapshot preserves relative source and timeline state"))
+            return 1;
+
+        VDQtProjectState rawProject = project;
+        rawProject.sourcePaths = {project.sourcePath};
+        rawProject.imageSequenceFps = 0.0;
+        rawProject.rawPixelFormat = QStringLiteral("rgb24");
+        rawProject.rawWidth = 640;
+        rawProject.rawHeight = 360;
+        rawProject.rawFrameRate = 24000.0 / 1001.0;
+        rawProject.rawByteOffset = 128;
+        const QString rawProjectPath = settingsDirectory.filePath(
+            QStringLiteral("raw_roundtrip.vdqproject"));
+        VDQtProjectState loadedRawProject;
+        if (!require(VDQtProjectFile::saveProject(
+                         rawProjectPath, rawProject, &stateError),
+                     "save raw-input project snapshot")
+            || !require(VDQtProjectFile::loadProject(
+                            rawProjectPath, &loadedRawProject, &stateError),
+                        "load raw-input project snapshot")
+            || !require(loadedRawProject.sourcePaths.size() == 1
+                        && loadedRawProject.rawPixelFormat == QStringLiteral("rgb24")
+                        && loadedRawProject.rawWidth == 640
+                        && loadedRawProject.rawHeight == 360
+                        && std::abs(loadedRawProject.rawFrameRate
+                                    - 24000.0 / 1001.0) < 1e-9
+                        && loadedRawProject.rawByteOffset == 128,
+                        "raw-input project preserves demux parameters"))
             return 1;
 
         VDQtJobState queuedJob;
         queuedJob.sourcePaths = project.sourcePaths;
+        queuedJob.imageSequenceFps = project.imageSequenceFps;
+        queuedJob.audioSourcePath = project.audioSourcePath;
+        queuedJob.audioStreamIndex = project.audioStreamIndex;
         queuedJob.options.inputPath = project.sourcePaths.first();
         queuedJob.options.outputPath =
             settingsDirectory.filePath(QStringLiteral("exports/output.mkv"));
@@ -197,24 +426,47 @@ int main(int argc, char **argv) {
         queuedJob.options.preserveEmptyFrames = false;
         queuedJob.options.containerType = QStringLiteral("mkv");
         queuedJob.processing = state;
+        VDQtJobState rawQueuedJob = queuedJob;
+        rawQueuedJob.sourcePaths = {project.sourcePath};
+        rawQueuedJob.imageSequenceFps = 0.0;
+        rawQueuedJob.rawPixelFormat = QStringLiteral("rgb24");
+        rawQueuedJob.rawWidth = 640;
+        rawQueuedJob.rawHeight = 360;
+        rawQueuedJob.rawFrameRate = 24000.0 / 1001.0;
+        rawQueuedJob.rawByteOffset = 4096;
+        rawQueuedJob.options.inputPath = project.sourcePath;
+        rawQueuedJob.options.outputPath =
+            settingsDirectory.filePath(QStringLiteral("exports/raw_output.mkv"));
         const QString jobPath = settingsDirectory.filePath(
             QStringLiteral("queue.vdqjobs"));
         if (!require(VDQtProjectFile::saveJobQueue(
-                         jobPath, { queuedJob }, &stateError),
+                         jobPath, { queuedJob, rawQueuedJob }, &stateError),
                      "save executable job script"))
             return 1;
         QList<VDQtJobState> loadedJobs;
         if (!require(VDQtProjectFile::loadJobQueue(
                          jobPath, &loadedJobs, &stateError),
                      "load executable job script")
-            || !require(loadedJobs.size() == 1
+            || !require(loadedJobs.size() == 2
                         && loadedJobs.first().sourcePaths.size() == 2
+                        && loadedJobs.first().audioSourcePath
+                               == QDir::cleanPath(project.audioSourcePath)
+                        && loadedJobs.first().audioStreamIndex == 2
+                        && std::abs(loadedJobs.first().imageSequenceFps - 23.976) < 1e-9
                         && loadedJobs.first().options.startFrame == 10
                         && loadedJobs.first().options.endFrame == 49
                         && loadedJobs.first().options.smartRendering
                         && !loadedJobs.first().options.preserveEmptyFrames
-                        && loadedJobs.first().processing.filters.size() == 1,
-                        "job script round-trips sources, export range, and processing"))
+                        && loadedJobs.first().processing.filters.size() == 1
+                        && loadedJobs.first().processing.audioFilters.size() == 1
+                        && loadedJobs.at(1).sourcePaths.size() == 1
+                        && loadedJobs.at(1).rawPixelFormat == QStringLiteral("rgb24")
+                        && loadedJobs.at(1).rawWidth == 640
+                        && loadedJobs.at(1).rawHeight == 360
+                        && std::abs(loadedJobs.at(1).rawFrameRate
+                                    - 24000.0 / 1001.0) < 1e-9
+                        && loadedJobs.at(1).rawByteOffset == 4096,
+                        "job script round-trips media sources, raw input, export range, and processing"))
             return 1;
 
         const QString malformedPath = settingsDirectory.filePath(
@@ -368,6 +620,49 @@ int main(int argc, char **argv) {
                          "non-identity high-depth filter performs 16-bit arithmetic"))
                 return 1;
         }
+
+        const std::array<VDFilterType, 12> expandedFilters = {
+            VDFilterType::Deinterlace, VDFilterType::Emboss,
+            VDFilterType::FieldSwap, VDFilterType::HSVAdjust,
+            VDFilterType::Levels, VDFilterType::Threshold,
+            VDFilterType::Posterize, VDFilterType::Gamma,
+            VDFilterType::Smoother, VDFilterType::Crop,
+            VDFilterType::ChromaShift, VDFilterType::Pixelate
+        };
+        for (VDFilterType type : expandedFilters) {
+            VDQtFilterSystem expanded;
+            expanded.addFilter(type);
+            const QImage output = expanded.processFrame(highDepthImpulse);
+            const quint16 outputAlpha = output.isNull() || output.depth() != 64
+                ? 0 : reinterpret_cast<const QRgba64 *>(
+                    output.constScanLine(0))[0].alpha();
+            if (output.isNull() || output.depth() != 64
+                || output.width() <= 0 || output.height() <= 0
+                || outputAlpha != 4321) {
+                std::cerr << "expanded filter type " << static_cast<int>(type)
+                          << " produced " << output.width() << 'x' << output.height()
+                          << " depth " << output.depth() << " alpha "
+                          << outputAlpha
+                          << '\n';
+            }
+            if (!require(!output.isNull() && output.depth() == 64
+                         && output.width() > 0 && output.height() > 0
+                         && outputAlpha == 4321,
+                         "expanded built-in filter handles high-depth RGBA input"))
+                return 1;
+        }
+
+        VDQtFilterSystem cropFilter;
+        cropFilter.addFilter(VDFilterType::Crop);
+        QMap<QString, double> cropParams =
+            cropFilter.getActiveChain().first().params;
+        cropParams[QStringLiteral("left")] = 1.0;
+        cropParams[QStringLiteral("top")] = 1.0;
+        cropFilter.updateFilterParams(0, cropParams);
+        const QImage cropped = cropFilter.processFrame(highDepthImpulse);
+        if (!require(cropped.size() == QSize(2, 2),
+                     "crop filter updates output geometry"))
+            return 1;
 
         QImage alphaImage(2, 2, QImage::Format_RGBA8888);
         alphaImage.fill(QColor(20, 80, 140, 73));
@@ -658,7 +953,11 @@ int main(int argc, char **argv) {
                      "computed script source is reported as incomplete")
             || !require(!VDQtSourceSafety::evaluateOutputPath(
                              unrelatedOutput, { dynamicScript }, dynamicScript).isSafe(),
-                        "incomplete script audit refuses an existing destination"))
+                        "incomplete script audit refuses an existing destination")
+            || !require(!VDQtSourceSafety::evaluateOutputPath(
+                             unrelatedOutput,
+                             {literalScript, dynamicScript}).isSafe(),
+                        "every script in a multi-source session is audited"))
             return 1;
     }
 
@@ -1290,6 +1589,8 @@ int main(int argc, char **argv) {
             settingsDirectory.filePath(QStringLiteral("append_first.mkv"));
         const QString secondSegment =
             settingsDirectory.filePath(QStringLiteral("append_second.mkv"));
+        const QString videoOnlySegment =
+            settingsDirectory.filePath(QStringLiteral("external_audio_video_only.mkv"));
         QByteArray ffmpegError;
         const QStringList commonArguments = {
             QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
@@ -1313,8 +1614,16 @@ int main(int argc, char **argv) {
             << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
             << QStringLiteral("-c:a") << QStringLiteral("pcm_s16le")
             << QStringLiteral("-shortest") << QStringLiteral("-y") << secondSegment;
+        QStringList videoOnlyArguments = commonArguments;
+        videoOnlyArguments
+            << QStringLiteral("-i")
+            << QStringLiteral("color=green:size=64x48:rate=5:duration=0.4")
+            << QStringLiteral("-c:v") << QStringLiteral("ffv1")
+            << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
+            << QStringLiteral("-an") << QStringLiteral("-y") << videoOnlySegment;
         if (!require(runProcess(QStringLiteral("ffmpeg"), firstArguments, &ffmpegError)
-                     && runProcess(QStringLiteral("ffmpeg"), secondArguments, &ffmpegError),
+                     && runProcess(QStringLiteral("ffmpeg"), secondArguments, &ffmpegError)
+                     && runProcess(QStringLiteral("ffmpeg"), videoOnlyArguments, &ffmpegError),
                      "create concat-compatible append fixtures")) {
             std::cerr << ffmpegError.constData() << '\n';
             return 1;
@@ -1393,6 +1702,73 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        VDQtVideoDecoder externalAudioDecoder;
+        VDQtAudioPlayer externalAudioPlayer;
+        if (!require(externalAudioDecoder.openFile(videoOnlySegment)
+                     && externalAudioPlayer.openFile(secondSegment)
+                     && externalAudioPlayer.hasAudio(),
+                     "open independent video and external-audio fixtures"))
+            return 1;
+        VDQtAudioFilterSystem::instance().clear();
+        VDAudioFilterInstance externalGain =
+            VDQtAudioFilterSystem::instance().createFilter(
+                VDAudioFilterType::Gain);
+        externalGain.params[QStringLiteral("decibels")] = -1.0;
+        VDQtAudioFilterSystem::instance().replaceActiveChain({externalGain});
+        VDAudioCodecParams externalAudioParams;
+        externalAudioParams.codecId = QStringLiteral("pcm_s16le");
+        externalAudioParams.sampleRate = 48000;
+        externalAudioParams.channels = 1;
+        externalAudioParams.bitDepth = 16;
+        VDQtCodecEngine::instance().setAudioParams(externalAudioParams);
+        VDQtVideoExporter::ExportOptions externalAudioOptions;
+        externalAudioOptions.inputPath = videoOnlySegment;
+        externalAudioOptions.outputPath = settingsDirectory.filePath(
+            QStringLiteral("direct_video_external_audio.mkv"));
+        externalAudioOptions.videoMode = VideoMode_DirectStreamCopy;
+        externalAudioOptions.audioMode = AudioMode_FullProcessing;
+        externalAudioOptions.containerType = QStringLiteral("mkv");
+        if (!require(exporter.exportVideo(
+                         externalAudioOptions, &externalAudioDecoder,
+                         &externalAudioPlayer),
+                     "direct-copy video with processed external audio"))
+            return 1;
+        QByteArray externalStreams;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         {QStringLiteral("-v"), QStringLiteral("error"),
+                          QStringLiteral("-show_entries"),
+                          QStringLiteral("stream=codec_type"),
+                          QStringLiteral("-of"), QStringLiteral("csv=p=0"),
+                          externalAudioOptions.outputPath},
+                         &ffmpegError, &externalStreams)
+                     && externalStreams.contains("video")
+                     && externalStreams.contains("audio"),
+                     "external audio remains present beside direct-copy video"))
+            return 1;
+        externalAudioOptions.videoMode = VideoMode_FastRecompress;
+        externalAudioOptions.outputPath = settingsDirectory.filePath(
+            QStringLiteral("fast_video_external_audio.mkv"));
+        if (!require(exporter.exportVideo(
+                         externalAudioOptions, &externalAudioDecoder,
+                         &externalAudioPlayer),
+                     "fast recompress uses selected processed external audio"))
+            return 1;
+        externalStreams.clear();
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         {QStringLiteral("-v"), QStringLiteral("error"),
+                          QStringLiteral("-show_entries"),
+                          QStringLiteral("stream=codec_type"),
+                          QStringLiteral("-of"), QStringLiteral("csv=p=0"),
+                          externalAudioOptions.outputPath},
+                         &ffmpegError, &externalStreams)
+                     && externalStreams.contains("video")
+                     && externalStreams.contains("audio"),
+                     "fast recompress retains selected external audio"))
+            return 1;
+        VDQtAudioFilterSystem::instance().clear();
+
         VDQtFilterSystem::instance().clearFilters();
         VDQtVideoDecoder smartDecoder;
         if (!require(smartDecoder.openFile(firstSegment),
@@ -1431,6 +1807,7 @@ int main(int argc, char **argv) {
         VDQtFrameServer::Config serverConfig;
         serverConfig.sourcePath = firstSegment;
         serverConfig.pipePath = servedPipe;
+        serverConfig.audioPath = firstSegment;
         serverConfig.startFrame = 0;
         serverConfig.endFrame = 1;
         VDFilterInstance invert;
@@ -1450,6 +1827,7 @@ int main(int argc, char **argv) {
                          { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
                            QStringLiteral("error"), QStringLiteral("-i"), servedPipe,
                            QStringLiteral("-c:v"), QStringLiteral("ffv1"),
+                           QStringLiteral("-c:a"), QStringLiteral("copy"),
                            QStringLiteral("-y"), servedOutput },
                          &ffmpegError),
                      "consume frame-server FIFO into a media file")) {
@@ -1477,6 +1855,18 @@ int main(int argc, char **argv) {
                      "probe consumed frame-server stream")
             || !require(servedFrames.trimmed() == QByteArray("2"),
                         "frame server honors its exact selected range"))
+            return 1;
+        QByteArray servedStreams;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         {QStringLiteral("-v"), QStringLiteral("error"),
+                          QStringLiteral("-show_entries"),
+                          QStringLiteral("stream=codec_type"),
+                          QStringLiteral("-of"), QStringLiteral("csv=p=0"),
+                          servedOutput}, &ffmpegError, &servedStreams)
+                     && servedStreams.contains("video")
+                     && servedStreams.contains("audio"),
+                     "frame server carries prepared audio with filtered video"))
             return 1;
     }
 

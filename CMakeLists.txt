@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia DBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia DBus Concurrent)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat>=60
@@ -38,6 +38,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtVideoDecoder.cpp
     src/VirtualDub/VDQtAudioPlayer.h
     src/VirtualDub/VDQtAudioPlayer.cpp
+    src/VirtualDub/VDQtAudioFilterSystem.h
+    src/VirtualDub/VDQtAudioFilterSystem.cpp
     src/VirtualDub/VDQtFilterSystem.h
     src/VirtualDub/VDQtFilterSystem.cpp
     src/VirtualDub/VDQtCodecSettings.h
@@ -48,6 +50,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtVideoExporter.cpp
     src/VirtualDub/VDQtSourceSafety.h
     src/VirtualDub/VDQtSourceSafety.cpp
+    src/VirtualDub/VDQtTimeline.h
+    src/VirtualDub/VDQtTimeline.cpp
     src/VirtualDub/VDQtProjectFile.h
     src/VirtualDub/VDQtProjectFile.cpp
     src/VirtualDub/VDQtFrameServer.h
@@ -98,6 +102,7 @@ target_link_libraries(VirtualDubQt PRIVATE
     Qt6::Gui
     Qt6::Multimedia
     Qt6::DBus
+    Qt6::Concurrent
     ${AVISYNTH_LIBRARY}
     PkgConfig::FFMPEG
 )
@@ -113,6 +118,8 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtFrameDecodeWorker.h
         src/VirtualDub/VDQtAudioPlayer.cpp
         src/VirtualDub/VDQtAudioPlayer.h
+        src/VirtualDub/VDQtAudioFilterSystem.cpp
+        src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtCodecEngine.cpp
         src/VirtualDub/VDQtCodecEngine.h
         src/VirtualDub/VDQtCodecSettings.cpp
@@ -123,6 +130,8 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtVideoExporter.h
         src/VirtualDub/VDQtSourceSafety.cpp
         src/VirtualDub/VDQtSourceSafety.h
+        src/VirtualDub/VDQtTimeline.cpp
+        src/VirtualDub/VDQtTimeline.h
         src/VirtualDub/VDQtProjectFile.cpp
         src/VirtualDub/VDQtProjectFile.h
         src/VirtualDub/VDQtFrameServer.cpp
@@ -147,6 +156,7 @@ if (BUILD_TESTING)
         Qt6::Gui
         Qt6::Widgets
         Qt6::Multimedia
+        Qt6::Concurrent
         ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
@@ -184,6 +194,8 @@ if (BUILD_TESTING)
         src/VirtualDub/test_audio_backend.cpp
         src/VirtualDub/VDQtAudioPlayer.cpp
         src/VirtualDub/VDQtAudioPlayer.h
+        src/VirtualDub/VDQtAudioFilterSystem.cpp
+        src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtVideoDecoder.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -208,5 +220,26 @@ if (BUILD_TESTING)
         LABELS "audio;hardware"
         SKIP_RETURN_CODE 77
         TIMEOUT 15
+    )
+
+    add_executable(filter_performance_tests
+        src/VirtualDub/test_filter_performance.cpp
+        src/VirtualDub/VDQtFilterSystem.cpp
+        src/VirtualDub/VDQtFilterSystem.h
+    )
+    target_compile_definitions(filter_performance_tests PRIVATE QT_NO_KEYWORDS)
+    target_include_directories(filter_performance_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(filter_performance_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Concurrent
+    )
+    vdqt_enable_diagnostics(filter_performance_tests)
+    add_test(NAME filter_performance_tests COMMAND filter_performance_tests)
+    set_tests_properties(filter_performance_tests PROPERTIES
+        LABELS "performance;filters"
+        TIMEOUT 20
     )
 endif()

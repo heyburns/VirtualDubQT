@@ -169,10 +169,15 @@ void VDQtPositionControlWidget::SetPositionSilent(qint64 pos) {
 }
 
 void VDQtPositionControlWidget::SetSelection(qint64 start, qint64 end, bool updateNow) {
+    start = std::clamp(start, mRangeLo, mRangeHi + 1);
+    end = std::clamp(end, mRangeLo, mRangeHi + 1);
+    if (start > end) std::swap(start, end);
+    const bool changed = start != mSelStart || end != mSelEnd;
     mSelStart = start;
     mSelEnd = end;
     mSlider->setSelection((int)start, (int)end);
     if (updateNow) UpdateStatusText();
+    if (changed) Q_EMIT selectionChanged(mSelStart, mSelEnd);
 }
 
 void VDQtPositionControlWidget::onSliderValueChanged(int value) {

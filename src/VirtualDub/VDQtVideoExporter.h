@@ -7,6 +7,7 @@
 #include <functional>
 #include "VDQtVideoDecoder.h"
 #include "VDQtFilterSystem.h"
+#include "VDQtTimeline.h"
 
 enum VideoProcessingMode {
     VideoMode_DirectStreamCopy = 0,
@@ -30,6 +31,7 @@ public:
     struct ExportOptions {
         QString inputPath;
         QString outputPath;
+        QStringList protectedSourcePaths;
         int startFrame = 0;
         int endFrame = -1;
         double customFps = 0.0;
@@ -50,11 +52,15 @@ public:
         // back to the selected recompression mode for frame-exact output.
         bool smartRendering = false;
         bool preserveEmptyFrames = true;
+        // Empty means the decoder's identity timeline. Non-empty edit lists
+        // map output frames to source frames and force frame-accurate render.
+        QList<VDQtTimelineSegment> timelineSegments;
     };
 
     struct RawExportOptions {
         QString inputPath;
         QString outputPath;
+        QStringList protectedSourcePaths;
         int startFrame = 0;
         int endFrame = -1;
         double customFps = 0.0;
@@ -66,6 +72,7 @@ public:
         bool bottomUp = false;
         QString colorMatrix = QStringLiteral("bt601");
         bool fullRange = false;
+        QList<VDQtTimelineSegment> timelineSegments;
     };
 
     bool exportVideo(const ExportOptions& options,

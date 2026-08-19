@@ -20,6 +20,19 @@ extern "C" {
 }
 
 class VDQtFFmpegAudioDevice;
+class VDQtAudioFilterDevice;
+
+struct VDAudioStreamInfo {
+    int streamIndex = -1;
+    QString codecName;
+    QString language;
+    QString title;
+    int sampleRate = 0;
+    int channels = 0;
+    bool isDefault = false;
+
+    QString displayName() const;
+};
 
 class AVSAudioDevice : public QIODevice {
     Q_OBJECT
@@ -78,7 +91,9 @@ public:
     VDQtAudioPlayer();
     ~VDQtAudioPlayer();
 
-    bool openFile(const QString& filePath);
+    bool openFile(const QString& filePath, int requestedStreamIndex = -1);
+    static QList<VDAudioStreamInfo> probeAudioStreams(
+        const QString& filePath, QString *errorMessage = nullptr);
     bool openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi);
     void close();
 
@@ -87,6 +102,7 @@ public:
     void stop();
     void seekToFrame(int frameIndex, double fps);
     void seekToTimeSeconds(double timeSeconds);
+    void refreshAudioFilters();
     double getCurrentAudioTimeSeconds() const;
 
     bool isPlaying() const { return mIsPlaying; }
@@ -96,10 +112,15 @@ public:
     int getBitsPerSample() const { return mBitsPerSample; }
     int64_t getTotalSamples() const { return mTotalSamples; }
     QString getSourcePath() const { return mFilePath; }
+    int getSelectedStreamIndex() const { return mAudioStreamIndex; }
 
     QString getAudioLayoutString() const;
     QString getAudioCompressionString() const;
     bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr);
+    bool exportAudioRangesToFile(
+        const QString& outputPath,
+        const QList<QPair<int64_t, int64_t>>& sampleRanges,
+        std::function<bool(int progress, int total)> progressCallback = nullptr);
 
 #ifdef VDQT_AUDIO_TESTING
     bool lastExportUsedSeekForTesting() const { return mLastExportUsedSeek; }
@@ -126,6 +147,7 @@ private:
     QAudioSink *mAudioSink;
     VDQtFFmpegAudioDevice *mFFmpegAudioDevice;
     AVSAudioDevice *mAvsAudioDevice;
+    VDQtAudioFilterDevice *mFilteredAudioDevice;
 
     QString mChannelLayoutName;
 

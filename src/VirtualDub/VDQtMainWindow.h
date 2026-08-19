@@ -21,6 +21,7 @@
 #include "VDQtVideoExporter.h"
 #include "VDQtProjectFile.h"
 #include "VDQtFrameServer.h"
+#include "VDQtTimeline.h"
 #include <QTimer>
 #include <QThread>
 
@@ -43,6 +44,8 @@ private Q_SLOTS:
     void onFileOpen();
     void onFileReopen();
     void onFileAppendSegment();
+    void onFileOpenImageSequence();
+    void onFileOpenRawVideo();
     void onFileClose();
     void onFileInformation();
     void onFileSetTextInformation();
@@ -68,6 +71,16 @@ private Q_SLOTS:
     void onEditSetSelectionStart();
     void onEditSetSelectionEnd();
     void onEditSelectAll();
+    void onEditUndo();
+    void onEditRedo();
+    void onEditCut();
+    void onEditCopy();
+    void onEditPaste();
+    void onEditDelete();
+    void onEditCropToSelection();
+    void onEditResetTimeline();
+    void onEditPreviousSceneChange();
+    void onEditNextSceneChange();
 
     void onViewDualView();
     void onViewInputOnly();
@@ -92,9 +105,15 @@ private Q_SLOTS:
 
     void onAudioModeDirectStream();
     void onAudioModeFullProcessing();
+    void onAudioSource();
     void onAudioCompression();
+    void onAudioFilters();
 
     void onOptionsPreferences();
+
+    void onToolsBackendCatalog();
+    void onToolsSystemInformation();
+    void onCaptureVideo();
 
     void onHelpAbout();
 
@@ -129,6 +148,14 @@ private:
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
     bool loadProjectFile(const QString& path);
+    bool materializeRawVideo(const QString& sourcePath,
+                             const QString& pixelFormat,
+                             int width,
+                             int height,
+                             double frameRate,
+                             qint64 byteOffset,
+                             QString *outputPath,
+                             QString *errorMessage);
     VDQtProcessingState captureProcessingState() const;
     void applyProcessingState(const VDQtProcessingState& state);
     VDQtVideoExporter::ExportOptions currentExportOptions(
@@ -137,8 +164,14 @@ private:
         bool fastStart,
         bool fullSourceRange = false) const;
     QString primarySessionSourcePath() const;
+    void updateEditActions();
+    void updateTimelineView(qint64 preferredPosition, bool clearSelection);
+    bool selectedTimelineRange(qint64 *startFrame, qint64 *endFrameExclusive,
+                               const QString& operationLabel);
+    int sourceFrameForTimelineFrame(qint64 timelineFrame) const;
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
+    void findSceneChange(bool forward);
 
     QSplitter *mVideoSplitter;
     VDVideoDisplayWidget *mInputDisplay;
@@ -156,7 +189,6 @@ private:
     QTimer *mPlaybackTimer;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;
-    double mPlaybackStartTimestamp = 0.0;
     bool mPlaybackPreview = false;
 
     QMenu *mFileMenu;
@@ -179,7 +211,18 @@ private:
 
     QAction *actAudioDirectStream;
     QAction *actAudioFullProcessing;
+    QAction *actAudioSource = nullptr;
     QAction *actAudioCompression;
+    QAction *actAudioFilters = nullptr;
+
+    QAction *actEditUndo = nullptr;
+    QAction *actEditRedo = nullptr;
+    QAction *actEditCut = nullptr;
+    QAction *actEditCopy = nullptr;
+    QAction *actEditPaste = nullptr;
+    QAction *actEditDelete = nullptr;
+    QAction *actEditCrop = nullptr;
+    QAction *actEditReset = nullptr;
 
     VDFrameRateConfig mFrameRateConfig;
     VDDecompressionFormatConfig mDecompressionFormatConfig;
@@ -190,9 +233,29 @@ private:
     QString mCurrentProjectPath;
     QTemporaryDir mTimelineTempDirectory;
     QStringList mTimelineSources;
+    double mImageSequenceFps = 0.0;
+    QString mRawInputPixelFormat;
+    int mRawInputWidth = 0;
+    int mRawInputHeight = 0;
+    double mRawInputFrameRate = 0.0;
+    qint64 mRawInputByteOffset = 0;
+    VDQtTimeline mTimeline;
+    QList<VDQtTimelineSegment> mTimelineClipboard;
+    int mRequestedTimelineFrame = 0;
+    bool mFrameRequestPending = false;
+    int mQueuedPlaybackFrame = -1;
     struct QueuedVideoJob {
         enum Status { Pending, Running, Complete, Failed, Cancelled };
         QStringList sourcePaths;
+        double imageSequenceFps = 0.0;
+        QString rawPixelFormat;
+        int rawWidth = 0;
+        int rawHeight = 0;
+        double rawFrameRate = 0.0;
+        qint64 rawByteOffset = 0;
+        QString audioSourcePath;
+        int audioStreamIndex = -1;
+        bool audioDisabled = false;
         VDQtVideoExporter::ExportOptions options;
         VDQtProcessingState processing;
         Status status = Pending;
@@ -200,10 +263,14 @@ private:
     };
     QList<QueuedVideoJob> mVideoJobs;
     VDQtFrameServer *mFrameServer = nullptr;
+    QString mFrameServerAudioPath;
     int mVideoMode = VideoMode_FullProcessing;
     bool mSmartRendering = false;
     bool mPreserveEmptyFrames = true;
     int mAudioMode = AudioMode_DirectStreamCopy;
+    QString mAudioSourcePath;
+    int mAudioStreamIndex = -1;
+    bool mAudioDisabled = false;
     bool mIsExporting = false;
 };
 

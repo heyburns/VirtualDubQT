@@ -75,6 +75,7 @@ public:
 
 Q_SIGNALS:
     void positionChanged(int frame);
+    void selectionChanged(qint64 startFrame, qint64 endFrameExclusive);
     void transportActionTriggered(int actionCode);
     void userScrubStarted();
 

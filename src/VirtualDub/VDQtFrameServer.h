@@ -2,6 +2,7 @@
 #define VDQTFRAMESERVER_H
 
 #include "VDQtFilterSystem.h"
+#include "VDQtTimeline.h"
 
 #include <QObject>
 #include <QThread>
@@ -14,6 +15,7 @@ public:
     struct Config {
         QString sourcePath;
         QString pipePath;
+        QString audioPath;
         int startFrame = 0;
         int endFrame = -1;
         QString decompressionFormat = QStringLiteral("Autoselect");
@@ -22,6 +24,7 @@ public:
         int errorMode = 0;
         QList<VDFilterInstance> filters;
         bool preserveEmptyFrames = true;
+        QList<VDQtTimelineSegment> timelineSegments;
     };
 
     explicit VDQtFrameServer(QObject *parent = nullptr);

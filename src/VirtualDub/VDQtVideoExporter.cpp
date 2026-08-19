@@ -2,6 +2,7 @@
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtAudioPlayer.h"
+#include "VDQtAudioFilterSystem.h"
 #include "VDQtSourceSafety.h"
 #include <QProcess>
 #include <QProgressDialog>
@@ -15,6 +16,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
+#include <QSaveFile>
 #include <cmath>
 #include <cstdio>
 #include <cerrno>
@@ -904,6 +906,8 @@ bool VDQtVideoExporter::exportRawVideo(
         : (VDQtSourceSafety::isScriptPath(options.inputPath)
                ? options.inputPath : QString());
     QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
+    directlyLoadedSources.append(options.protectedSourcePaths);
+    directlyLoadedSources.removeDuplicates();
     if (audioPlayer) directlyLoadedSources.append(audioPlayer->getSourcePath());
     const auto outputIsSafe = [&]() {
         return VDQtSourceSafety::evaluateOutputPath(
@@ -957,39 +961,69 @@ bool VDQtVideoExporter::exportRawVideo(
         return false;
     }
 
+    VDQtTimeline renderTimeline;
+    renderTimeline.reset(totalFrames, true);
+    QString timelineError;
+    const bool editedTimeline = !options.timelineSegments.isEmpty();
+    if (editedTimeline
+        && !renderTimeline.replaceSegments(
+            options.timelineSegments, &timelineError, true)) {
+        reportError(timelineError);
+        return false;
+    }
+    const int timelineFrames = static_cast<int>(renderTimeline.frameCount());
+    if (timelineFrames <= 0) {
+        reportError(QStringLiteral("The edited timeline has no video frames."));
+        return false;
+    }
+    const auto sourceFrameAt = [&renderTimeline](int timelineFrame) {
+        return static_cast<int>(renderTimeline.mapOutputToSource(timelineFrame));
+    };
+
     const bool explicitFrameRange = options.endFrame >= options.startFrame
                                  && options.endFrame >= 0;
     if (explicitFrameRange
-        && (options.startFrame < 0 || options.startFrame >= totalFrames)) {
-        reportError(QString("The selection starts at frame %1, but the source contains only %2 frame(s).")
+        && (options.startFrame < 0 || options.startFrame >= timelineFrames)) {
+        reportError(QString("The selection starts at frame %1, but the timeline contains only %2 frame(s).")
                         .arg(options.startFrame)
-                        .arg(totalFrames));
+                        .arg(timelineFrames));
         return false;
     }
     const int startFrame = explicitFrameRange ? options.startFrame : 0;
     const int endFrame = explicitFrameRange
-        ? std::min(options.endFrame, totalFrames - 1) : totalFrames - 1;
+        ? std::min(options.endFrame, timelineFrames - 1) : timelineFrames - 1;
     const int selectedSourceFrames = endFrame - startFrame + 1;
     int step = std::max(1, options.decimateFactor);
     const double sourceFps = decoder.getFps() > 0.0
         ? decoder.getFps() : 29.97;
     double sourceStartSeconds = static_cast<double>(startFrame) / sourceFps;
     double sourceDurationSeconds = static_cast<double>(selectedSourceFrames) / sourceFps;
-    const double firstTimestamp = decoder.getFrameTimestampSeconds(startFrame);
-    const double lastTimestamp = decoder.getFrameTimestampSeconds(endFrame);
-    const double lastDuration = decoder.getFrameDurationSeconds(endFrame);
+    const int firstSourceFrame = sourceFrameAt(startFrame);
+    const int lastSourceFrame = sourceFrameAt(endFrame);
+    const double firstTimestamp = decoder.getFrameTimestampSeconds(firstSourceFrame);
+    const double lastTimestamp = decoder.getFrameTimestampSeconds(lastSourceFrame);
+    const double lastDuration = decoder.getFrameDurationSeconds(lastSourceFrame);
     if (std::isfinite(firstTimestamp)) sourceStartSeconds = firstTimestamp;
     if (std::isfinite(firstTimestamp) && std::isfinite(lastTimestamp)
         && std::isfinite(lastDuration)
         && lastTimestamp + lastDuration > firstTimestamp) {
         sourceDurationSeconds = lastTimestamp + lastDuration - firstTimestamp;
     }
+    if (editedTimeline) {
+        sourceDurationSeconds = 0.0;
+        for (int frame = startFrame; frame <= endFrame; ++frame) {
+            const double duration = decoder.getFrameDurationSeconds(sourceFrameAt(frame));
+            sourceDurationSeconds += std::isfinite(duration) && duration > 0.0
+                ? duration : 1.0 / sourceFps;
+        }
+    }
 
-    bool timestampsUsable = std::isfinite(firstTimestamp);
+    bool timestampsUsable = !editedTimeline && std::isfinite(firstTimestamp);
     double previousTimestamp = -std::numeric_limits<double>::infinity();
     if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
         for (int frame = startFrame; frame <= endFrame; ++frame) {
-            const double timestamp = decoder.getFrameTimestampSeconds(frame);
+            const double timestamp =
+                decoder.getFrameTimestampSeconds(sourceFrameAt(frame));
             if (!std::isfinite(timestamp) || timestamp + 1e-9 < previousTimestamp) {
                 timestampsUsable = false;
                 break;
@@ -1024,7 +1058,7 @@ bool VDQtVideoExporter::exportRawVideo(
     }
     const int framesToExport = inputFramesToProcess * timing.outputFramesPerInput;
 
-    QImage sampleFrame = decoder.getFrameImage(startFrame);
+    QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
     QImage filteredSample = VDQtFilterSystem::instance().processFrame(sampleFrame);
     if (sampleFrame.isNull() || filteredSample.isNull()) {
         reportError(QStringLiteral("The first selected frame could not be decoded and filtered."));
@@ -1095,6 +1129,7 @@ bool VDQtVideoExporter::exportRawVideo(
             sourceFrame += inputIndex * step;
         }
         sourceFrame = std::clamp(sourceFrame, startFrame, endFrame);
+        sourceFrame = sourceFrameAt(sourceFrame);
 
         const QImage rawFrame = decoder.getFrameImage(sourceFrame);
         QList<QImage> filteredFrames;
@@ -1169,6 +1204,19 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback) {
     if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) return false;
     int videoMode = options.videoMode;
+    int audioMode = options.audioMode;
+    const bool editedTimeline = !options.timelineSegments.isEmpty();
+    // Arbitrary edit lists cannot be represented as one compressed packet
+    // interval. Route them through the frame-accurate render path. Audio is
+    // likewise decoded at edit boundaries so removed ranges cannot leak back
+    // into a nominal "direct copy" output.
+    if (editedTimeline) {
+        if (videoMode == VideoMode_DirectStreamCopy
+            || videoMode == VideoMode_FastRecompress)
+            videoMode = VideoMode_NormalRecompress;
+        if (audioMode == AudioMode_DirectStreamCopy)
+            audioMode = AudioMode_FullProcessing;
+    }
     if (VDQtSourceSafety::pathsReferToSameFile(options.inputPath, options.outputPath)) {
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsafe Output Path",
@@ -1217,6 +1265,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         : (VDQtSourceSafety::isScriptPath(options.inputPath)
                ? options.inputPath : QString());
     QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
+    directlyLoadedSources.append(options.protectedSourcePaths);
+    directlyLoadedSources.removeDuplicates();
     if (audioPlayer)
         directlyLoadedSources.append(audioPlayer->getSourcePath());
     const VDQtOutputSafetyReport outputSafety = VDQtSourceSafety::evaluateOutputPath(
@@ -1256,13 +1306,27 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             return false;
         }
     }
-    const bool sourceHasAudio = options.includeAudio
+    const bool selectedProcessedAudio = options.includeAudio
+        && audioPlayer && audioPlayer->hasAudio();
+    const bool nativeSourceHasAudio = options.includeAudio
         && (decoder.isAvsNative()
-            ? audioPlayer && audioPlayer->hasAudio()
-            : sourceAudioProbe.hasAudio);
+                ? (decoder.getAvsVi() && avs_has_audio(decoder.getAvsVi()))
+                : sourceAudioProbe.hasAudio);
+    // Full processing follows Audio > Source, which may point at a non-default
+    // embedded stream or a completely separate media file. Direct copy has no
+    // decoded graph and therefore follows the native source stream.
+    const bool sourceHasAudio = audioMode == AudioMode_DirectStreamCopy
+        ? nativeSourceHasAudio : selectedProcessedAudio;
+    const QString selectedProcessedAudioPath = audioPlayer
+        ? audioPlayer->getSourcePath() : QString();
+    const bool selectedAudioIsSeparateSource = selectedProcessedAudio
+        && !selectedProcessedAudioPath.isEmpty()
+        && !VDQtSourceSafety::pathsReferToSameFile(
+            selectedProcessedAudioPath, options.inputPath);
 
-    if (sourceHasAudio && options.audioMode != AudioMode_DirectStreamCopy
-        && (!audioPlayer || !audioPlayer->hasAudio())) {
+    if (options.includeAudio && nativeSourceHasAudio
+        && audioMode != AudioMode_DirectStreamCopy
+        && !selectedProcessedAudio) {
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Audio Decoder Not Available",
                                   "The source contains audio, but it could not be opened for full processing. "
@@ -1272,7 +1336,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // Pre-flight check: Audio encoder availability
-    if (sourceHasAudio && options.audioMode != AudioMode_DirectStreamCopy) {
+    if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
         VDAudioCodecParams aParams = VDQtCodecEngine::instance().getAudioParams();
         QString audioCodec = aParams.codecId.isEmpty()
             ? VDQtCodecSettings::instance().getAudioConfig().codecId
@@ -1289,7 +1353,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     const bool explicitFrameRange = options.endFrame >= 0
                                  && options.endFrame >= options.startFrame;
     const bool needsDecodedIndex = !decoder.isAvsNative()
-        && (videoMode != VideoMode_DirectStreamCopy || explicitFrameRange);
+        && (videoMode != VideoMode_DirectStreamCopy || explicitFrameRange
+            || editedTimeline || selectedAudioIsSeparateSource);
     if ((videoMode != VideoMode_DirectStreamCopy && !decoder.isFrameCountExact())
         || needsDecodedIndex) {
         QProgressDialog indexingProgress(
@@ -1333,21 +1398,42 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             QMessageBox::critical(parentWidget, "Export Error", "The source has no decodable video frames.");
         return false;
     }
+
+    VDQtTimeline renderTimeline;
+    renderTimeline.reset(totalFrames, true);
+    QString timelineError;
+    if (editedTimeline
+        && !renderTimeline.replaceSegments(
+            options.timelineSegments, &timelineError, true)) {
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Timeline Export Error", timelineError);
+        return false;
+    }
+    const int timelineFrames = static_cast<int>(renderTimeline.frameCount());
+    if (timelineFrames <= 0) {
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Timeline Export Error",
+                                  "The edited timeline contains no frames.");
+        return false;
+    }
+    const auto sourceFrameAt = [&renderTimeline](int timelineFrame) {
+        return static_cast<int>(renderTimeline.mapOutputToSource(timelineFrame));
+    };
     if (explicitFrameRange
-        && (options.startFrame < 0 || options.startFrame >= totalFrames)) {
+        && (options.startFrame < 0 || options.startFrame >= timelineFrames)) {
         if (parentWidget) {
             QMessageBox::critical(
                 parentWidget, "Export Range Error",
-                QString("The requested selection starts at frame %1, but the source contains only %2 frame(s).")
+                QString("The requested selection starts at frame %1, but the timeline contains only %2 frame(s).")
                     .arg(options.startFrame)
-                    .arg(totalFrames));
+                    .arg(timelineFrames));
         }
         return false;
     }
     const int startFrame = explicitFrameRange ? options.startFrame : 0;
     const int endFrame = explicitFrameRange
-        ? std::min(options.endFrame, totalFrames - 1)
-        : totalFrames - 1;
+        ? std::min(options.endFrame, timelineFrames - 1)
+        : timelineFrames - 1;
     int step = std::max(1, options.decimateFactor);
     const double sourceFps = decoder.getFps() > 0.0 ? decoder.getFps() : 29.97;
     const int selectedSourceFrames = endFrame - startFrame + 1;
@@ -1357,7 +1443,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     bool variableFrameTiming = false;
     double shortestFrameDuration = std::numeric_limits<double>::infinity();
     double longestFrameDuration = 0.0;
-    const bool hasFrameSelection = startFrame > 0 || endFrame < totalFrames - 1;
+    const bool hasFrameSelection = startFrame > 0 || endFrame < timelineFrames - 1;
     if (options.smartRendering && videoMode != VideoMode_DirectStreamCopy) {
         const bool hasEnabledFilters = std::any_of(
             VDQtFilterSystem::instance().getActiveChain().cbegin(),
@@ -1367,11 +1453,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             && !options.convertFpsPreserveDuration
             && options.decimateFactor <= 1
             && options.preserveEmptyFrames;
-        const bool cleanAudio = options.audioMode == AudioMode_DirectStreamCopy;
-        const bool startsAtRandomAccessPoint = decoder.isKeyFrame(startFrame);
-        const bool endsAtRandomAccessPoint = endFrame == totalFrames - 1
-            || decoder.isKeyFrame(endFrame + 1);
-        if (!decoder.isAvsNative() && !hasEnabledFilters && cleanTiming
+        const bool cleanAudio = audioMode == AudioMode_DirectStreamCopy;
+        const bool startsAtRandomAccessPoint =
+            decoder.isKeyFrame(sourceFrameAt(startFrame));
+        const bool endsAtRandomAccessPoint = endFrame == timelineFrames - 1
+            || decoder.isKeyFrame(sourceFrameAt(endFrame + 1));
+        if (!editedTimeline && !decoder.isAvsNative()
+            && !hasEnabledFilters && cleanTiming
             && cleanAudio && startsAtRandomAccessPoint && endsAtRandomAccessPoint) {
             videoMode = VideoMode_DirectStreamCopy;
         }
@@ -1387,20 +1475,42 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
     }
     if (indexedForExport || hasFrameSelection || options.convertFpsPreserveDuration) {
-        const double firstTimestamp = decoder.getFrameTimestampSeconds(startFrame);
-        const double lastTimestamp = decoder.getFrameTimestampSeconds(endFrame);
-        const double lastDuration = decoder.getFrameDurationSeconds(endFrame);
+        const int firstSourceFrame = sourceFrameAt(startFrame);
+        const int lastSourceFrame = sourceFrameAt(endFrame);
+        const double firstTimestamp =
+            decoder.getFrameTimestampSeconds(firstSourceFrame);
+        const double lastTimestamp =
+            decoder.getFrameTimestampSeconds(lastSourceFrame);
+        const double lastDuration =
+            decoder.getFrameDurationSeconds(lastSourceFrame);
         if (std::isfinite(firstTimestamp)) sourceStartSeconds = firstTimestamp;
         if (std::isfinite(firstTimestamp) && std::isfinite(lastTimestamp)
             && std::isfinite(lastDuration) && lastTimestamp + lastDuration > firstTimestamp) {
             sourceDurationSeconds = lastTimestamp + lastDuration - firstTimestamp;
         }
     }
+    if (editedTimeline) {
+        const int firstSourceFrame = sourceFrameAt(startFrame);
+        const double firstTimestamp =
+            decoder.getFrameTimestampSeconds(firstSourceFrame);
+        sourceStartSeconds = std::isfinite(firstTimestamp)
+            ? firstTimestamp : static_cast<double>(firstSourceFrame) / sourceFps;
+        sourceDurationSeconds = 0.0;
+        for (int timelineFrame = startFrame;
+             timelineFrame <= endFrame; ++timelineFrame) {
+            const double duration = decoder.getFrameDurationSeconds(
+                sourceFrameAt(timelineFrame));
+            sourceDurationSeconds += std::isfinite(duration) && duration > 0.0
+                ? duration : 1.0 / sourceFps;
+        }
+    }
     bool presentationTimestampsUsable = selectedSourceFrames > 0;
     if (indexedForExport || hasFrameSelection || options.convertFpsPreserveDuration) {
         double previousTimestamp = -std::numeric_limits<double>::infinity();
         for (int frameIndex = startFrame; frameIndex <= endFrame; ++frameIndex) {
-            const double timestamp = decoder.getFrameTimestampSeconds(frameIndex);
+            const int sourceFrame = sourceFrameAt(frameIndex);
+            const double timestamp =
+                decoder.getFrameTimestampSeconds(sourceFrame);
             if (!std::isfinite(timestamp) || timestamp + 1e-9 < previousTimestamp) {
                 presentationTimestampsUsable = false;
                 break;
@@ -1412,7 +1522,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                     longestFrameDuration = std::max(longestFrameDuration, timestampDelta);
                 }
             }
-            const double frameDuration = decoder.getFrameDurationSeconds(frameIndex);
+            const double frameDuration =
+                decoder.getFrameDurationSeconds(sourceFrame);
             if (std::isfinite(frameDuration) && frameDuration > 1e-9) {
                 shortestFrameDuration = std::min(shortestFrameDuration, frameDuration);
                 longestFrameDuration = std::max(longestFrameDuration, frameDuration);
@@ -1423,6 +1534,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
     if (!std::isfinite(shortestFrameDuration) || longestFrameDuration <= 0.0)
         presentationTimestampsUsable = false;
+    // Edited source timestamps are discontinuous by design. The frame writer
+    // currently uses a CFR pipe for edit lists, choosing the exact average
+    // rate below so the composed duration and audio boundary remain correct.
+    if (editedTimeline) presentationTimestampsUsable = false;
     if (presentationTimestampsUsable) {
         variableFrameTiming = longestFrameDuration
             > shortestFrameDuration * 1.01 + 1e-6;
@@ -1530,6 +1645,50 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             ? sourceDurationSeconds
             : static_cast<double>(framesToExport) / fps;
 
+        QTemporaryDir processedAudioDirectory;
+        QString processedAudioPath;
+        if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
+            if (!processedAudioDirectory.isValid() || !audioPlayer) {
+                if (parentWidget)
+                    QMessageBox::critical(parentWidget, "Audio Export Error",
+                                          "A temporary processed-audio file could not be created.");
+                removePartialOutput(processOutputPath);
+                return false;
+            }
+            processedAudioPath = processedAudioDirectory.filePath(
+                QStringLiteral("fast-recompress-audio.wav"));
+            const int sampleRate = std::max(1, audioPlayer->getSampleRate());
+            const int64_t startSample = std::max<int64_t>(0,
+                static_cast<int64_t>(std::llround(sourceStartSeconds * sampleRate)));
+            const int64_t sampleCount = std::max<int64_t>(1,
+                static_cast<int64_t>(std::llround(outputDurationSeconds * sampleRate)));
+            QProgressDialog audioProgress(
+                QStringLiteral("Preparing selected audio for fast recompress..."),
+                QStringLiteral("Cancel"), 0, 100, parentWidget);
+            audioProgress.setWindowModality(Qt::WindowModal);
+            audioProgress.setMinimumDuration(0);
+            const bool prepared = audioPlayer->exportAudioToFile(
+                processedAudioPath, startSample, sampleCount,
+                [&audioProgress](int current, int total) {
+                    const int maximum = std::max(1, total);
+                    audioProgress.setRange(0, maximum);
+                    audioProgress.setValue(std::clamp(current, 0, maximum));
+                    QApplication::processEvents(
+                        QEventLoop::AllEvents, kProcessPollMs);
+                    return !audioProgress.wasCanceled();
+                });
+            audioProgress.close();
+            if (!prepared) {
+                removePartialOutput(processOutputPath);
+                if (!audioProgress.wasCanceled() && parentWidget) {
+                    QMessageBox::critical(
+                        parentWidget, "Audio Export Error",
+                        "The selected audio graph could not be prepared for fast recompress.");
+                }
+                return false;
+            }
+        }
+
         QStringList videoFilters;
         // Input seeking establishes the first selected frame. An explicit frame
         // bound prevents a retimed/slowed output from consuming frames beyond
@@ -1554,13 +1713,19 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         encoderArgs << "-nostdin" << "-y"
                     << "-f" << "nut" << "-i" << "-";
         if (sourceHasAudio) {
-            if (inputStartSeconds > 1e-9)
-                encoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
-            appendInputFile(encoderArgs, inputPath);
+            if (audioMode == AudioMode_DirectStreamCopy) {
+                if (inputStartSeconds > 1e-9)
+                    encoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
+                appendInputFile(encoderArgs, inputPath);
+            } else {
+                appendInputFile(encoderArgs, processedAudioPath);
+            }
         }
         encoderArgs << "-map" << "0:v:0";
         if (sourceHasAudio) {
-            if (decoder.isAvsNative())
+            if (audioMode != AudioMode_DirectStreamCopy)
+                encoderArgs << "-map" << "1:a:0";
+            else if (decoder.isAvsNative())
                 encoderArgs << "-map" << "1:a:0";
             else
                 encoderArgs << "-map"
@@ -1599,7 +1764,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
 
         if (sourceHasAudio) {
-            if (options.audioMode == AudioMode_DirectStreamCopy)
+            if (audioMode == AudioMode_DirectStreamCopy)
                 encoderArgs << "-c:a" << "copy";
             else
                 encoderArgs << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
@@ -1681,7 +1846,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                     : QString::fromUtf8(diagnostics).trimmed();
                 if (message.isEmpty())
                     message = QStringLiteral("FFmpeg did not produce a valid output file.");
-                if (options.audioMode == AudioMode_DirectStreamCopy && sourceHasAudio) {
+                if (audioMode == AudioMode_DirectStreamCopy && sourceHasAudio) {
                     message.prepend(
                         "The destination container must support the source audio codec when "
                         "Audio > Direct stream copy is selected.\n\n");
@@ -1716,6 +1881,21 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         QStringList args;
         args << "-y";
 
+        const bool separateProcessedAudioInput = sourceHasAudio
+            && audioMode != AudioMode_DirectStreamCopy
+            && selectedAudioIsSeparateSource;
+        if (hasFrameSelection && separateProcessedAudioInput) {
+            if (parentWidget) {
+                QMessageBox::critical(
+                    parentWidget, "Exact External-Audio Cut Requires Recompression",
+                    "A direct-video-copy selection may begin at an earlier keyframe, while an "
+                    "external audio file has no matching video keyframe preroll. Choose Normal "
+                    "or Full processing mode for an exact synchronized selection.");
+            }
+            removePartialOutput(processOutputPath);
+            return false;
+        }
+
         if (hasFrameSelection) {
             if (parentWidget && !options.smartRendering) {
                 const auto answer = QMessageBox::warning(
@@ -1733,7 +1913,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             // accurate seek would discard that same preroll only from audio,
             // leaving silence/desynchronization until the requested marker.
             // Preserve preroll consistently across both streams.
-            if (options.audioMode != AudioMode_DirectStreamCopy)
+            if (audioMode != AudioMode_DirectStreamCopy)
                 args << "-noaccurate_seek";
             const double inputStartSeconds = std::max(
                 0.0, sourceAudioProbe.videoStartOffsetSeconds + sourceStartSeconds);
@@ -1743,19 +1923,35 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         } else {
             appendInputFile(args, options.inputPath);
         }
+        if (separateProcessedAudioInput)
+            appendInputFile(args, selectedProcessedAudioPath);
 
         args << "-map" << "0:v:0";
         args << "-c:v" << "copy";
 
         if (sourceHasAudio) {
-            args << "-map" << QString("0:%1").arg(sourceAudioProbe.bestAudioStreamIndex);
-            if (options.audioMode == AudioMode_DirectStreamCopy) {
+            const int selectedStreamIndex = audioPlayer
+                && audioPlayer->getSelectedStreamIndex() >= 0
+                    ? audioPlayer->getSelectedStreamIndex()
+                    : sourceAudioProbe.bestAudioStreamIndex;
+            args << "-map"
+                 << QString("%1:%2")
+                        .arg(separateProcessedAudioInput ? 1 : 0)
+                        .arg(selectedStreamIndex);
+            if (audioMode == AudioMode_DirectStreamCopy) {
                 args << "-c:a" << "copy";
             } else {
+                const QString audioGraph = VDQtAudioFilterSystem::instance()
+                    .ffmpegFilterGraph(audioPlayer
+                        ? audioPlayer->getSampleRate() : 48000);
+                if (!audioGraph.isEmpty()) args << "-af" << audioGraph;
                 args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
                     configuredAudioParams());
             }
         }
+
+        if (separateProcessedAudioInput && !hasFrameSelection)
+            args << "-t" << QString::number(sourceDurationSeconds, 'f', 9);
 
         if (options.fastStart || options.containerType.contains("faststart")) {
             args << "-movflags" << "+faststart";
@@ -1803,7 +1999,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // Determine output resolution (reflecting any Resize filter if Full Processing Mode)
-    QImage sampleFrame = decoder.getFrameImage(startFrame);
+    QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
     if (sampleFrame.isNull()) {
         return false;
     }
@@ -1844,7 +2040,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
     // 1. Audio Source Configuration
     QString audioSrcMedia;
-    if (options.audioMode == AudioMode_DirectStreamCopy) {
+    if (audioMode == AudioMode_DirectStreamCopy) {
         if (!decoder.isAvsNative() && sourceHasAudio) {
             audioSrcMedia = options.inputPath;
         }
@@ -1874,14 +2070,116 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             "Preparing processed audio...", "Cancel", 0, 100, parentWidget);
         audioProgress.setWindowModality(Qt::WindowModal);
         audioProgress.setMinimumDuration(0);
-        const bool audioPrepared = audioPlayer->exportAudioToFile(
-            tempAudioPath, startSample, sampleCount,
-            [&audioProgress](int current, int total) {
-                audioProgress.setRange(0, std::max(1, total));
-                audioProgress.setValue(std::clamp(current, 0, std::max(1, total)));
-                QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
-                return !audioProgress.wasCanceled();
-            });
+        bool audioPrepared = false;
+        if (editedTimeline) {
+            QString editError;
+            const QList<VDQtTimelineSegment> selectedSegments =
+                renderTimeline.copyRange(startFrame, endFrame + 1, &editError);
+            QStringList segmentFiles;
+            audioPrepared = !selectedSegments.isEmpty();
+            for (int index = 0;
+                 audioPrepared && index < selectedSegments.size(); ++index) {
+                const VDQtTimelineSegment& segment = selectedSegments.at(index);
+                const int firstSource = static_cast<int>(segment.sourceStartFrame);
+                const int lastSource = static_cast<int>(
+                    segment.sourceStartFrame + segment.frameCount - 1);
+                double segmentStartSeconds =
+                    decoder.getFrameTimestampSeconds(firstSource);
+                if (!std::isfinite(segmentStartSeconds))
+                    segmentStartSeconds = firstSource / sourceFps;
+                double segmentDurationSeconds = 0.0;
+                const double segmentLastTimestamp =
+                    decoder.getFrameTimestampSeconds(lastSource);
+                const double segmentLastDuration =
+                    decoder.getFrameDurationSeconds(lastSource);
+                if (std::isfinite(segmentLastTimestamp)
+                    && std::isfinite(segmentLastDuration)
+                    && segmentLastTimestamp + segmentLastDuration
+                        > segmentStartSeconds) {
+                    segmentDurationSeconds = segmentLastTimestamp
+                        + segmentLastDuration - segmentStartSeconds;
+                } else {
+                    segmentDurationSeconds = segment.frameCount / sourceFps;
+                }
+                const int64_t segmentStartSample = static_cast<int64_t>(
+                    std::llround(segmentStartSeconds * sampleRate));
+                const int64_t segmentSampleCount = std::max<int64_t>(
+                    1, static_cast<int64_t>(
+                        std::llround(segmentDurationSeconds * sampleRate)));
+                const QString segmentPath = temporaryDirectory.filePath(
+                    QString("audio_segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
+                audioPrepared = audioPlayer->exportAudioToFile(
+                    segmentPath, segmentStartSample, segmentSampleCount,
+                    [&audioProgress, index, &selectedSegments](int current, int total) {
+                        const double fraction = total > 0
+                            ? static_cast<double>(current) / total : 0.0;
+                        const int progress = static_cast<int>(std::llround(
+                            100.0 * (index + fraction) / selectedSegments.size()));
+                        audioProgress.setValue(std::clamp(progress, 0, 100));
+                        QApplication::processEvents(
+                            QEventLoop::AllEvents, kProcessPollMs);
+                        return !audioProgress.wasCanceled();
+                    });
+                if (audioPrepared) segmentFiles.append(segmentPath);
+            }
+            if (audioPrepared && segmentFiles.size() == 1) {
+                QFile::remove(tempAudioPath);
+                audioPrepared = QFile::rename(segmentFiles.first(), tempAudioPath);
+            } else if (audioPrepared) {
+                const QString manifestPath =
+                    temporaryDirectory.filePath(QStringLiteral("audio.ffconcat"));
+                QSaveFile manifest(manifestPath);
+                QByteArray contents("ffconcat version 1.0\n");
+                for (const QString& segmentPath : segmentFiles) {
+                    contents += "file ";
+                    contents += QFileInfo(segmentPath).fileName().toUtf8();
+                    contents += '\n';
+                }
+                audioPrepared = manifest.open(QIODevice::WriteOnly)
+                    && manifest.write(contents) == contents.size()
+                    && manifest.commit();
+                if (audioPrepared) {
+                    QProcess concatProcess;
+                    concatProcess.setWorkingDirectory(temporaryDirectory.path());
+                    concatProcess.start(
+                        QStringLiteral("ffmpeg"),
+                        {QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
+                         QStringLiteral("-loglevel"), QStringLiteral("error"),
+                         QStringLiteral("-f"), QStringLiteral("concat"),
+                         QStringLiteral("-safe"), QStringLiteral("1"),
+                         QStringLiteral("-i"), QFileInfo(manifestPath).fileName(),
+                         QStringLiteral("-c:a"), QStringLiteral("copy"),
+                         QStringLiteral("-y"), QFileInfo(tempAudioPath).fileName()});
+                    if (!concatProcess.waitForStarted(3000)) {
+                        audioPrepared = false;
+                    } else {
+                        while (!concatProcess.waitForFinished(kProcessPollMs)) {
+                            QApplication::processEvents(
+                                QEventLoop::AllEvents, kProcessPollMs);
+                            if (audioProgress.wasCanceled()) {
+                                stopProcess(concatProcess);
+                                break;
+                            }
+                        }
+                        audioPrepared = !audioProgress.wasCanceled()
+                            && concatProcess.exitStatus() == QProcess::NormalExit
+                            && concatProcess.exitCode() == 0
+                            && validOutputFile(tempAudioPath);
+                    }
+                }
+            }
+        } else {
+            audioPrepared = audioPlayer->exportAudioToFile(
+                tempAudioPath, startSample, sampleCount,
+                [&audioProgress](int current, int total) {
+                    audioProgress.setRange(0, std::max(1, total));
+                    audioProgress.setValue(
+                        std::clamp(current, 0, std::max(1, total)));
+                    QApplication::processEvents(
+                        QEventLoop::AllEvents, kProcessPollMs);
+                    return !audioProgress.wasCanceled();
+                });
+        }
         const bool audioCancelled = audioProgress.wasCanceled();
         audioProgress.close();
 
@@ -1965,7 +2263,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
     // 5. Audio Codec & Options
     if (hasAudioInput) {
-        if (options.audioMode == AudioMode_DirectStreamCopy) {
+        if (audioMode == AudioMode_DirectStreamCopy) {
             // Native AviSynth audio is staged in a WAV that already carries
             // its true PCM integer/float depth. Stream-copy that codec too;
             // forcing pcm_s16le here silently quantized 24/32-bit and float
@@ -2011,10 +2309,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (preserveNativeVfr) {
         const AVPixelFormat inputPixelFormat =
             av_get_pix_fmt(rawInputPixelFormat.toUtf8().constData());
-        const int finalSourceFrame = startFrame
+        const int finalTimelineFrame = startFrame
             + std::max(0, inputFramesToProcess - 1) * step;
+        const int finalSourceFrame = sourceFrameAt(
+            std::min(finalTimelineFrame, endFrame));
         const double finalSourceTimestamp =
-            decoder.getFrameTimestampSeconds(std::min(finalSourceFrame, endFrame));
+            decoder.getFrameTimestampSeconds(finalSourceFrame);
         const double finalPhaseDuration =
             (sourceStartSeconds + sourceDurationSeconds - finalSourceTimestamp)
             / std::max(1, filterFramesPerInput);
@@ -2047,7 +2347,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             int hi = endFrame;
             while (lo < hi) {
                 const int mid = lo + (hi - lo + 1) / 2;
-                const double timestamp = decoder.getFrameTimestampSeconds(mid);
+                const double timestamp = decoder.getFrameTimestampSeconds(
+                    sourceFrameAt(mid));
                 if (std::isfinite(timestamp) && timestamp <= requestedTimestamp + 1e-9)
                     lo = mid;
                 else
@@ -2065,6 +2366,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             f += inputIndex * step;
         }
         f = std::clamp(f, startFrame, endFrame);
+        const int timelineFrame = f;
+        f = sourceFrameAt(timelineFrame);
 
         QImage rawFrame = decoder.getFrameImage(f);
         if (rawFrame.isNull()) {
@@ -2089,9 +2392,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         double vfrFrameEnd = 0.0;
         if (preserveNativeVfr) {
             vfrFrameStart = decoder.getFrameTimestampSeconds(f);
-            const int nextSourceFrame = f + step;
-            vfrFrameEnd = nextSourceFrame <= endFrame
-                ? decoder.getFrameTimestampSeconds(nextSourceFrame)
+            const int nextTimelineFrame = timelineFrame + step;
+            vfrFrameEnd = nextTimelineFrame <= endFrame
+                ? decoder.getFrameTimestampSeconds(
+                    sourceFrameAt(nextTimelineFrame))
                 : sourceStartSeconds + sourceDurationSeconds;
             if (!std::isfinite(vfrFrameStart) || !std::isfinite(vfrFrameEnd)
                 || vfrFrameEnd <= vfrFrameStart) {
@@ -2200,7 +2504,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         VDLogWindow::instance(parentWidget)->appendLog(QString("[Export Error] %1").arg(errOutput));
         if (parentWidget && !cancelled) {
             QString userMsg = "Video export failed.\n\n";
-            if (options.audioMode == AudioMode_DirectStreamCopy && isDirectCopyMediaAudio) {
+            if (audioMode == AudioMode_DirectStreamCopy && isDirectCopyMediaAudio) {
                 userMsg += "Note: In Audio -> Direct stream copy mode, the destination container must support the source audio codec natively (for example, standard AVI cannot encapsulate Opus audio).\n\n"
                            "To resolve:\n"
                            "1. Switch Audio to 'Full processing mode' to re-encode.\n"

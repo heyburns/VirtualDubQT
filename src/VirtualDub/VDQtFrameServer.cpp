@@ -90,6 +90,8 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
     Config absoluteConfig = config;
     absoluteConfig.sourcePath = QFileInfo(config.sourcePath).absoluteFilePath();
     absoluteConfig.pipePath = pipeInfo.absoluteFilePath();
+    if (!config.audioPath.isEmpty())
+        absoluteConfig.audioPath = QFileInfo(config.audioPath).absoluteFilePath();
     mCancelRequested.store(false, std::memory_order_relaxed);
     mThread = QThread::create([this, absoluteConfig]() { run(absoluteConfig); });
     mThread->start();
@@ -129,9 +131,30 @@ void VDQtFrameServer::run(Config config) {
             endFrame = decoder.getFrameCount() - 1;
         }
     }
+    VDQtTimeline timeline;
+    if (error.isEmpty()) {
+        if (!decoder.isFrameCountExact()) {
+            const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
+                [this](int, int) {
+                    return !mCancelRequested.load(std::memory_order_relaxed);
+                });
+            if (scan.cancelled)
+                error = QStringLiteral("Frame serving was cancelled.");
+            else if (!scan.errorMessage.isEmpty())
+                error = scan.errorMessage;
+        }
+        timeline.reset(decoder.getFrameCount(), true);
+        if (error.isEmpty() && !config.timelineSegments.isEmpty()
+            && !timeline.replaceSegments(config.timelineSegments, &error)) {
+            if (error.isEmpty())
+                error = QStringLiteral("The frame-server timeline is invalid.");
+        }
+        if (config.endFrame < 0)
+            endFrame = static_cast<int>(timeline.frameCount() - 1);
+    }
     if (error.isEmpty()
         && (config.startFrame < 0 || config.startFrame > endFrame
-            || endFrame >= decoder.getFrameCount())) {
+            || endFrame >= timeline.frameCount())) {
         error = QStringLiteral("The frame-server range is outside the decoded source.");
     }
 
@@ -144,7 +167,9 @@ void VDQtFrameServer::run(Config config) {
 
     QList<QImage> firstImages;
     if (error.isEmpty()) {
-        const QImage first = decoder.getFrameImage(config.startFrame);
+        const int sourceFrame = static_cast<int>(
+            timeline.mapOutputToSource(config.startFrame));
+        const QImage first = decoder.getFrameImage(sourceFrame);
         if (first.isNull() || !filters.processFrameSequence(first, firstImages)
             || firstImages.isEmpty() || firstImages.first().isNull()) {
             error = QStringLiteral("Could not prepare the first served frame.");
@@ -154,20 +179,35 @@ void VDQtFrameServer::run(Config config) {
     QProcess ffmpeg;
     if (error.isEmpty()) {
         const QSize size = firstImages.first().size();
-        ffmpeg.setProgram(QStringLiteral("ffmpeg"));
-        ffmpeg.setArguments({
+        QStringList arguments{
             QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
             QStringLiteral("-f"), QStringLiteral("rawvideo"),
             QStringLiteral("-pixel_format"), QStringLiteral("rgb24"),
             QStringLiteral("-video_size"), QString("%1x%2").arg(size.width()).arg(size.height()),
             QStringLiteral("-framerate"), QString::number(outputFps, 'f', 12),
-            QStringLiteral("-i"), QStringLiteral("pipe:0"),
-            QStringLiteral("-an"), QStringLiteral("-c:v"), QStringLiteral("rawvideo"),
-            QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
-            QStringLiteral("-f"), QStringLiteral("nut"),
-            QStringLiteral("-flush_packets"), QStringLiteral("1"),
-            QStringLiteral("-y"), config.pipePath
-        });
+            QStringLiteral("-i"), QStringLiteral("pipe:0")
+        };
+        const bool hasAudio = !config.audioPath.isEmpty()
+            && QFileInfo::exists(config.audioPath);
+        if (hasAudio)
+            arguments << QStringLiteral("-i") << config.audioPath;
+        arguments << QStringLiteral("-map") << QStringLiteral("0:v:0");
+        if (hasAudio)
+            arguments << QStringLiteral("-map") << QStringLiteral("1:a:0");
+        arguments << QStringLiteral("-c:v") << QStringLiteral("rawvideo")
+                  << QStringLiteral("-pix_fmt") << QStringLiteral("rgb24");
+        if (hasAudio) {
+            arguments << QStringLiteral("-af") << QStringLiteral("apad")
+                      << QStringLiteral("-c:a") << QStringLiteral("pcm_s16le")
+                      << QStringLiteral("-shortest");
+        } else {
+            arguments << QStringLiteral("-an");
+        }
+        arguments << QStringLiteral("-f") << QStringLiteral("nut")
+                  << QStringLiteral("-flush_packets") << QStringLiteral("1")
+                  << QStringLiteral("-y") << config.pipePath;
+        ffmpeg.setProgram(QStringLiteral("ffmpeg"));
+        ffmpeg.setArguments(arguments);
         ffmpeg.start(QIODevice::ReadWrite);
         if (!ffmpeg.waitForStarted(5000)) error = ffmpeg.errorString();
     }
@@ -185,7 +225,9 @@ void VDQtFrameServer::run(Config config) {
         if (frameIndex == config.startFrame) {
             images = firstImages;
         } else {
-            const QImage frame = decoder.getFrameImage(frameIndex);
+            const int sourceFrame = static_cast<int>(
+                timeline.mapOutputToSource(frameIndex));
+            const QImage frame = decoder.getFrameImage(sourceFrame);
             if (frame.isNull() || !filters.processFrameSequence(frame, images)
                 || images.isEmpty()) {
                 error = QString("Could not decode frame %1.").arg(frameIndex);
@@ -203,8 +245,10 @@ void VDQtFrameServer::run(Config config) {
 
         // NUT/rawvideo is CFR. Duplicate phases as needed so VFR timestamp
         // gaps retain their displayed duration instead of collapsing time.
+        const int sourceFrame = static_cast<int>(
+            timeline.mapOutputToSource(frameIndex));
         double duration = config.preserveEmptyFrames
-            ? decoder.getFrameDurationSeconds(frameIndex)
+            ? decoder.getFrameDurationSeconds(sourceFrame)
             : 1.0 / sourceFps;
         if (!std::isfinite(duration) || duration <= 0.0)
             duration = 1.0 / sourceFps;

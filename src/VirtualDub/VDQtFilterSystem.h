@@ -5,6 +5,8 @@
 #include <QImage>
 #include <QList>
 #include <QMap>
+#include <QHash>
+#include <QByteArray>
 
 enum class VDFilterType {
     SixAxis,
@@ -17,7 +19,20 @@ enum class VDFilterType {
     Grayscale,
     InvertColor,
     Blur,
-    Sharpen
+    Sharpen,
+    Deinterlace,
+    Emboss,
+    FieldSwap,
+    HSVAdjust,
+    Levels,
+    Threshold,
+    Posterize,
+    Gamma,
+    Smoother,
+    Crop,
+    ChromaShift,
+    Pixelate,
+    Count
 };
 
 struct VDFilterInstance {
@@ -72,6 +87,7 @@ private:
     QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask);
 
     QList<VDFilterInstance> mActiveChain;
+    QHash<QString, QByteArray> mSixAxisLutCache;
 };
 
 #endif // VDQTFILTERSYSTEM_H

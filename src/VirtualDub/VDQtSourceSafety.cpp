@@ -35,10 +35,31 @@ VDQtOutputSafetyReport VDQtSourceSafety::evaluateOutputPath(
     const QString& scriptPath) {
     VDQtOutputSafetyReport result;
     QStringList protectedSources = directlyLoadedSources;
-    if (!scriptPath.isEmpty() && isScriptPath(scriptPath)) {
-        result.scriptDependencies =
-            VDQtVideoDecoder::auditScriptDependencies(scriptPath);
-        protectedSources.append(result.scriptDependencies.resolvedPaths);
+    QStringList scriptPaths;
+    if (!scriptPath.isEmpty() && isScriptPath(scriptPath))
+        scriptPaths.append(scriptPath);
+    for (const QString& sourcePath : directlyLoadedSources) {
+        if (isScriptPath(sourcePath)) scriptPaths.append(sourcePath);
+    }
+    scriptPaths.removeDuplicates();
+    if (!scriptPaths.isEmpty()) {
+        result.scriptDependencies.complete = true;
+        for (const QString& currentScript : scriptPaths) {
+            const VDQtVideoDecoder::ScriptDependencyReport dependency =
+                VDQtVideoDecoder::auditScriptDependencies(currentScript);
+            result.scriptDependencies.complete =
+                result.scriptDependencies.complete && dependency.complete;
+            result.scriptDependencies.resolvedPaths.append(
+                dependency.resolvedPaths);
+            result.scriptDependencies.unresolvedPathLiterals.append(
+                dependency.unresolvedPathLiterals);
+            result.scriptDependencies.diagnostics.append(
+                dependency.diagnostics);
+            protectedSources.append(dependency.resolvedPaths);
+        }
+        result.scriptDependencies.resolvedPaths.removeDuplicates();
+        result.scriptDependencies.unresolvedPathLiterals.removeDuplicates();
+        result.scriptDependencies.diagnostics.removeDuplicates();
     }
 
     protectedSources.removeDuplicates();
@@ -51,7 +72,7 @@ VDQtOutputSafetyReport VDQtSourceSafety::evaluateOutputPath(
     }
 
     const QFileInfo output(outputPath);
-    if (!scriptPath.isEmpty() && isScriptPath(scriptPath)
+    if (!scriptPaths.isEmpty()
         && !result.scriptDependencies.complete
         && (output.exists() || output.isSymLink())) {
         result.issue =

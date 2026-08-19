@@ -14,6 +14,56 @@ VDQtCodecEngine& VDQtCodecEngine::instance() {
     return inst;
 }
 
+QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
+    return {
+        {QStringLiteral("rawvideo"), QStringLiteral("Uncompressed RGB/YCbCr"),
+         QStringLiteral("Uncompressed native frames."), false, false, false, false, false, true},
+        {QStringLiteral("prores_ks"), QStringLiteral("Apple ProRes"),
+         QStringLiteral("10-bit intra-frame ProRes proxy through 4444 XQ."), false, false, false, false, true, false},
+        {QStringLiteral("libx264"), QStringLiteral("H.264 / AVC"),
+         QStringLiteral("x264 8-bit H.264 encoder."), true, true, true, true, true, false},
+        {QStringLiteral("libx264_10bit"), QStringLiteral("H.264 / AVC 10-bit"),
+         QStringLiteral("x264 H.264 with a 10-bit pixel format."), true, true, true, true, true, false},
+        {QStringLiteral("libx265"), QStringLiteral("H.265 / HEVC"),
+         QStringLiteral("x265 HEVC encoder."), true, true, true, true, true, false},
+        {QStringLiteral("libx265_lossless"), QStringLiteral("H.265 lossless"),
+         QStringLiteral("Lossless x265 HEVC mode."), false, false, true, true, true, true},
+        {QStringLiteral("libvpx"), QStringLiteral("VP8"),
+         QStringLiteral("WebM VP8 encoder."), true, true, false, false, false, false},
+        {QStringLiteral("libvpx-vp9"), QStringLiteral("VP9"),
+         QStringLiteral("WebM VP9 encoder."), true, true, false, false, false, false},
+        {QStringLiteral("libsvtav1"), QStringLiteral("AV1 (SVT-AV1)"),
+         QStringLiteral("Scalable Video Technology AV1 encoder."), true, true, true, false, false, false},
+        {QStringLiteral("ffv1"), QStringLiteral("FFV1"),
+         QStringLiteral("Mathematically lossless intra-frame FFV1."), false, false, false, false, false, true},
+        {QStringLiteral("huffyuv"), QStringLiteral("HuffYUV"),
+         QStringLiteral("Lossless HuffYUV encoder."), false, false, false, false, false, true},
+        {QStringLiteral("cfhd"), QStringLiteral("GoPro CineForm"),
+         QStringLiteral("Wavelet CineForm intermediate codec."), false, false, false, false, false, false}
+    };
+}
+
+QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
+    return {
+        {QStringLiteral("pcm_s16le"), QStringLiteral("PCM 16-bit"),
+         QStringLiteral("Uncompressed signed 16-bit PCM."), false, false, true},
+        {QStringLiteral("pcm_s24le"), QStringLiteral("PCM 24-bit"),
+         QStringLiteral("Uncompressed signed 24-bit PCM."), false, false, true},
+        {QStringLiteral("aac"), QStringLiteral("AAC"),
+         QStringLiteral("FFmpeg AAC encoder."), true, true, false},
+        {QStringLiteral("libmp3lame"), QStringLiteral("MP3"),
+         QStringLiteral("LAME MP3 encoder."), true, true, false},
+        {QStringLiteral("libopus"), QStringLiteral("Opus"),
+         QStringLiteral("Opus audio encoder."), true, true, false},
+        {QStringLiteral("libvorbis"), QStringLiteral("Vorbis"),
+         QStringLiteral("Ogg Vorbis encoder."), true, true, false},
+        {QStringLiteral("ac3"), QStringLiteral("Dolby Digital AC-3"),
+         QStringLiteral("AC-3 audio encoder."), false, true, false},
+        {QStringLiteral("flac"), QStringLiteral("FLAC"),
+         QStringLiteral("Lossless FLAC audio encoder."), false, false, true}
+    };
+}
+
 VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &codecId) {
     VDVideoCodecParams p;
     p.codecId = codecId;
