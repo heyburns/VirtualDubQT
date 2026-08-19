@@ -28,6 +28,9 @@ public:
     VDQtVideoExporter();
     ~VDQtVideoExporter();
 
+    bool wasCancelled() const { return mWasCancelled; }
+    QString lastError() const { return mLastError; }
+
     struct ExportOptions {
         QString inputPath;
         QString outputPath;
@@ -52,6 +55,10 @@ public:
         // back to the selected recompression mode for frame-exact output.
         bool smartRendering = false;
         bool preserveEmptyFrames = true;
+        // Queue/batch execution reports failures through job state instead of
+        // opening modal questions or error boxes. Progress remains visible and
+        // cancellable.
+        bool unattended = false;
         // Empty means the decoder's identity timeline. Non-empty edit lists
         // map output frames to source frames and force frame-accurate render.
         QList<VDQtTimelineSegment> timelineSegments;
@@ -72,6 +79,7 @@ public:
         bool bottomUp = false;
         QString colorMatrix = QStringLiteral("bt601");
         bool fullRange = false;
+        bool unattended = false;
         QList<VDQtTimelineSegment> timelineSegments;
     };
 
@@ -79,7 +87,8 @@ public:
                      VDQtVideoDecoder *activeDecoder = nullptr,
                      VDQtAudioPlayer *audioPlayer = nullptr,
                      QWidget *parentWidget = nullptr,
-                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback = nullptr);
+                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback = nullptr,
+                     std::function<bool(int completedFrames, int totalFrames)> progressCallback = nullptr);
 
     bool exportRawVideo(
         const RawExportOptions& options,
@@ -87,6 +96,10 @@ public:
         VDQtAudioPlayer *audioPlayer = nullptr,
         QWidget *parentWidget = nullptr,
         std::function<bool(int completedFrames, int totalFrames)> progressCallback = nullptr);
+
+private:
+    bool mWasCancelled = false;
+    QString mLastError;
 };
 
 #endif // VDQTVIDEOEXPORTER_H

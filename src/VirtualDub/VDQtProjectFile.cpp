@@ -7,18 +7,27 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QUuid>
 
 #include <cmath>
 #include <limits>
 
 namespace {
 
-constexpr int kDocumentVersion = 2;
+constexpr int kDocumentVersion = 3;
 constexpr int kOldestSupportedDocumentVersion = 1;
-constexpr qint64 kMaximumDocumentBytes = 4 * 1024 * 1024;
+constexpr qint64 kMaximumDocumentBytes = qint64{4} * 1024 * 1024;
 
 void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
+}
+
+bool isSafeImageExtension(const QString& extension) {
+    if (extension.isEmpty() || extension.size() > 16) return false;
+    for (const QChar character : extension) {
+        if (!character.isLetterOrNumber()) return false;
+    }
+    return true;
 }
 
 QJsonObject videoCodecToJson(const VDVideoCodecParams& value) {
@@ -354,12 +363,18 @@ bool parseProcessing(const QJsonObject& object,
 bool writeDocument(const QString& path,
                    const QJsonObject& root,
                    QString *errorMessage) {
+    const QByteArray serialized =
+        QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (serialized.size() > kMaximumDocumentBytes) {
+        setError(errorMessage, QStringLiteral(
+            "The settings document exceeds the 4 MiB safety limit."));
+        return false;
+    }
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly)) {
         setError(errorMessage, output.errorString());
         return false;
     }
-    const QByteArray serialized = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (output.write(serialized) != serialized.size() || !output.commit()) {
         setError(errorMessage, output.errorString().isEmpty()
             ? QStringLiteral("The settings file could not be committed.")
@@ -627,9 +642,37 @@ bool VDQtProjectFile::saveJobQueue(
     const QDir documentDirectory = QFileInfo(path).absoluteDir();
     QJsonArray serializedJobs;
     for (const VDQtJobState& job : jobs) {
-        if (job.sourcePaths.isEmpty() || job.options.outputPath.isEmpty()) {
+        const bool requiresOutput =
+            job.operation != VDQtJobOperation::VideoAnalysis;
+        if (job.sourcePaths.isEmpty()
+            || (requiresOutput && job.options.outputPath.isEmpty())) {
             setError(errorMessage, QStringLiteral("A queued job has no source or destination."));
             return false;
+        }
+        const int operation = static_cast<int>(job.operation);
+        const int status = static_cast<int>(job.status);
+        if (operation < static_cast<int>(VDQtJobOperation::VideoExport)
+            || operation > static_cast<int>(VDQtJobOperation::VideoAnalysis)
+            || status < static_cast<int>(VDQtJobStatus::Pending)
+            || status > static_cast<int>(VDQtJobStatus::Interrupted)
+            || !std::isfinite(job.progress) || job.progress < 0.0
+            || job.progress > 1.0 || job.name.size() > 1024
+            || job.id.size() > 128 || job.error.size() > 65536
+            || job.logEntries.size() > 1000
+            || !isSafeImageExtension(job.imageExtension)
+            || job.imageQuality < -1 || job.imageQuality > 100
+            || job.imageMinimumDigits < 1 || job.imageMinimumDigits > 12
+            || job.imageStartIndex < 0) {
+            setError(errorMessage,
+                     QStringLiteral("A queued job contains invalid runtime state."));
+            return false;
+        }
+        for (const QString& entry : job.logEntries) {
+            if (entry.size() > 65536) {
+                setError(errorMessage,
+                         QStringLiteral("A queued job log entry is too large."));
+                return false;
+            }
         }
         if (!std::isfinite(job.imageSequenceFps)
             || job.imageSequenceFps < 0.0 || job.imageSequenceFps > 1000.0
@@ -647,6 +690,21 @@ bool VDQtProjectFile::saveJobQueue(
             return false;
         }
         QJsonObject object;
+        object["id"] = job.id.isEmpty()
+            ? QUuid::createUuid().toString(QUuid::WithoutBraces) : job.id;
+        object["name"] = job.name;
+        object["operation"] = operation;
+        object["status"] = status;
+        object["progress"] = job.progress;
+        object["error"] = job.error;
+        object["replaceExisting"] = job.replaceExisting;
+        if (job.startedAtUtc.isValid())
+            object["startedAtUtc"] = job.startedAtUtc.toUTC().toString(Qt::ISODateWithMs);
+        if (job.endedAtUtc.isValid())
+            object["endedAtUtc"] = job.endedAtUtc.toUTC().toString(Qt::ISODateWithMs);
+        QJsonArray logEntries;
+        for (const QString& entry : job.logEntries) logEntries.append(entry);
+        object["logEntries"] = logEntries;
         QJsonArray sources;
         for (const QString& source : job.sourcePaths) {
             const QFileInfo sourceInfo(source);
@@ -669,6 +727,10 @@ bool VDQtProjectFile::saveJobQueue(
         }
         object["audioStreamIndex"] = job.audioStreamIndex;
         object["audioDisabled"] = job.audioDisabled;
+        object["imageExtension"] = job.imageExtension;
+        object["imageQuality"] = job.imageQuality;
+        object["imageMinimumDigits"] = job.imageMinimumDigits;
+        object["imageStartIndex"] = job.imageStartIndex;
         const QFileInfo outputInfo(job.options.outputPath);
         object["outputPath"] = outputInfo.isAbsolute()
             ? documentDirectory.relativeFilePath(outputInfo.absoluteFilePath())
@@ -743,6 +805,58 @@ bool VDQtProjectFile::loadJobQueue(
             return false;
         }
         VDQtJobState job;
+        job.id = object.value("id").toString();
+        if (job.id.isEmpty())
+            job.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        job.name = object.value("name").toString();
+        const int operation = object.value("operation").toInt(
+            static_cast<int>(VDQtJobOperation::VideoExport));
+        const int serializedStatus = object.value("status").toInt(
+            static_cast<int>(VDQtJobStatus::Pending));
+        if (operation < static_cast<int>(VDQtJobOperation::VideoExport)
+            || operation > static_cast<int>(VDQtJobOperation::VideoAnalysis)
+            || serializedStatus < static_cast<int>(VDQtJobStatus::Pending)
+            || serializedStatus > static_cast<int>(VDQtJobStatus::Interrupted)) {
+            setError(errorMessage,
+                     QStringLiteral("A queued job has an invalid operation or status."));
+            return false;
+        }
+        job.operation = static_cast<VDQtJobOperation>(operation);
+        job.status = static_cast<VDQtJobStatus>(serializedStatus);
+        if (job.status == VDQtJobStatus::Starting
+            || job.status == VDQtJobStatus::Running
+            || job.status == VDQtJobStatus::Aborting) {
+            job.status = VDQtJobStatus::Interrupted;
+            job.error = QStringLiteral(
+                "The application exited while this job was running.");
+        } else {
+            job.error = object.value("error").toString();
+        }
+        job.progress = object.value("progress").toDouble(0.0);
+        job.replaceExisting = object.value("replaceExisting").toBool(false);
+        job.startedAtUtc = QDateTime::fromString(
+            object.value("startedAtUtc").toString(), Qt::ISODateWithMs);
+        job.endedAtUtc = QDateTime::fromString(
+            object.value("endedAtUtc").toString(), Qt::ISODateWithMs);
+        if (serializedStatus == static_cast<int>(VDQtJobStatus::Starting)
+            || serializedStatus == static_cast<int>(VDQtJobStatus::Running)
+            || serializedStatus == static_cast<int>(VDQtJobStatus::Aborting)) {
+            job.endedAtUtc = QDateTime::currentDateTimeUtc();
+        }
+        const QJsonArray serializedLog = object.value("logEntries").toArray();
+        if (serializedLog.size() > 1000) {
+            setError(errorMessage, QStringLiteral("A queued job has too many log entries."));
+            return false;
+        }
+        for (const QJsonValue& logValue : serializedLog) {
+            const QString entry = logValue.toString();
+            if (entry.size() > 65536) {
+                setError(errorMessage,
+                         QStringLiteral("A queued job log entry is too large."));
+                return false;
+            }
+            job.logEntries.append(entry);
+        }
         for (const QJsonValue& sourceValue : serializedSources) {
             QString source = sourceValue.toString();
             if (source.isEmpty() || source.size() > 32768) {
@@ -779,16 +893,24 @@ bool VDQtProjectFile::loadJobQueue(
             job.audioSourcePath = QDir::cleanPath(job.audioSourcePath);
         job.audioStreamIndex = object.value("audioStreamIndex").toInt(-1);
         job.audioDisabled = object.value("audioDisabled").toBool(false);
+        job.imageExtension = object.value("imageExtension").toString(
+            QStringLiteral("png"));
+        job.imageQuality = object.value("imageQuality").toInt(-1);
+        job.imageMinimumDigits = object.value("imageMinimumDigits").toInt(6);
+        job.imageStartIndex = object.value("imageStartIndex").toInt(0);
         QString outputPath = object.value("outputPath").toString();
-        if (outputPath.isEmpty() || outputPath.size() > 32768) {
+        if ((outputPath.isEmpty()
+             && job.operation != VDQtJobOperation::VideoAnalysis)
+            || outputPath.size() > 32768) {
             setError(errorMessage, QStringLiteral("A queued destination path is invalid."));
             return false;
         }
-        if (!QFileInfo(outputPath).isAbsolute())
+        if (!outputPath.isEmpty() && !QFileInfo(outputPath).isAbsolute())
             outputPath = documentDirectory.absoluteFilePath(outputPath);
         const QJsonObject options = object.value("options").toObject();
         job.options.inputPath = job.sourcePaths.first();
-        job.options.outputPath = QDir::cleanPath(outputPath);
+        job.options.outputPath = outputPath.isEmpty()
+            ? QString() : QDir::cleanPath(outputPath);
         job.options.startFrame = options.value("startFrame").toInt();
         job.options.endFrame = options.value("endFrame").toInt(-1);
         job.options.customFps = options.value("customFps").toDouble();
@@ -837,6 +959,13 @@ bool VDQtProjectFile::loadJobQueue(
         if (job.options.startFrame < 0 || job.options.endFrame < -1
             || job.audioStreamIndex < -1
             || job.audioSourcePath.size() > 32768
+            || !std::isfinite(job.progress) || job.progress < 0.0
+            || job.progress > 1.0 || job.name.size() > 1024
+            || job.id.size() > 128 || job.error.size() > 65536
+            || !isSafeImageExtension(job.imageExtension)
+            || job.imageQuality < -1 || job.imageQuality > 100
+            || job.imageMinimumDigits < 1 || job.imageMinimumDigits > 12
+            || job.imageStartIndex < 0
             || !std::isfinite(job.imageSequenceFps)
             || job.imageSequenceFps < 0.0 || job.imageSequenceFps > 1000.0
             || job.rawPixelFormat.size() > 64

@@ -20,10 +20,13 @@
 #include "VDQtAudioPlayer.h"
 #include "VDQtVideoExporter.h"
 #include "VDQtProjectFile.h"
+#include "VDQtJobQueue.h"
 #include "VDQtFrameServer.h"
 #include "VDQtTimeline.h"
 #include <QTimer>
 #include <QThread>
+
+class VDQtJobControlWindow;
 
 class VDQtMainWindow : public QMainWindow {
     Q_OBJECT
@@ -135,6 +138,10 @@ private Q_SLOTS:
                                    const QString& errorMessage,
                                    int frameCount,
                                    int frameCountStatus);
+    void runPendingJobs();
+    void stopJobQueue();
+    void abortCurrentJob();
+    void reloadQueuedJob(int row);
 
 private:
     void createMenus();
@@ -172,6 +179,11 @@ private:
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
     void findSceneChange(bool forward);
+    VDQtJobState currentJobTemplate() const;
+    bool executeQueuedJob(int row, QString *errorMessage);
+    bool executeImageSequenceJob(VDQtJobState& job,
+                                 VDQtVideoDecoder& decoder,
+                                 QString *errorMessage);
 
     QSplitter *mVideoSplitter;
     VDVideoDisplayWidget *mInputDisplay;
@@ -244,24 +256,12 @@ private:
     int mRequestedTimelineFrame = 0;
     bool mFrameRequestPending = false;
     int mQueuedPlaybackFrame = -1;
-    struct QueuedVideoJob {
-        enum Status { Pending, Running, Complete, Failed, Cancelled };
-        QStringList sourcePaths;
-        double imageSequenceFps = 0.0;
-        QString rawPixelFormat;
-        int rawWidth = 0;
-        int rawHeight = 0;
-        double rawFrameRate = 0.0;
-        qint64 rawByteOffset = 0;
-        QString audioSourcePath;
-        int audioStreamIndex = -1;
-        bool audioDisabled = false;
-        VDQtVideoExporter::ExportOptions options;
-        VDQtProcessingState processing;
-        Status status = Pending;
-        QString error;
-    };
-    QList<QueuedVideoJob> mVideoJobs;
+    VDQtJobQueue *mJobQueue = nullptr;
+    VDQtJobControlWindow *mJobControlWindow = nullptr;
+    bool mQueueStopRequested = false;
+    bool mQueueAbortRequested = false;
+    bool mCloseAfterQueueStops = false;
+    int mActiveJobIndex = -1;
     VDQtFrameServer *mFrameServer = nullptr;
     QString mFrameServerAudioPath;
     int mVideoMode = VideoMode_FullProcessing;

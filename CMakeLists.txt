@@ -54,6 +54,12 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtTimeline.cpp
     src/VirtualDub/VDQtProjectFile.h
     src/VirtualDub/VDQtProjectFile.cpp
+    src/VirtualDub/VDQtJobQueue.h
+    src/VirtualDub/VDQtJobQueue.cpp
+    src/VirtualDub/VDQtJobControl.h
+    src/VirtualDub/VDQtJobControl.cpp
+    src/VirtualDub/VDQtBatchWizard.h
+    src/VirtualDub/VDQtBatchWizard.cpp
     src/VirtualDub/VDQtFrameServer.h
     src/VirtualDub/VDQtFrameServer.cpp
     src/VirtualDub/VDQtVideoDisplay.h
@@ -134,6 +140,12 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtTimeline.h
         src/VirtualDub/VDQtProjectFile.cpp
         src/VirtualDub/VDQtProjectFile.h
+        src/VirtualDub/VDQtJobQueue.cpp
+        src/VirtualDub/VDQtJobQueue.h
+        src/VirtualDub/VDQtJobControl.cpp
+        src/VirtualDub/VDQtJobControl.h
+        src/VirtualDub/VDQtBatchWizard.cpp
+        src/VirtualDub/VDQtBatchWizard.h
         src/VirtualDub/VDQtFrameServer.cpp
         src/VirtualDub/VDQtFrameServer.h
         src/VirtualDub/VDQtDialogs.cpp

@@ -1,5 +1,7 @@
 #include "VDQtMainWindow.h"
 #include "VDQtSourceSafety.h"
+#include "VDQtBatchWizard.h"
+#include "VDQtJobControl.h"
 #include <QApplication>
 #include <QKeySequence>
 #include <QScreen>
@@ -321,6 +323,31 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     createMenus();
     createStatusBar();
 
+    mJobQueue = new VDQtJobQueue(this);
+    const QString queueDirectory = QStandardPaths::writableLocation(
+        QStandardPaths::AppDataLocation);
+    if (!queueDirectory.isEmpty()) {
+        QDir().mkpath(queueDirectory);
+        mJobQueue->setAutosavePath(
+            QDir(queueDirectory).filePath(QStringLiteral("VirtualDub.vdqjobs")));
+    }
+    connect(mJobQueue, &VDQtJobQueue::runRequested,
+            this, &VDQtMainWindow::runPendingJobs);
+    connect(mJobQueue, &VDQtJobQueue::stopRequested,
+            this, &VDQtMainWindow::stopJobQueue);
+    connect(mJobQueue, &VDQtJobQueue::abortRequested,
+            this, &VDQtMainWindow::abortCurrentJob);
+    connect(mJobQueue, &VDQtJobQueue::reloadRequested,
+            this, &VDQtMainWindow::reloadQueuedJob);
+    connect(mJobQueue, &VDQtJobQueue::batchWizardRequested,
+            this, &VDQtMainWindow::onFileBatchWizard);
+    QString queueLoadError;
+    if (!mJobQueue->loadAutosave(&queueLoadError) && !queueLoadError.isEmpty()) {
+        VDLogWindow::instance(this)->appendLog(
+            QStringLiteral("[Job queue] Could not restore the local queue: %1")
+                .arg(queueLoadError));
+    }
+
     mPlaybackTimer = new QTimer(this);
     connect(mPlaybackTimer, &QTimer::timeout, this, &VDQtMainWindow::onPlaybackTick);
 
@@ -373,6 +400,11 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
 }
 
 VDQtMainWindow::~VDQtMainWindow() {
+    if (mJobQueue) {
+        QString queueSaveError;
+        if (!mJobQueue->flush(&queueSaveError) && !queueSaveError.isEmpty())
+            qWarning() << "[Job queue] Could not save the local queue:" << queueSaveError;
+    }
     if (mPlaybackTimer) mPlaybackTimer->stop();
     if (mFrameServer) mFrameServer->stop();
     if (mFrameDecodeWorker) {
@@ -1294,6 +1326,26 @@ VDQtVideoExporter::ExportOptions VDQtMainWindow::currentExportOptions(
     return options;
 }
 
+VDQtJobState VDQtMainWindow::currentJobTemplate() const {
+    VDQtJobState job;
+    job.sourcePaths = mTimelineSources;
+    if (job.sourcePaths.isEmpty() && mVideoDecoder.isOpen())
+        job.sourcePaths = {mVideoDecoder.getFilePath()};
+    job.imageSequenceFps = mImageSequenceFps;
+    job.rawPixelFormat = mRawInputPixelFormat;
+    job.rawWidth = mRawInputWidth;
+    job.rawHeight = mRawInputHeight;
+    job.rawFrameRate = mRawInputFrameRate;
+    job.rawByteOffset = mRawInputByteOffset;
+    job.audioSourcePath = mAudioSourcePath;
+    job.audioStreamIndex = mAudioStreamIndex;
+    job.audioDisabled = mAudioDisabled;
+    job.options = currentExportOptions(
+        QString(), QStringLiteral("mkv"), false, true);
+    job.processing = captureProcessingState();
+    return job;
+}
+
 QString VDQtMainWindow::primarySessionSourcePath() const {
     return mTimelineSources.isEmpty()
         ? mVideoDecoder.getFilePath() : mTimelineSources.first();
@@ -2075,33 +2127,10 @@ void VDQtMainWindow::onFileRunScript() {
         } else if (fileName.endsWith(".vdqproject", Qt::CaseInsensitive)) {
             loadProjectFile(fileName);
         } else if (fileName.endsWith(".vdqjobs", Qt::CaseInsensitive)) {
-            QList<VDQtJobState> loadedJobs;
             QString error;
-            if (!VDQtProjectFile::loadJobQueue(fileName, &loadedJobs, &error)) {
+            if (!mJobQueue->appendFromFile(fileName, &error)) {
                 QMessageBox::critical(this, "Run Job Script Error", error);
                 return;
-            }
-            if (mVideoJobs.size() + loadedJobs.size() > 1000) {
-                QMessageBox::critical(
-                    this, "Run Job Script Error",
-                    "Loading this script would exceed the 1000-job session limit.");
-                return;
-            }
-            for (const VDQtJobState& loaded : loadedJobs) {
-                QueuedVideoJob job;
-                job.sourcePaths = loaded.sourcePaths;
-                job.imageSequenceFps = loaded.imageSequenceFps;
-                job.rawPixelFormat = loaded.rawPixelFormat;
-                job.rawWidth = loaded.rawWidth;
-                job.rawHeight = loaded.rawHeight;
-                job.rawFrameRate = loaded.rawFrameRate;
-                job.rawByteOffset = loaded.rawByteOffset;
-                job.audioSourcePath = loaded.audioSourcePath;
-                job.audioStreamIndex = loaded.audioStreamIndex;
-                job.audioDisabled = loaded.audioDisabled;
-                job.options = loaded.options;
-                job.processing = loaded.processing;
-                mVideoJobs.append(job);
             }
             onFileJobControl();
         } else if (fileName.endsWith(".vdqsettings", Qt::CaseInsensitive)) {
@@ -2123,428 +2152,764 @@ void VDQtMainWindow::onFileRunScript() {
 }
 
 void VDQtMainWindow::onFileBatchWizard() {
-    const QStringList inputs = QFileDialog::getOpenFileNames(
-        this, "Batch Wizard - Select Sources", QString(),
-        "Video, Media, and Scripts (*.avi *.mp4 *.mkv *.mov *.webm *.flv *.wmv *.nut *.avs *.AVS *.vpy *.VPY);;All Files (*)");
-    if (inputs.isEmpty()) return;
-    if (mVideoJobs.size() + inputs.size() > 1000) {
-        QMessageBox::warning(
-            this, "Batch Wizard", "The session job queue is limited to 1000 entries.");
+    VDQtBatchWizardDialog dialog(
+        currentJobTemplate(), mJobQueue->jobs(), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    QString error;
+    if (!mJobQueue->addJobs(dialog.jobs(), &error)) {
+        QMessageBox::critical(this, QStringLiteral("Batch Wizard Error"), error);
         return;
     }
-    const QString outputDirectory = QFileDialog::getExistingDirectory(
-        this, "Batch Wizard - Select Output Directory",
-        QFileInfo(inputs.first()).absolutePath());
-    if (outputDirectory.isEmpty()) return;
-
-    const QStringList formatNames = {
-        QStringLiteral("Matroska (*.mkv)"),
-        QStringLiteral("MP4 +faststart (*.mp4)"),
-        QStringLiteral("QuickTime / MOV (*.mov)"),
-        QStringLiteral("WebM (*.webm)"),
-        QStringLiteral("AVI (*.avi)"),
-        QStringLiteral("NUT (*.nut)")
-    };
-    bool accepted = false;
-    const QString selectedFormat = QInputDialog::getItem(
-        this, "Batch Wizard", "Output container:", formatNames, 0, false, &accepted);
-    if (!accepted) return;
-    const int formatIndex = formatNames.indexOf(selectedFormat);
-    const QStringList containerTypes = {
-        QStringLiteral("mkv"), QStringLiteral("mp4_faststart"),
-        QStringLiteral("mov"), QStringLiteral("webm"),
-        QStringLiteral("avi"), QStringLiteral("nut")
-    };
-    const QStringList extensions = {
-        QStringLiteral("mkv"), QStringLiteral("mp4"), QStringLiteral("mov"),
-        QStringLiteral("webm"), QStringLiteral("avi"), QStringLiteral("nut")
-    };
-    const QString containerType = containerTypes.at(formatIndex);
-    const QString extension = extensions.at(formatIndex);
-    const bool fastStart = containerType == QStringLiteral("mp4_faststart");
-
-    QSet<QString> reservedOutputs;
-    int added = 0;
-    for (const QString& input : inputs) {
-        const QFileInfo inputInfo(input);
-        QString baseName = inputInfo.completeBaseName();
-        if (baseName.isEmpty()) baseName = QStringLiteral("output");
-        QString output = QDir(outputDirectory).filePath(
-            baseName + QLatin1Char('.') + extension);
-        int duplicate = 2;
-        while (reservedOutputs.contains(QFileInfo(output).absoluteFilePath())
-               || VDQtSourceSafety::pathsReferToSameFile(input, output)) {
-            output = QDir(outputDirectory).filePath(
-                QString("%1_%2.%3").arg(baseName).arg(duplicate++).arg(extension));
-        }
-        reservedOutputs.insert(QFileInfo(output).absoluteFilePath());
-
-        QueuedVideoJob job;
-        job.sourcePaths = { inputInfo.absoluteFilePath() };
-        job.options = currentExportOptions(
-            output, containerType, fastStart, true);
-        job.options.inputPath = job.sourcePaths.first();
-        job.processing = captureProcessingState();
-        mVideoJobs.append(job);
-        ++added;
-    }
     statusBar()->showMessage(
-        QString("Queued %1 batch export job(s)").arg(added));
-    QMessageBox::information(
-        this, "Batch Jobs Queued",
-        QString("%1 job(s) were added. Open File > Job control to review or run them.")
-            .arg(added));
+        QStringLiteral("Queued %1 batch job(s)").arg(dialog.jobs().size()));
+    onFileJobControl();
 }
 
 void VDQtMainWindow::onFileJobControl() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Job Control");
-    dialog.resize(900, 460);
-    QVBoxLayout *layout = new QVBoxLayout(&dialog);
-    auto *table = new QTableWidget(&dialog);
-    table->setColumnCount(4);
-    table->setHorizontalHeaderLabels(
-        { "Status", "Source", "Destination", "Error" });
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
-    table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    layout->addWidget(table);
+    if (!mJobControlWindow)
+        mJobControlWindow = new VDQtJobControlWindow(mJobQueue, this);
+    mJobControlWindow->showAndRaise();
+}
 
-    auto statusText = [](QueuedVideoJob::Status status) {
-        switch (status) {
-        case QueuedVideoJob::Pending: return QStringLiteral("Pending");
-        case QueuedVideoJob::Running: return QStringLiteral("Running");
-        case QueuedVideoJob::Complete: return QStringLiteral("Complete");
-        case QueuedVideoJob::Failed: return QStringLiteral("Failed");
-        case QueuedVideoJob::Cancelled: return QStringLiteral("Cancelled");
-        }
-        return QStringLiteral("Unknown");
-    };
-    auto refresh = [&]() {
-        table->setRowCount(mVideoJobs.size());
-        for (int row = 0; row < mVideoJobs.size(); ++row) {
-            const QueuedVideoJob& job = mVideoJobs.at(row);
-            const QString source = job.sourcePaths.size() > 1
-                ? QString("%1 (+%2 segments)")
-                      .arg(job.sourcePaths.first())
-                      .arg(job.sourcePaths.size() - 1)
-                : job.sourcePaths.value(0);
-            table->setItem(row, 0, new QTableWidgetItem(statusText(job.status)));
-            table->setItem(row, 1, new QTableWidgetItem(source));
-            table->setItem(row, 2, new QTableWidgetItem(job.options.outputPath));
-            table->setItem(row, 3, new QTableWidgetItem(job.error));
+void VDQtMainWindow::stopJobQueue() {
+    if (!mJobQueue || !mJobQueue->isRunning()) return;
+    mQueueStopRequested = true;
+    statusBar()->showMessage(
+        QStringLiteral("The job queue will stop after the current job."));
+}
+
+void VDQtMainWindow::abortCurrentJob() {
+    if (!mJobQueue || !mJobQueue->isRunning()) return;
+    mQueueAbortRequested = true;
+    mQueueStopRequested = true;
+    if (mActiveJobIndex >= 0)
+        mJobQueue->setJobStatus(mActiveJobIndex, VDQtJobStatus::Aborting);
+
+    // VideoExporter owns its progress dialogs while an export is active. The
+    // dialogs are parented to Job Control, so cancelling them also terminates
+    // the associated FFmpeg/decode loop without exposing process internals to
+    // the queue model.
+    const auto cancelProgressDialogs = [](QWidget *root) {
+        if (!root) return;
+        const QList<QProgressDialog *> dialogs =
+            root->findChildren<QProgressDialog *>();
+        for (QProgressDialog *dialog : dialogs) {
+            if (dialog && dialog->isVisible()) dialog->cancel();
         }
     };
-    refresh();
+    cancelProgressDialogs(mJobControlWindow);
+    cancelProgressDialogs(this);
+    for (QWidget *widget : QApplication::topLevelWidgets()) {
+        if (QProgressDialog *dialog = qobject_cast<QProgressDialog *>(widget))
+            if (dialog->isVisible()) dialog->cancel();
+    }
+    statusBar()->showMessage(QStringLiteral("Aborting the current job..."));
+}
 
-    QHBoxLayout *buttons = new QHBoxLayout();
-    auto *runButton = new QPushButton("Run pending", &dialog);
-    auto *retryButton = new QPushButton("Retry failed", &dialog);
-    auto *loadButton = new QPushButton("Load queue...", &dialog);
-    auto *saveButton = new QPushButton("Save queue...", &dialog);
-    auto *removeButton = new QPushButton("Remove selected", &dialog);
-    auto *clearButton = new QPushButton("Clear completed", &dialog);
-    auto *closeButton = new QPushButton("Close", &dialog);
-    buttons->addWidget(runButton);
-    buttons->addWidget(retryButton);
-    buttons->addWidget(loadButton);
-    buttons->addWidget(saveButton);
-    buttons->addWidget(removeButton);
-    buttons->addWidget(clearButton);
-    buttons->addStretch();
-    buttons->addWidget(closeButton);
-    layout->addLayout(buttons);
+void VDQtMainWindow::runPendingJobs() {
+    if (!mJobQueue || mJobQueue->isRunning() || mIsExporting
+        || mJobQueue->pendingCount() <= 0)
+        return;
 
-    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
-    connect(saveButton, &QPushButton::clicked, &dialog, [&]() {
-        QString path = QFileDialog::getSaveFileName(
-            &dialog, "Save Job Queue", QString(),
-            "VirtualDubQT Job Scripts (*.vdqjobs);;All Files (*)");
-        if (path.isEmpty()) return;
-        if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".vdqjobs");
-        if (mVideoDecoder.isOpen()
-            && !loadedOutputSafety(
-                    path, mVideoDecoder, mAudioPlayer, mTimelineSources).isSafe()) {
-            QMessageBox::critical(
-                &dialog, "Unsafe Job Script Path",
-                "The job script path may alias a source in the current session.");
-            return;
+    QString validationError;
+    if (!VDQtJobQueue::validateJobs(mJobQueue->jobs(), &validationError)) {
+        QMessageBox::critical(this, QStringLiteral("Unsafe Job Queue"),
+                              validationError);
+        return;
+    }
+
+    QList<int> unapprovedExisting;
+    QStringList existingNames;
+    for (int row = 0; row < mJobQueue->count(); ++row) {
+        const VDQtJobState *job = mJobQueue->jobAt(row);
+        if (!job || job->status != VDQtJobStatus::Pending
+            || job->operation == VDQtJobOperation::VideoAnalysis
+            || job->replaceExisting || job->options.outputPath.isEmpty())
+            continue;
+        const QFileInfo destination(job->options.outputPath);
+        if (destination.exists() || destination.isSymLink()) {
+            unapprovedExisting.append(row);
+            existingNames.append(destination.absoluteFilePath());
         }
-        for (const QueuedVideoJob& queued : mVideoJobs) {
-            QStringList protectedSources = queued.sourcePaths;
-            if (!queued.audioSourcePath.isEmpty())
-                protectedSources.append(queued.audioSourcePath);
-            VDQtOutputSafetyReport safety =
-                VDQtSourceSafety::evaluateOutputPath(path, protectedSources);
-            for (const QString& source : queued.sourcePaths) {
-                if (VDQtSourceSafety::isScriptPath(source)) {
-                    safety = VDQtSourceSafety::evaluateOutputPath(
-                        path, protectedSources, source);
-                    if (!safety.isSafe()) break;
-                }
+    }
+    if (!unapprovedExisting.isEmpty()) {
+        const QMessageBox::StandardButton answer = QMessageBox::warning(
+            mJobControlWindow ? static_cast<QWidget *>(mJobControlWindow) : this,
+            QStringLiteral("Replace Existing Job Outputs?"),
+            QStringLiteral(
+                "%1 waiting job destination(s) already exist. If replacement is "
+                "approved, each original remains untouched until its replacement "
+                "has completed successfully.\n\n%2")
+                .arg(unapprovedExisting.size())
+                .arg(existingNames.mid(0, 10).join(QLatin1Char('\n'))),
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+            QMessageBox::Cancel);
+        if (answer == QMessageBox::Cancel) return;
+        for (int row : unapprovedExisting) {
+            if (answer == QMessageBox::Yes) {
+                mJobQueue->setReplaceExisting(row, true);
+            } else {
+                mJobQueue->setJobStatus(
+                    row, VDQtJobStatus::Cancelled,
+                    QStringLiteral("The existing destination was not approved for replacement."));
             }
-            if (!safety.isSafe()) {
-                QMessageBox::critical(
-                    &dialog, "Unsafe Job Script Path",
-                    "The job script path aliases, or cannot be distinguished from, "
-                    "one of the queued media sources.");
-                return;
-            }
         }
-        QList<VDQtJobState> jobs;
-        for (const QueuedVideoJob& queued : mVideoJobs) {
-            VDQtJobState job;
-            job.sourcePaths = queued.sourcePaths;
-            job.imageSequenceFps = queued.imageSequenceFps;
-            job.rawPixelFormat = queued.rawPixelFormat;
-            job.rawWidth = queued.rawWidth;
-            job.rawHeight = queued.rawHeight;
-            job.rawFrameRate = queued.rawFrameRate;
-            job.rawByteOffset = queued.rawByteOffset;
-            job.audioSourcePath = queued.audioSourcePath;
-            job.audioStreamIndex = queued.audioStreamIndex;
-            job.audioDisabled = queued.audioDisabled;
-            job.options = queued.options;
-            job.processing = queued.processing;
-            jobs.append(job);
-        }
+    }
+    if (mJobQueue->pendingCount() <= 0) return;
+
+    mPlaybackTimer->stop();
+    mAudioPlayer.stop();
+    const VDQtProcessingState originalProcessing = captureProcessingState();
+    mQueueStopRequested = false;
+    mQueueAbortRequested = false;
+    mIsExporting = true;
+    mJobQueue->setRunning(true, -1);
+
+    for (int row = 0; row < mJobQueue->count(); ++row) {
+        const VDQtJobState *job = mJobQueue->jobAt(row);
+        if (!job || job->status != VDQtJobStatus::Pending) continue;
+        if (mQueueStopRequested) break;
+
+        mActiveJobIndex = row;
+        mQueueAbortRequested = false;
+        mJobQueue->setRunning(true, row);
+        mJobQueue->setJobStatus(row, VDQtJobStatus::Starting);
+        mJobQueue->appendJobLog(
+            row, QStringLiteral("[%1] Starting %2")
+                     .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
+                          VDQtJobQueue::operationText(job->operation)));
+        mJobQueue->setJobStatus(row, VDQtJobStatus::Running);
+        QCoreApplication::processEvents();
+
         QString error;
-        if (!VDQtProjectFile::saveJobQueue(path, jobs, &error))
-            QMessageBox::critical(&dialog, "Save Job Queue Error", error);
-    });
-    connect(loadButton, &QPushButton::clicked, &dialog, [&]() {
-        const QString path = QFileDialog::getOpenFileName(
-            &dialog, "Load Job Queue", QString(),
-            "VirtualDubQT Job Scripts (*.vdqjobs);;All Files (*)");
-        if (path.isEmpty()) return;
-        QList<VDQtJobState> loadedJobs;
-        QString error;
-        if (!VDQtProjectFile::loadJobQueue(path, &loadedJobs, &error)) {
-            QMessageBox::critical(&dialog, "Load Job Queue Error", error);
-            return;
+        const bool succeeded = executeQueuedJob(row, &error);
+        if (mQueueAbortRequested) {
+            mJobQueue->setJobStatus(
+                row, VDQtJobStatus::Cancelled,
+                error.isEmpty() ? QStringLiteral("The job was aborted by the user.")
+                                : error);
+        } else if (succeeded) {
+            mJobQueue->setJobStatus(row, VDQtJobStatus::Complete);
+            mJobQueue->appendJobLog(
+                row, QStringLiteral("[%1] Completed successfully")
+                         .arg(QDateTime::currentDateTime().toString(Qt::ISODate)));
+        } else {
+            if (error.isEmpty()) error = QStringLiteral(
+                "The operation failed. Review the application log for encoder diagnostics.");
+            mJobQueue->setJobStatus(row, VDQtJobStatus::Failed, error);
+            mJobQueue->appendJobLog(
+                row, QStringLiteral("[%1] Failed: %2")
+                         .arg(QDateTime::currentDateTime().toString(Qt::ISODate), error));
         }
-        if (mVideoJobs.size() + loadedJobs.size() > 1000) {
-            QMessageBox::critical(
-                &dialog, "Load Job Queue Error",
-                "Appending this file would exceed the 1000-job session limit.");
-            return;
-        }
-        for (const VDQtJobState& loaded : loadedJobs) {
-            QueuedVideoJob job;
-            job.sourcePaths = loaded.sourcePaths;
-            job.imageSequenceFps = loaded.imageSequenceFps;
-            job.rawPixelFormat = loaded.rawPixelFormat;
-            job.rawWidth = loaded.rawWidth;
-            job.rawHeight = loaded.rawHeight;
-            job.rawFrameRate = loaded.rawFrameRate;
-            job.rawByteOffset = loaded.rawByteOffset;
-            job.audioSourcePath = loaded.audioSourcePath;
-            job.audioStreamIndex = loaded.audioStreamIndex;
-            job.audioDisabled = loaded.audioDisabled;
-            job.options = loaded.options;
-            job.processing = loaded.processing;
-            mVideoJobs.append(job);
-        }
-        refresh();
-    });
-    connect(removeButton, &QPushButton::clicked, &dialog, [&]() {
-        QList<int> rows;
-        for (const QModelIndex& index : table->selectionModel()->selectedRows())
-            rows.append(index.row());
-        std::sort(rows.begin(), rows.end(), std::greater<int>());
-        for (int row : rows) {
-            if (row >= 0 && row < mVideoJobs.size()
-                && mVideoJobs.at(row).status != QueuedVideoJob::Running)
-                mVideoJobs.removeAt(row);
-        }
-        refresh();
-    });
-    connect(clearButton, &QPushButton::clicked, &dialog, [&]() {
-        for (int row = mVideoJobs.size() - 1; row >= 0; --row) {
-            if (mVideoJobs.at(row).status == QueuedVideoJob::Complete)
-                mVideoJobs.removeAt(row);
-        }
-        refresh();
-    });
-    connect(retryButton, &QPushButton::clicked, &dialog, [&]() {
-        for (QueuedVideoJob& job : mVideoJobs) {
-            if (job.status == QueuedVideoJob::Failed
-                || job.status == QueuedVideoJob::Cancelled) {
-                job.status = QueuedVideoJob::Pending;
-                job.error.clear();
-            }
-        }
-        refresh();
-    });
+        mJobQueue->flush(nullptr);
+        QCoreApplication::processEvents();
+        if (mQueueStopRequested) break;
+    }
 
-    connect(runButton, &QPushButton::clicked, &dialog, [&]() {
-        if (mIsExporting) return;
-        mPlaybackTimer->stop();
-        mAudioPlayer.stop();
-        const VDQtProcessingState originalProcessing = captureProcessingState();
-        runButton->setEnabled(false);
-        retryButton->setEnabled(false);
-        loadButton->setEnabled(false);
-        saveButton->setEnabled(false);
-        removeButton->setEnabled(false);
-        clearButton->setEnabled(false);
-        closeButton->setEnabled(false);
-        mIsExporting = true;
+    mActiveJobIndex = -1;
+    mJobQueue->setRunning(false);
+    mIsExporting = false;
+    mQueueAbortRequested = false;
+    mQueueStopRequested = false;
+    applyProcessingState(originalProcessing);
+    mJobQueue->flush(nullptr);
+    statusBar()->showMessage(QStringLiteral("Job queue run finished"));
+    if (mCloseAfterQueueStops) {
+        mCloseAfterQueueStops = false;
+        QTimer::singleShot(0, this, &QWidget::close);
+    }
+}
 
-        for (int row = 0; row < mVideoJobs.size(); ++row) {
-            QueuedVideoJob& job = mVideoJobs[row];
-            if (job.status != QueuedVideoJob::Pending) continue;
-            if (QFileInfo(job.options.outputPath).exists()
-                || QFileInfo(job.options.outputPath).isSymLink()) {
-                const QMessageBox::StandardButton answer = QMessageBox::warning(
-                    &dialog, "Replace Existing Job Output?",
-                    QString("The queued destination exists:\n%1\n\nReplace it only after the new output completes?")
-                        .arg(job.options.outputPath),
-                    QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
-                    QMessageBox::No);
-                if (answer == QMessageBox::Cancel) {
-                    job.status = QueuedVideoJob::Cancelled;
-                    job.error = QStringLiteral("Queue stopped by user.");
-                    refresh();
-                    break;
-                }
-                if (answer != QMessageBox::Yes) {
-                    job.status = QueuedVideoJob::Cancelled;
-                    job.error = QStringLiteral("Existing destination was not replaced.");
-                    refresh();
-                    continue;
-                }
-            }
+bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
+    const VDQtJobState *queuedJob = mJobQueue ? mJobQueue->jobAt(row) : nullptr;
+    if (!queuedJob) {
+        if (errorMessage) *errorMessage = QStringLiteral("The queued job no longer exists.");
+        return false;
+    }
+    const VDQtJobState job = *queuedJob;
+    if (job.sourcePaths.isEmpty()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The job has no source file.");
+        return false;
+    }
+    if (job.operation != VDQtJobOperation::VideoAnalysis) {
+        const QFileInfo output(job.options.outputPath);
+        if ((output.exists() || output.isSymLink()) && !job.replaceExisting) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The destination exists and replacement was not approved.");
+            return false;
+        }
+    }
 
-            job.status = QueuedVideoJob::Running;
-            job.error.clear();
-            refresh();
-            table->scrollToItem(table->item(row, 0));
-            QCoreApplication::processEvents();
+    QStringList allQueueSources;
+    for (const VDQtJobState& candidate : mJobQueue->jobs()) {
+        allQueueSources.append(candidate.sourcePaths);
+        if (!candidate.audioSourcePath.isEmpty())
+            allQueueSources.append(candidate.audioSourcePath);
+    }
+    allQueueSources.removeDuplicates();
+    const bool destinationExistedAtStart = !job.options.outputPath.isEmpty()
+        && (QFileInfo(job.options.outputPath).exists()
+            || QFileInfo(job.options.outputPath).isSymLink());
+    if (!job.options.outputPath.isEmpty()) {
+        const VDQtOutputSafetyReport safety = VDQtSourceSafety::evaluateOutputPath(
+            job.options.outputPath, allQueueSources,
+            VDQtSourceSafety::isScriptPath(job.sourcePaths.value(0))
+                ? job.sourcePaths.value(0) : QString());
+        if (!safety.isSafe()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The destination aliases a queued source or cannot be safely audited.");
+            return false;
+        }
+    }
 
-            applyProcessingState(job.processing);
-            QTemporaryDir timelineDirectory;
-            QString inputPath = job.sourcePaths.value(0);
-            QString preparationError;
-            if (job.sourcePaths.size() > 1) {
-                if (!timelineDirectory.isValid()) {
-                    preparationError = QStringLiteral(
-                        "Could not create a temporary concatenated timeline.");
-                } else {
-                    inputPath = timelineDirectory.filePath(
-                        QStringLiteral("job.ffconcat"));
-                    const bool manifestWritten = job.imageSequenceFps > 0.0
-                        ? writeImageSequenceManifest(
-                            inputPath, job.sourcePaths, job.imageSequenceFps,
-                            &preparationError)
-                        : writeConcatManifest(
-                            inputPath, job.sourcePaths, &preparationError);
-                    if (!manifestWritten)
-                        inputPath.clear();
-                }
-            }
-            if (preparationError.isEmpty() && !job.rawPixelFormat.isEmpty()) {
-                QString materializedRawPath;
-                if (!materializeRawVideo(
-                        job.sourcePaths.value(0), job.rawPixelFormat,
-                        job.rawWidth, job.rawHeight, job.rawFrameRate,
-                        job.rawByteOffset, &materializedRawPath,
-                        &preparationError)) {
-                    inputPath.clear();
-                } else {
-                    inputPath = materializedRawPath;
-                }
-            }
+    const auto prepareQueuedStage = [&](QString *stagePath) {
+        if (!stagePath || job.options.outputPath.isEmpty()) return false;
+        QTemporaryFile reservation(stagedOutputTemplate(job.options.outputPath));
+        if (!reservation.open()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "A staging path could not be reserved beside the destination.");
+            return false;
+        }
+        *stagePath = reservation.fileName();
+        reservation.close();
+        if (!QFile::remove(*stagePath)) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The reserved staging path could not be prepared.");
+            return false;
+        }
+        return true;
+    };
+    const auto commitQueuedStage = [&](const QString& stagePath) {
+        const VDQtOutputSafetyReport safety = VDQtSourceSafety::evaluateOutputPath(
+            job.options.outputPath, allQueueSources,
+            VDQtSourceSafety::isScriptPath(job.sourcePaths.value(0))
+                ? job.sourcePaths.value(0) : QString());
+        if (!safety.isSafe()) {
+            QFile::remove(stagePath);
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The destination became unsafe while the job was running; the staged result was discarded.");
+            return false;
+        }
+        const QFileInfo currentDestination(job.options.outputPath);
+        if ((currentDestination.exists() || currentDestination.isSymLink())
+            && !destinationExistedAtStart && !job.replaceExisting) {
+            QFile::remove(stagePath);
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "A destination appeared while the job was running; it was not replaced.");
+            return false;
+        }
+        if (!replaceWithStagedFile(stagePath, job.options.outputPath)) {
+            QFile::remove(stagePath);
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The completed staged result could not be committed to its destination.");
+            return false;
+        }
+        return true;
+    };
 
-            VDQtVideoDecoder decoder;
-            decoder.setDecompressionConfig(
+    applyProcessingState(job.processing);
+    QTemporaryDir timelineDirectory;
+    QString inputPath = job.sourcePaths.first();
+    if (job.sourcePaths.size() > 1) {
+        if (!timelineDirectory.isValid()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "A temporary timeline directory could not be created.");
+            return false;
+        }
+        inputPath = timelineDirectory.filePath(QStringLiteral("job.ffconcat"));
+        const bool written = job.imageSequenceFps > 0.0
+            ? writeImageSequenceManifest(inputPath, job.sourcePaths,
+                                         job.imageSequenceFps, errorMessage)
+            : writeConcatManifest(inputPath, job.sourcePaths, errorMessage);
+        if (!written) return false;
+    }
+    if (!job.rawPixelFormat.isEmpty()) {
+        QString materialized;
+        if (!materializeRawVideo(
+                job.sourcePaths.first(), job.rawPixelFormat, job.rawWidth,
+                job.rawHeight, job.rawFrameRate, job.rawByteOffset,
+                &materialized, errorMessage))
+            return false;
+        inputPath = materialized;
+    }
+
+    VDQtVideoDecoder decoder;
+    decoder.setDecompressionConfig(
+        job.processing.decompression.formatName,
+        job.processing.decompression.colorSpace,
+        job.processing.decompression.componentRange);
+    decoder.setErrorMode(job.processing.decoderErrorMode.errorMode);
+    if (!decoder.openFile(inputPath)) {
+        if (errorMessage) {
+            *errorMessage = decoder.getLastError().isEmpty()
+                ? QStringLiteral("The video source could not be opened.")
+                : decoder.getLastError();
+        }
+        return false;
+    }
+
+    VDQtVideoDecoder avsAudioDecoder;
+    VDQtAudioPlayer audioPlayer;
+    const bool needsAudio = job.operation == VDQtJobOperation::VideoExport
+                         || job.operation == VDQtJobOperation::AudioExport;
+    bool audioPrepared = !needsAudio || job.audioDisabled;
+    if (needsAudio && !job.audioDisabled && !job.audioSourcePath.isEmpty()) {
+        audioPrepared = audioPlayer.openFile(
+            job.audioSourcePath, job.audioStreamIndex) && audioPlayer.hasAudio();
+    } else if (needsAudio && !job.audioDisabled && job.audioStreamIndex >= 0
+               && !decoder.isAvsNative()) {
+        audioPrepared = audioPlayer.openFile(inputPath, job.audioStreamIndex)
+                     && audioPlayer.hasAudio();
+    } else if (needsAudio && !job.audioDisabled && decoder.isAvsNative()) {
+        const AVS_VideoInfo *videoInfo = decoder.getAvsVi();
+        audioPrepared = !videoInfo || !avs_has_audio(videoInfo);
+        if (videoInfo && avs_has_audio(videoInfo)) {
+            avsAudioDecoder.setDecompressionConfig(
                 job.processing.decompression.formatName,
                 job.processing.decompression.colorSpace,
                 job.processing.decompression.componentRange);
-            decoder.setErrorMode(job.processing.decoderErrorMode.errorMode);
-            VDQtVideoDecoder avsAudioDecoder;
-            VDQtAudioPlayer audioPlayer;
-            bool prepared = preparationError.isEmpty() && !inputPath.isEmpty()
-                && decoder.openFile(inputPath);
-            if (!prepared && preparationError.isEmpty())
-                preparationError = decoder.getLastError();
-            if (prepared && job.audioDisabled) {
-                // An explicit no-audio choice is part of the job snapshot.
-            } else if (prepared && !job.audioSourcePath.isEmpty()) {
-                prepared = audioPlayer.openFile(
-                    job.audioSourcePath, job.audioStreamIndex)
-                    && audioPlayer.hasAudio();
-                if (!prepared)
-                    preparationError = QStringLiteral(
-                        "Could not open the queued external audio source.");
-            } else if (prepared && job.audioStreamIndex >= 0
-                       && !decoder.isAvsNative()) {
-                prepared = audioPlayer.openFile(inputPath, job.audioStreamIndex)
-                    && audioPlayer.hasAudio();
-                if (!prepared)
-                    preparationError = QStringLiteral(
-                        "Could not open the queued embedded audio stream.");
-            } else if (prepared && decoder.isAvsNative()) {
-                const AVS_VideoInfo *videoInfo = decoder.getAvsVi();
-                if (videoInfo && avs_has_audio(videoInfo)) {
-                    avsAudioDecoder.setDecompressionConfig(
-                        job.processing.decompression.formatName,
-                        job.processing.decompression.colorSpace,
-                        job.processing.decompression.componentRange);
-                    avsAudioDecoder.setErrorMode(
-                        job.processing.decoderErrorMode.errorMode);
-                    prepared = avsAudioDecoder.openFile(inputPath)
-                        && audioPlayer.openAvsClip(
-                            avsAudioDecoder.getAvsClip(), avsAudioDecoder.getAvsVi());
-                    if (!prepared)
-                        preparationError = QStringLiteral(
-                            "Could not open the queued AviSynth audio graph.");
-                }
-            } else if (prepared) {
-                // A missing/undecodable audio stream remains acceptable for
-                // direct copy and video-only sources; the exporter probes and
-                // enforces full-processing audio requirements independently.
-                audioPlayer.openFile(inputPath);
-            }
-
-            bool ok = false;
-            if (prepared) {
-                VDQtVideoExporter exporter;
-                VDQtVideoExporter::ExportOptions options = job.options;
-                options.inputPath = inputPath;
-                options.protectedSourcePaths = job.sourcePaths;
-                ok = exporter.exportVideo(
-                    options, &decoder, &audioPlayer, &dialog);
-            }
-            if (ok) {
-                job.status = QueuedVideoJob::Complete;
-            } else {
-                job.status = QueuedVideoJob::Failed;
-                job.error = preparationError.isEmpty()
-                    ? QStringLiteral("Export failed or was cancelled.")
-                    : preparationError;
-            }
-            refresh();
-            QCoreApplication::processEvents();
+            avsAudioDecoder.setErrorMode(job.processing.decoderErrorMode.errorMode);
+            audioPrepared = avsAudioDecoder.openFile(inputPath)
+                && audioPlayer.openAvsClip(
+                    avsAudioDecoder.getAvsClip(), avsAudioDecoder.getAvsVi());
         }
+    } else if (needsAudio && !job.audioDisabled) {
+        audioPrepared = audioPlayer.openFile(inputPath) && audioPlayer.hasAudio();
+    }
 
-        applyProcessingState(originalProcessing);
-        mIsExporting = false;
-        runButton->setEnabled(true);
-        retryButton->setEnabled(true);
-        loadButton->setEnabled(true);
-        saveButton->setEnabled(true);
-        removeButton->setEnabled(true);
-        clearButton->setEnabled(true);
-        closeButton->setEnabled(true);
-        statusBar()->showMessage(QString("Job queue run finished"));
-    });
+    const auto progress = [this, row](int completed, int total) {
+        const double fraction = total > 0
+            ? std::clamp(static_cast<double>(completed) / total, 0.0, 1.0)
+            : 0.0;
+        mJobQueue->setJobProgress(row, fraction);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+        return !mQueueAbortRequested;
+    };
 
-    dialog.exec();
+    switch (job.operation) {
+    case VDQtJobOperation::VideoExport: {
+        if (!audioPrepared && job.options.includeAudio
+            && job.options.audioMode == AudioMode_FullProcessing) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The selected audio source could not be opened for full processing.");
+            return false;
+        }
+        VDQtVideoExporter::ExportOptions options = job.options;
+        options.inputPath = inputPath;
+        options.protectedSourcePaths = allQueueSources;
+        options.unattended = true;
+        QString queuedStage;
+        if (!prepareQueuedStage(&queuedStage)) return false;
+        options.outputPath = queuedStage;
+        VDQtVideoExporter exporter;
+        const bool result = exporter.exportVideo(
+            options, &decoder, &audioPlayer,
+            mJobControlWindow ? static_cast<QWidget *>(mJobControlWindow) : this,
+            nullptr, progress);
+        if (!result && exporter.wasCancelled()) {
+            mQueueAbortRequested = true;
+            mQueueStopRequested = true;
+        }
+        if (!result && errorMessage && errorMessage->isEmpty())
+            *errorMessage = exporter.lastError();
+        if (!result) {
+            QFile::remove(queuedStage);
+            return false;
+        }
+        return commitQueuedStage(queuedStage);
+    }
+    case VDQtJobOperation::RawVideoExport: {
+        VDQtVideoExporter::RawExportOptions options;
+        options.inputPath = inputPath;
+        options.protectedSourcePaths = allQueueSources;
+        options.startFrame = job.options.startFrame;
+        options.endFrame = job.options.endFrame;
+        options.customFps = job.options.customFps;
+        options.convertFpsPreserveDuration = job.options.convertFpsPreserveDuration;
+        options.decimateFactor = job.options.decimateFactor;
+        options.pixelFormat = job.processing.rawVideo.pixelFormat;
+        options.scanlineAlignment = job.processing.rawVideo.scanlineAlignment;
+        options.swapChromaPlanes = job.processing.rawVideo.swapChromaPlanes;
+        options.bottomUp = job.processing.rawVideo.bottomUp;
+        options.colorMatrix = job.processing.rawVideo.colorMatrix;
+        options.fullRange = job.processing.rawVideo.fullRange;
+        options.unattended = true;
+        options.timelineSegments = job.options.timelineSegments;
+        QString queuedStage;
+        if (!prepareQueuedStage(&queuedStage)) return false;
+        options.outputPath = queuedStage;
+        VDQtVideoExporter exporter;
+        const bool result = exporter.exportRawVideo(
+            options, &decoder, &audioPlayer,
+            mJobControlWindow ? static_cast<QWidget *>(mJobControlWindow) : this,
+            progress);
+        if (!result && exporter.wasCancelled()) {
+            mQueueAbortRequested = true;
+            mQueueStopRequested = true;
+        }
+        if (!result && errorMessage && errorMessage->isEmpty())
+            *errorMessage = exporter.lastError();
+        if (!result) {
+            QFile::remove(queuedStage);
+            return false;
+        }
+        return commitQueuedStage(queuedStage);
+    }
+    case VDQtJobOperation::AudioExport: {
+        if (!audioPrepared || !audioPlayer.hasAudio()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The queued source has no decodable audio stream.");
+            return false;
+        }
+        int64_t startSample = 0;
+        int64_t sampleCount = -1;
+        if (job.options.endFrame >= job.options.startFrame
+            && job.options.endFrame >= 0) {
+            const double fps = std::max(1.0, decoder.getFps());
+            double start = decoder.getFrameTimestampSeconds(job.options.startFrame);
+            double end = decoder.getFrameTimestampSeconds(job.options.endFrame);
+            const double duration =
+                decoder.getFrameDurationSeconds(job.options.endFrame);
+            if (!std::isfinite(start)) start = job.options.startFrame / fps;
+            if (!std::isfinite(end)) end = job.options.endFrame / fps;
+            end += std::isfinite(duration) && duration > 0.0
+                ? duration : 1.0 / fps;
+            startSample = std::max<int64_t>(
+                0, static_cast<int64_t>(std::llround(
+                       start * audioPlayer.getSampleRate())));
+            sampleCount = std::max<int64_t>(
+                1, static_cast<int64_t>(std::llround(
+                       (end - start) * audioPlayer.getSampleRate())));
+        }
+        QString queuedStage;
+        if (!prepareQueuedStage(&queuedStage)) return false;
+        const bool result = audioPlayer.exportAudioToFile(
+            queuedStage, startSample, sampleCount, progress);
+        if (!result) {
+            QFile::remove(queuedStage);
+            if (mQueueAbortRequested && errorMessage)
+                *errorMessage = QStringLiteral("Audio export was aborted.");
+            return false;
+        }
+        return commitQueuedStage(queuedStage);
+    }
+    case VDQtJobOperation::ImageSequenceExport: {
+        VDQtJobState mutableJob = job;
+        return executeImageSequenceJob(mutableJob, decoder, errorMessage);
+    }
+    case VDQtJobOperation::VideoAnalysis: {
+        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(progress);
+        if (scan.cancelled) {
+            if (errorMessage) *errorMessage = QStringLiteral("Video analysis was aborted.");
+            return false;
+        }
+        if (!scan.errorMessage.isEmpty()) {
+            if (errorMessage) *errorMessage = scan.errorMessage;
+            return false;
+        }
+        mJobQueue->appendJobLog(
+            row, QStringLiteral(
+                     "Analysis indexed %1 frame(s); %2 bad and %3 masked frame(s); %4 key frame(s).")
+                     .arg(scan.totalFrames).arg(scan.badFrames)
+                     .arg(scan.maskedFrames).arg(scan.keyFrames));
+        return true;
+    }
+    }
+    if (errorMessage) *errorMessage = QStringLiteral("Unknown queued operation.");
+    return false;
+}
+
+bool VDQtMainWindow::executeImageSequenceJob(
+    VDQtJobState& job,
+    VDQtVideoDecoder& decoder,
+    QString *errorMessage) {
+    int totalFrames = decoder.getFrameCount();
+    if (!decoder.isAvsNative()) {
+        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
+            [this](int completed, int total) {
+                if (mActiveJobIndex >= 0) {
+                    const double fraction = total > 0
+                        ? 0.1 * std::clamp(
+                              static_cast<double>(completed) / total, 0.0, 1.0)
+                        : 0.0;
+                    mJobQueue->setJobProgress(mActiveJobIndex, fraction);
+                }
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+                return !mQueueAbortRequested;
+            });
+        if (scan.cancelled) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "Image-sequence indexing was aborted.");
+            return false;
+        }
+        if (!scan.errorMessage.isEmpty()) {
+            if (errorMessage) *errorMessage = scan.errorMessage;
+            return false;
+        }
+        totalFrames = decoder.getFrameCount();
+    }
+    if (totalFrames <= 0) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The source has no decodable video frames.");
+        return false;
+    }
+
+    VDQtTimeline timeline;
+    timeline.reset(totalFrames, true);
+    if (!job.options.timelineSegments.isEmpty()
+        && !timeline.replaceSegments(job.options.timelineSegments, errorMessage, true))
+        return false;
+    const int timelineFrames = static_cast<int>(timeline.frameCount());
+    const bool explicitRange = job.options.endFrame >= job.options.startFrame
+                            && job.options.endFrame >= 0;
+    if (timelineFrames <= 0 || (explicitRange
+        && (job.options.startFrame < 0 || job.options.startFrame >= timelineFrames))) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The requested image-sequence range is outside the source timeline.");
+        return false;
+    }
+    const int first = explicitRange ? job.options.startFrame : 0;
+    const int last = explicitRange
+        ? std::min(job.options.endFrame, timelineFrames - 1)
+        : timelineFrames - 1;
+    const VDFilterTimingInfo timing =
+        VDQtFilterSystem::instance().getTimingInfo();
+    if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0
+        || last - first + 1 > std::numeric_limits<int>::max()
+                              / timing.outputFramesPerInput) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The active temporal filter chain has an unsupported output size.");
+        return false;
+    }
+    const int outputCount =
+        (last - first + 1) * timing.outputFramesPerInput;
+    const QFileInfo baseInfo(job.options.outputPath);
+    const QString directory = baseInfo.absolutePath();
+    const QString baseName = baseInfo.completeBaseName().isEmpty()
+        ? QStringLiteral("frame") : baseInfo.completeBaseName();
+    QString extension = job.imageExtension.trimmed().toLower();
+    if (extension.isEmpty()) extension = baseInfo.suffix().toLower();
+    if (extension.isEmpty()) extension = QStringLiteral("png");
+
+    QStringList allSources;
+    for (const VDQtJobState& candidate : mJobQueue->jobs()) {
+        allSources.append(candidate.sourcePaths);
+        if (!candidate.audioSourcePath.isEmpty())
+            allSources.append(candidate.audioSourcePath);
+    }
+    allSources.removeDuplicates();
+    QStringList targets;
+    QSet<QString> existingTargets;
+    targets.reserve(outputCount);
+    for (int index = 0; index < outputCount; ++index) {
+        const QString target = QDir(directory).filePath(
+            QStringLiteral("%1_%2.%3")
+                .arg(baseName)
+                .arg(static_cast<qint64>(job.imageStartIndex) + index,
+                     std::max(1, job.imageMinimumDigits), 10, QLatin1Char('0'))
+                .arg(extension));
+        if (!VDQtSourceSafety::evaluateOutputPath(target, allSources).isSafe()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "A generated image path aliases a queued source or cannot be safely audited.");
+            return false;
+        }
+        const QFileInfo targetInfo(target);
+        if ((targetInfo.exists() || targetInfo.isSymLink())
+            && !job.replaceExisting) {
+            if (errorMessage) *errorMessage = QString(
+                "Generated destination already exists and replacement was not approved:\n%1")
+                .arg(target);
+            return false;
+        }
+        if (targetInfo.exists() || targetInfo.isSymLink())
+            existingTargets.insert(target);
+        targets.append(target);
+    }
+
+    QTemporaryDir staging(
+        QDir(directory).filePath(QStringLiteral(".virtualdub-batch-images-XXXXXX")));
+    if (!staging.isValid()) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "A staging directory could not be created beside the destination.");
+        return false;
+    }
+    QStringList staged;
+    staged.reserve(outputCount);
+    int rendered = 0;
+    for (int timelineFrame = first; timelineFrame <= last; ++timelineFrame) {
+        if (mQueueAbortRequested) return false;
+        const qint64 sourceFrame = timeline.mapOutputToSource(timelineFrame);
+        QImage raw = decoder.getFrameImage(static_cast<int>(sourceFrame));
+        if (raw.isNull()) {
+            if (errorMessage) *errorMessage = QString(
+                "Frame %1 could not be decoded.").arg(sourceFrame);
+            return false;
+        }
+        QList<QImage> filtered;
+        if (!VDQtFilterSystem::instance().processFrameSequence(raw, filtered)
+            || filtered.size() != timing.outputFramesPerInput) {
+            if (errorMessage) *errorMessage = QString(
+                "The filter chain failed at timeline frame %1.").arg(timelineFrame);
+            return false;
+        }
+        for (const QImage& image : filtered) {
+            const QString path = staging.filePath(
+                QStringLiteral("frame_%1.%2")
+                    .arg(rendered, 8, 10, QLatin1Char('0')).arg(extension));
+            if (image.isNull() || !image.save(path, nullptr, job.imageQuality)) {
+                if (errorMessage) *errorMessage = QString(
+                    "Image %1 could not be encoded.").arg(rendered);
+                return false;
+            }
+            staged.append(path);
+            ++rendered;
+            mJobQueue->setJobProgress(
+                mActiveJobIndex,
+                0.1 + 0.9 * static_cast<double>(rendered) / outputCount);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            if (mQueueAbortRequested) return false;
+        }
+    }
+
+    const QString backupDirectory = staging.filePath(QStringLiteral("backups"));
+    if (!QDir().mkpath(backupDirectory)) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "Transactional image backups could not be prepared.");
+        return false;
+    }
+    // Revalidate after the potentially long render. A path that appeared in
+    // the meantime was never part of the user's replacement approval.
+    for (const QString& target : targets) {
+        if (!VDQtSourceSafety::evaluateOutputPath(target, allSources).isSafe()) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "A generated image destination became unsafe while rendering; no files were changed.");
+            return false;
+        }
+        const QFileInfo targetInfo(target);
+        if ((targetInfo.exists() || targetInfo.isSymLink())
+            && !existingTargets.contains(target)) {
+            if (errorMessage) *errorMessage = QString(
+                "A new image destination appeared while rendering; no files were changed:\n%1")
+                .arg(target);
+            return false;
+        }
+    }
+    QVector<QPair<QString, QString>> backups;
+    QStringList committed;
+    const auto rollback = [&]() {
+        bool restored = true;
+        for (auto it = committed.crbegin(); it != committed.crend(); ++it)
+            restored = QFile::remove(*it) && restored;
+        for (auto it = backups.crbegin(); it != backups.crend(); ++it)
+            restored = QFile::rename(it->second, it->first) && restored;
+        return restored;
+    };
+    for (int index = 0; index < targets.size(); ++index) {
+        const QFileInfo existing(targets.at(index));
+        if (!existing.exists() && !existing.isSymLink()) continue;
+        const QString backup =
+            QDir(backupDirectory).filePath(QString::number(index));
+        QFile::setPermissions(staged.at(index), existing.permissions());
+        if (!QFile::rename(targets.at(index), backup)) {
+            rollback();
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "An existing image could not be backed up; no new sequence was committed.");
+            return false;
+        }
+        backups.append(qMakePair(targets.at(index), backup));
+    }
+    for (int index = 0; index < targets.size(); ++index) {
+        if (!QFile::rename(staged.at(index), targets.at(index))) {
+            const bool restored = rollback();
+            if (errorMessage) *errorMessage = restored
+                ? QStringLiteral("The completed image sequence could not be committed; previous files were restored.")
+                : QStringLiteral("The image commit failed and automatic rollback was incomplete.");
+            return false;
+        }
+        committed.append(targets.at(index));
+    }
+    return true;
+}
+
+void VDQtMainWindow::reloadQueuedJob(int row) {
+    if (!mJobQueue || mJobQueue->isRunning()) return;
+    const VDQtJobState *job = mJobQueue->jobAt(row);
+    if (!job || job->sourcePaths.isEmpty()) return;
+
+    QString inputPath = job->sourcePaths.first();
+    QString error;
+    if (job->sourcePaths.size() > 1) {
+        inputPath = mTimelineTempDirectory.filePath(
+            QStringLiteral("reloaded-job.ffconcat"));
+        const bool written = job->imageSequenceFps > 0.0
+            ? writeImageSequenceManifest(
+                  inputPath, job->sourcePaths, job->imageSequenceFps, &error)
+            : writeConcatManifest(inputPath, job->sourcePaths, &error);
+        if (!written) {
+            QMessageBox::critical(this, QStringLiteral("Reload Job Error"), error);
+            return;
+        }
+    }
+    if (!job->rawPixelFormat.isEmpty()) {
+        if (!materializeRawVideo(
+                job->sourcePaths.first(), job->rawPixelFormat,
+                job->rawWidth, job->rawHeight, job->rawFrameRate,
+                job->rawByteOffset, &inputPath, &error)) {
+            QMessageBox::critical(this, QStringLiteral("Reload Job Error"), error);
+            return;
+        }
+    }
+    if (!openVideoFile(inputPath)) return;
+    applyProcessingState(job->processing);
+    mTimelineSources = job->sourcePaths;
+    mImageSequenceFps = job->imageSequenceFps;
+    mRawInputPixelFormat = job->rawPixelFormat;
+    mRawInputWidth = job->rawWidth;
+    mRawInputHeight = job->rawHeight;
+    mRawInputFrameRate = job->rawFrameRate;
+    mRawInputByteOffset = job->rawByteOffset;
+    if (!job->options.timelineSegments.isEmpty()) {
+        if (!ensureExactFrameRange(QStringLiteral("queued edit list"))
+            || !mTimeline.replaceSegments(job->options.timelineSegments, &error, true)) {
+            QMessageBox::critical(
+                this, QStringLiteral("Reload Job Error"),
+                error.isEmpty() ? QStringLiteral("The queued edit list is invalid.") : error);
+            return;
+        }
+        updateTimelineView(0, true);
+    }
+    mAudioSourcePath = job->audioSourcePath;
+    mAudioStreamIndex = job->audioStreamIndex;
+    mAudioDisabled = job->audioDisabled;
+    if (mAudioDisabled) {
+        mAudioPlayer.close();
+    } else if (!mAudioSourcePath.isEmpty()) {
+        mAudioPlayer.close();
+        if (!mAudioPlayer.openFile(mAudioSourcePath, mAudioStreamIndex)) {
+            QMessageBox::warning(
+                this, QStringLiteral("Reload Job Audio"),
+                QStringLiteral("The video and processing settings were restored, but the external audio source could not be opened."));
+        }
+    } else if (mAudioStreamIndex >= 0 && !mVideoDecoder.isAvsNative()) {
+        mAudioPlayer.close();
+        if (!mAudioPlayer.openFile(inputPath, mAudioStreamIndex)) {
+            QMessageBox::warning(
+                this, QStringLiteral("Reload Job Audio"),
+                QStringLiteral("The video and processing settings were restored, but the selected embedded audio stream could not be opened."));
+        }
+    }
+    if (job->options.endFrame >= job->options.startFrame
+        && job->options.endFrame >= 0) {
+        mPositionControl->SetSelection(
+            job->options.startFrame,
+            static_cast<qint64>(job->options.endFrame) + 1);
+        mPositionControl->SetPosition(job->options.startFrame);
+    } else {
+        mPositionControl->SetSelection(0, 0);
+        mPositionControl->SetPosition(0);
+    }
+    statusBar()->showMessage(
+        QStringLiteral("Reloaded queued job: %1").arg(job->name));
 }
 
 void VDQtMainWindow::onFileStartFrameServer() {
@@ -2697,6 +3062,26 @@ void VDQtMainWindow::onFileStopFrameServer() {
 }
 
 void VDQtMainWindow::closeEvent(QCloseEvent *event) {
+    if (mJobQueue && mJobQueue->isRunning()) {
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("Job Queue Running"),
+            QStringLiteral("Abort the current job and close the application?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+        mCloseAfterQueueStops = true;
+        abortCurrentJob();
+        event->ignore();
+        return;
+    }
+    if (mJobQueue) {
+        QString error;
+        if (!mJobQueue->flush(&error) && !error.isEmpty())
+            VDLogWindow::instance(this)->appendLog(
+                QStringLiteral("[Job queue] Save failed: %1").arg(error));
+    }
     QMainWindow::closeEvent(event);
 }
 
@@ -2747,28 +3132,18 @@ void VDQtMainWindow::onFileSaveAVI() {
         VDQtVideoExporter::ExportOptions opts = currentExportOptions(
             savePath, dlg.getSelectedContainerType(), dlg.isFastStartEnabled());
         if (dlg.addToJobQueue()) {
-            if (mVideoJobs.size() >= 1000) {
-                QMessageBox::warning(
-                    this, "Job Queue Full",
-                    "The session job queue is limited to 1000 entries.");
+            VDQtJobState job = currentJobTemplate();
+            job.operation = VDQtJobOperation::VideoExport;
+            job.options = opts;
+            job.replaceExisting = videoTarget.exists() || videoTarget.isSymLink();
+            job.name = QStringLiteral("%1 - Video export")
+                .arg(QFileInfo(primarySessionSourcePath()).completeBaseName());
+            QString queueError;
+            if (!mJobQueue->addJobs({job}, &queueError)) {
+                QMessageBox::critical(this, QStringLiteral("Job Queue Error"),
+                                      queueError);
                 return;
             }
-            QueuedVideoJob job;
-            job.sourcePaths = mTimelineSources;
-            if (job.sourcePaths.isEmpty())
-                job.sourcePaths = { mVideoDecoder.getFilePath() };
-            job.imageSequenceFps = mImageSequenceFps;
-            job.rawPixelFormat = mRawInputPixelFormat;
-            job.rawWidth = mRawInputWidth;
-            job.rawHeight = mRawInputHeight;
-            job.rawFrameRate = mRawInputFrameRate;
-            job.rawByteOffset = mRawInputByteOffset;
-            job.audioSourcePath = mAudioSourcePath;
-            job.audioStreamIndex = mAudioStreamIndex;
-            job.audioDisabled = mAudioDisabled;
-            job.options = opts;
-            job.processing = captureProcessingState();
-            mVideoJobs.append(job);
             statusBar()->showMessage(
                 QString("Queued video export: %1").arg(QFileInfo(savePath).fileName()));
             QMessageBox::information(

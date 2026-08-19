@@ -10,6 +10,9 @@
 #include "VDQtCodecSettings.h"
 #include "VDQtPositionControl.h"
 #include "VDQtProjectFile.h"
+#include "VDQtJobQueue.h"
+#include "VDQtBatchWizard.h"
+#include "VDQtJobControl.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoExporter.h"
 #include "VDQtSourceSafety.h"
@@ -240,6 +243,18 @@ int main(int argc, char **argv) {
                      "render a non-contiguous edited timeline"))
             return 1;
 
+        VDQtVideoExporter::ExportOptions cancelledOptions = options;
+        cancelledOptions.outputPath = settingsDirectory.filePath(
+            QStringLiteral("cancelled_queue_export.nut"));
+        VDQtVideoExporter cancelledExporter;
+        if (!require(!cancelledExporter.exportVideo(
+                         cancelledOptions, &sourceDecoder, nullptr, nullptr,
+                         nullptr, [](int, int) { return false; })
+                     && cancelledExporter.wasCancelled()
+                     && !QFileInfo::exists(cancelledOptions.outputPath),
+                     "queue progress callback aborts video export without committing output"))
+            return 1;
+
         VDQtVideoDecoder outputDecoder;
         if (!require(outputDecoder.openFile(outputPath),
                      "open edited timeline render output"))
@@ -411,6 +426,17 @@ int main(int argc, char **argv) {
             return 1;
 
         VDQtJobState queuedJob;
+        queuedJob.id = QStringLiteral("job-video-1");
+        queuedJob.name = QStringLiteral("Round-trip video job");
+        queuedJob.operation = VDQtJobOperation::VideoExport;
+        queuedJob.status = VDQtJobStatus::Complete;
+        queuedJob.startedAtUtc = QDateTime::fromString(
+            QStringLiteral("2026-08-19T01:02:03.000Z"), Qt::ISODateWithMs);
+        queuedJob.endedAtUtc = QDateTime::fromString(
+            QStringLiteral("2026-08-19T01:03:04.000Z"), Qt::ISODateWithMs);
+        queuedJob.progress = 1.0;
+        queuedJob.logEntries = {QStringLiteral("completed")};
+        queuedJob.replaceExisting = true;
         queuedJob.sourcePaths = project.sourcePaths;
         queuedJob.imageSequenceFps = project.imageSequenceFps;
         queuedJob.audioSourcePath = project.audioSourcePath;
@@ -427,6 +453,11 @@ int main(int argc, char **argv) {
         queuedJob.options.containerType = QStringLiteral("mkv");
         queuedJob.processing = state;
         VDQtJobState rawQueuedJob = queuedJob;
+        rawQueuedJob.id = QStringLiteral("job-raw-2");
+        rawQueuedJob.name = QStringLiteral("Interrupted raw job");
+        rawQueuedJob.operation = VDQtJobOperation::RawVideoExport;
+        rawQueuedJob.status = VDQtJobStatus::Running;
+        rawQueuedJob.progress = 0.25;
         rawQueuedJob.sourcePaths = {project.sourcePath};
         rawQueuedJob.imageSequenceFps = 0.0;
         rawQueuedJob.rawPixelFormat = QStringLiteral("rgb24");
@@ -448,6 +479,14 @@ int main(int argc, char **argv) {
                          jobPath, &loadedJobs, &stateError),
                      "load executable job script")
             || !require(loadedJobs.size() == 2
+                        && loadedJobs.first().id == QStringLiteral("job-video-1")
+                        && loadedJobs.first().name == QStringLiteral("Round-trip video job")
+                        && loadedJobs.first().operation == VDQtJobOperation::VideoExport
+                        && loadedJobs.first().status == VDQtJobStatus::Complete
+                        && loadedJobs.first().progress == 1.0
+                        && loadedJobs.first().replaceExisting
+                        && loadedJobs.first().logEntries
+                               == QStringList{QStringLiteral("completed")}
                         && loadedJobs.first().sourcePaths.size() == 2
                         && loadedJobs.first().audioSourcePath
                                == QDir::cleanPath(project.audioSourcePath)
@@ -460,6 +499,11 @@ int main(int argc, char **argv) {
                         && loadedJobs.first().processing.filters.size() == 1
                         && loadedJobs.first().processing.audioFilters.size() == 1
                         && loadedJobs.at(1).sourcePaths.size() == 1
+                        && loadedJobs.at(1).operation
+                               == VDQtJobOperation::RawVideoExport
+                        && loadedJobs.at(1).status == VDQtJobStatus::Interrupted
+                        && loadedJobs.at(1).error.contains(
+                               QStringLiteral("exited while this job was running"))
                         && loadedJobs.at(1).rawPixelFormat == QStringLiteral("rgb24")
                         && loadedJobs.at(1).rawWidth == 640
                         && loadedJobs.at(1).rawHeight == 360
@@ -467,6 +511,83 @@ int main(int argc, char **argv) {
                                     - 24000.0 / 1001.0) < 1e-9
                         && loadedJobs.at(1).rawByteOffset == 4096,
                         "job script round-trips media sources, raw input, export range, and processing"))
+            return 1;
+
+        VDQtJobQueue queue;
+        if (!require(queue.replaceJobs(loadedJobs, &stateError),
+                     "load typed jobs into persistent queue model")
+            || !require(queue.count() == 2 && queue.pendingCount() == 0,
+                        "queue retains terminal and interrupted runtime states")
+            || !require(queue.moveJob(1, 0)
+                        && queue.jobAt(0)->id == QStringLiteral("job-raw-2"),
+                        "queue supports deterministic job reordering"))
+            return 1;
+        queue.retryFailed();
+        if (!require(queue.pendingCount() == 1
+                     && queue.jobAt(0)->status == VDQtJobStatus::Pending,
+                     "interrupted jobs can be explicitly returned to waiting")
+            || !require(queue.setJobStatus(0, VDQtJobStatus::Postponed)
+                        && queue.pendingCount() == 0,
+                        "postponed jobs are excluded from execution")
+            || !require(queue.setJobStatus(0, VDQtJobStatus::Pending)
+                        && queue.pendingCount() == 1,
+                        "postponed jobs can be resumed"))
+            return 1;
+
+        VDQtJobState unsafeOutput = queuedJob;
+        unsafeOutput.id = QStringLiteral("unsafe-job");
+        unsafeOutput.status = VDQtJobStatus::Pending;
+        unsafeOutput.options.outputPath = rawQueuedJob.sourcePaths.first();
+        if (!require(!VDQtJobQueue::validateJobs(
+                         {queuedJob, rawQueuedJob, unsafeOutput}, &stateError),
+                     "whole-queue validation rejects an output that aliases another job source"))
+            return 1;
+
+        VDQtJobState duplicateOutput = rawQueuedJob;
+        duplicateOutput.id = QStringLiteral("duplicate-output-job");
+        duplicateOutput.options.outputPath = queuedJob.options.outputPath;
+        if (!require(!VDQtJobQueue::validateJobs(
+                         {queuedJob, duplicateOutput}, &stateError),
+                     "whole-queue validation rejects duplicate destinations"))
+            return 1;
+
+        const QString batchSource = settingsDirectory.filePath(
+            QStringLiteral("batch-source.mkv"));
+        if (!require(writeFile(batchSource, QByteArray("fixture")),
+                     "create batch-wizard source fixture"))
+            return 1;
+        VDQtJobState batchTemplate = queuedJob;
+        batchTemplate.audioDisabled = true;
+        batchTemplate.options.startFrame = 25;
+        batchTemplate.options.endFrame = 40;
+        batchTemplate.options.timelineSegments = {
+            VDQtTimelineSegment{25, 16}
+        };
+        VDQtBatchWizardDialog wizard(batchTemplate, {});
+        wizard.addSourceFiles({batchSource});
+        if (!require(QMetaObject::invokeMethod(
+                         &wizard, "acceptJobs", Qt::DirectConnection),
+                     "generate batch jobs through the wizard")
+            || !require(wizard.jobs().size() == 1
+                        && wizard.jobs().first().sourcePaths
+                               == QStringList{QFileInfo(batchSource).absoluteFilePath()}
+                        && wizard.jobs().first().options.startFrame == 0
+                        && wizard.jobs().first().options.endFrame == -1
+                        && wizard.jobs().first().options.timelineSegments.isEmpty()
+                        && QFileInfo(wizard.jobs().first().options.outputPath).fileName()
+                               == QStringLiteral("batch-source_output.mkv")
+                        && wizard.jobs().first().audioDisabled
+                        && !wizard.jobs().first().options.includeAudio,
+                        "batch jobs use each complete source and never inherit the loaded clip edit list"))
+            return 1;
+
+        VDQtJobTableModel jobModel(&queue);
+        if (!require(jobModel.columnCount() == 6
+                     && jobModel.headerData(0, Qt::Horizontal).toString()
+                            == QStringLiteral("Name")
+                     && jobModel.headerData(5, Qt::Horizontal).toString()
+                            == QStringLiteral("Status"),
+                     "job-control model exposes the original six-column workflow"))
             return 1;
 
         const QString malformedPath = settingsDirectory.filePath(

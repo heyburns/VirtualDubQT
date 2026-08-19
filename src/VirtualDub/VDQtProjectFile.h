@@ -9,6 +9,7 @@
 #include "VDQtVideoExporter.h"
 
 #include <QMap>
+#include <QDateTime>
 #include <QString>
 #include <QStringList>
 
@@ -49,7 +50,37 @@ struct VDQtProjectState {
     VDQtProcessingState processing;
 };
 
+enum class VDQtJobOperation {
+    VideoExport = 0,
+    AudioExport,
+    RawVideoExport,
+    ImageSequenceExport,
+    VideoAnalysis
+};
+
+enum class VDQtJobStatus {
+    Pending = 0,
+    Starting,
+    Running,
+    Aborting,
+    Complete,
+    Postponed,
+    Cancelled,
+    Failed,
+    Interrupted
+};
+
 struct VDQtJobState {
+    QString id;
+    QString name;
+    VDQtJobOperation operation = VDQtJobOperation::VideoExport;
+    VDQtJobStatus status = VDQtJobStatus::Pending;
+    QDateTime startedAtUtc;
+    QDateTime endedAtUtc;
+    double progress = 0.0;
+    QString error;
+    QStringList logEntries;
+    bool replaceExisting = false;
     QStringList sourcePaths;
     double imageSequenceFps = 0.0;
     QString rawPixelFormat;
@@ -60,6 +91,10 @@ struct VDQtJobState {
     QString audioSourcePath;
     int audioStreamIndex = -1;
     bool audioDisabled = false;
+    QString imageExtension = QStringLiteral("png");
+    int imageQuality = -1;
+    int imageMinimumDigits = 6;
+    int imageStartIndex = 0;
     VDQtVideoExporter::ExportOptions options;
     VDQtProcessingState processing;
 };

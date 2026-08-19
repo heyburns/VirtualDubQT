@@ -871,7 +871,11 @@ bool VDQtVideoExporter::exportRawVideo(
     VDQtAudioPlayer *audioPlayer,
     QWidget *parentWidget,
     std::function<bool(int completedFrames, int totalFrames)> progressCallback) {
-    const auto reportError = [parentWidget](const QString& message) {
+    mWasCancelled = false;
+    mLastError.clear();
+    if (options.unattended) parentWidget = nullptr;
+    const auto reportError = [this, parentWidget](const QString& message) {
+        mLastError = message;
         qWarning() << "[Raw Export]" << message;
         if (parentWidget)
             QMessageBox::critical(parentWidget, "Raw Video Export Error", message);
@@ -949,7 +953,10 @@ bool VDQtVideoExporter::exportRawVideo(
             });
         const bool indexingCancelled = indexingProgress.wasCanceled();
         indexingProgress.close();
-        if (scan.cancelled || indexingCancelled) return false;
+        if (scan.cancelled || indexingCancelled) {
+            mWasCancelled = true;
+            return false;
+        }
         if (!scan.errorMessage.isEmpty()) {
             reportError(scan.errorMessage);
             return false;
@@ -1177,7 +1184,10 @@ bool VDQtVideoExporter::exportRawVideo(
     stagedOutput.close();
     progress.close();
 
-    if (cancelled) return false;
+    if (cancelled) {
+        mWasCancelled = true;
+        return false;
+    }
     if (failed || completedFrames != framesToExport) {
         reportError(writeError.isEmpty()
             ? QStringLiteral("Raw video export stopped before all frames were written.")
@@ -1201,8 +1211,19 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     VDQtVideoDecoder *activeDecoder,
                                     VDQtAudioPlayer *audioPlayer,
                                     QWidget *parentWidget,
-                                    std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback) {
-    if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) return false;
+                                    std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback,
+                                    std::function<bool(int completedFrames, int totalFrames)> progressCallback) {
+    mWasCancelled = false;
+    mLastError.clear();
+    if (options.unattended) parentWidget = nullptr;
+    if (progressCallback && !progressCallback(0, 1000)) {
+        mWasCancelled = true;
+        return false;
+    }
+    if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) {
+        mLastError = QStringLiteral("The video export source or destination path is empty.");
+        return false;
+    }
     int videoMode = options.videoMode;
     int audioMode = options.audioMode;
     const bool editedTimeline = !options.timelineSegments.isEmpty();
@@ -1218,6 +1239,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             audioMode = AudioMode_FullProcessing;
     }
     if (VDQtSourceSafety::pathsReferToSameFile(options.inputPath, options.outputPath)) {
+        mLastError = QStringLiteral("The output file aliases the active source.");
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsafe Output Path",
                                   "The output file is the currently loaded source. Choose a different path.");
@@ -1225,6 +1247,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         return false;
     }
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty()) {
+        mLastError = QStringLiteral("The ffmpeg executable was not found in PATH.");
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "FFmpeg Not Available",
                                   "The ffmpeg executable was not found in PATH.");
@@ -1247,6 +1270,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         QString err;
         if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(
                 selectedVideoParams.codecId, &err)) {
+            mLastError = err;
             if (parentWidget) QMessageBox::critical(parentWidget, "Video Encoder Not Available", err);
             return false;
         }
@@ -1256,6 +1280,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     VDQtVideoDecoder &decoder = (activeDecoder && activeDecoder->isOpen()) ? *activeDecoder : localDecoder;
     if (!decoder.isOpen()) {
         if (!decoder.openFile(options.inputPath)) {
+            mLastError = decoder.getLastError().isEmpty()
+                ? QStringLiteral("The source video could not be opened.")
+                : decoder.getLastError();
             return false;
         }
     }
@@ -1272,6 +1299,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     const VDQtOutputSafetyReport outputSafety = VDQtSourceSafety::evaluateOutputPath(
         options.outputPath, directlyLoadedSources, scriptPath);
     if (!outputSafety.isSafe()) {
+        mLastError = outputSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource
+            ? QStringLiteral("The output aliases a loaded or script-referenced source.")
+            : QStringLiteral("An existing script-backed output cannot be safely audited.");
         if (parentWidget) {
             const bool aliases = outputSafety.issue
                 == VDQtOutputSafetyIssue::AliasesLoadedSource;
@@ -1298,6 +1328,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (!decoder.isAvsNative()) {
         sourceAudioProbe = probeAudioStream(options.inputPath);
         if (!sourceAudioProbe.succeeded) {
+            mLastError = QStringLiteral("Audio stream probe failed: %1")
+                .arg(sourceAudioProbe.error);
             if (parentWidget) {
                 QMessageBox::critical(parentWidget, "Audio Stream Probe Failed",
                                       QString("The source audio streams could not be inspected safely:\n%1")
@@ -1327,6 +1359,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (options.includeAudio && nativeSourceHasAudio
         && audioMode != AudioMode_DirectStreamCopy
         && !selectedProcessedAudio) {
+        mLastError = QStringLiteral(
+            "The source audio stream could not be opened for full processing.");
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Audio Decoder Not Available",
                                   "The source contains audio, but it could not be opened for full processing. "
@@ -1343,6 +1377,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             : aParams.codecId;
         QString err;
         if (!VDQtCodecEngine::instance().checkAudioEncoderAvailable(audioCodec, &err)) {
+            mLastError = err;
             if (parentWidget) QMessageBox::critical(parentWidget, "Audio Encoder Not Available", err);
             return false;
         }
@@ -1364,7 +1399,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         indexingProgress.setMinimumDuration(0);
 
         const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
-            [&indexingProgress, totalFrames](int current, int reportedTotal) {
+            [&indexingProgress, totalFrames, &progressCallback](
+                int current, int reportedTotal) {
                 if (totalFrames > 0) {
                     const int maximum = std::max(totalFrames, reportedTotal);
                     indexingProgress.setRange(0, maximum);
@@ -1375,11 +1411,22 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                         QString("Indexing source frames... %1 decoded").arg(current));
                 }
                 QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
-                return !indexingProgress.wasCanceled();
+                const int maximum = std::max({1, totalFrames, reportedTotal});
+                return !indexingProgress.wasCanceled()
+                    && (!progressCallback
+                        || progressCallback(
+                            static_cast<int>(std::min<qint64>(
+                                100, static_cast<qint64>(current) * 100
+                                         / maximum)),
+                            1000));
             });
         indexingProgress.close();
-        if (scan.cancelled) return false;
+        if (scan.cancelled) {
+            mWasCancelled = true;
+            return false;
+        }
         if (!scan.errorMessage.isEmpty()) {
+            mLastError = scan.errorMessage;
             if (parentWidget)
                 QMessageBox::critical(parentWidget, "Export Error", scan.errorMessage);
             return false;
@@ -1394,6 +1441,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         totalFrames = 1;
     }
     if (totalFrames <= 0) {
+        mLastError = QStringLiteral("The source has no decodable video frames.");
         if (parentWidget)
             QMessageBox::critical(parentWidget, "Export Error", "The source has no decodable video frames.");
         return false;
@@ -1405,12 +1453,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (editedTimeline
         && !renderTimeline.replaceSegments(
             options.timelineSegments, &timelineError, true)) {
+        mLastError = timelineError;
         if (parentWidget)
             QMessageBox::critical(parentWidget, "Timeline Export Error", timelineError);
         return false;
     }
     const int timelineFrames = static_cast<int>(renderTimeline.frameCount());
     if (timelineFrames <= 0) {
+        mLastError = QStringLiteral("The edited timeline contains no frames.");
         if (parentWidget)
             QMessageBox::critical(parentWidget, "Timeline Export Error",
                                   "The edited timeline contains no frames.");
@@ -1421,6 +1471,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     };
     if (explicitFrameRange
         && (options.startFrame < 0 || options.startFrame >= timelineFrames)) {
+        mLastError = QString(
+            "The requested selection starts at frame %1, but the timeline contains only %2 frame(s).")
+            .arg(options.startFrame).arg(timelineFrames);
         if (parentWidget) {
             QMessageBox::critical(
                 parentWidget, "Export Range Error",
@@ -1679,6 +1732,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                 });
             audioProgress.close();
             if (!prepared) {
+                if (audioProgress.wasCanceled()) mWasCancelled = true;
                 removePartialOutput(processOutputPath);
                 if (!audioProgress.wasCanceled() && parentWidget) {
                     QMessageBox::critical(
@@ -1807,6 +1861,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             0, 0, parentWidget);
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
+        if (progressCallback && !progressCallback(100, 1000)) {
+            mWasCancelled = true;
+            return false;
+        }
 
         // QProcess connects the producer's stdout directly to the encoder's
         // stdin, so planar frames never accumulate in application memory.
@@ -1834,11 +1892,15 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             && validOutputFile(processOutputPath);
         const bool success = processOk && outputStillSafe()
                           && replaceWithStagedFile(processOutputPath, options.outputPath);
+        if (cancelled) mWasCancelled = true;
         progress.setRange(0, 100);
         progress.setValue(100);
         progress.close();
         if (!success) {
             removePartialOutput(processOutputPath);
+            mLastError = processOk
+                ? QStringLiteral("The completed output could not be committed to its destination.")
+                : QString::fromUtf8(diagnostics).trimmed();
             if (!cancelled && parentWidget) {
                 QString message = processOk
                     ? QStringLiteral(
@@ -1854,6 +1916,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                 QMessageBox::critical(parentWidget, "Fast Recompress Failed", message);
             }
         }
+        if (success && progressCallback) progressCallback(1000, 1000);
         return success;
     }
 
@@ -1974,6 +2037,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
         progress.setValue(30);
+        if (progressCallback && !progressCallback(100, 1000)) {
+            mWasCancelled = true;
+            return false;
+        }
 
         ffmpeg.start("ffmpeg", args);
         if (!ffmpeg.waitForStarted(3000)) {
@@ -1985,9 +2052,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                             && validOutputFile(processOutputPath);
         const bool ok = processOk && outputStillSafe()
                      && replaceWithStagedFile(processOutputPath, options.outputPath);
+        if (cancelled) mWasCancelled = true;
         progress.setValue(100);
         if (!ok) {
             removePartialOutput(processOutputPath);
+            mLastError = processOk
+                ? QStringLiteral("The completed output could not be committed to its destination.")
+                : QString::fromUtf8(diagnostics).trimmed();
             if (!cancelled && parentWidget) {
                 QMessageBox::critical(parentWidget, "Direct Copy Failed",
                                       processOk
@@ -1995,12 +2066,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                           : QString::fromUtf8(diagnostics).trimmed());
             }
         }
+        if (ok && progressCallback) progressCallback(1000, 1000);
         return ok;
     }
 
     // Determine output resolution (reflecting any Resize filter if Full Processing Mode)
     QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
     if (sampleFrame.isNull()) {
+        mLastError = QStringLiteral("The first selected video frame could not be decoded.");
         return false;
     }
 
@@ -2186,6 +2259,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         if (audioPrepared) {
             qDebug() << "[Exporter] Successfully prepared audio stream for export (samples:" << startSample << "count:" << sampleCount << "):" << tempAudioPath;
         } else {
+            if (audioCancelled) mWasCancelled = true;
             if (!audioCancelled && parentWidget) {
                 QMessageBox::critical(parentWidget, "Audio Export Error",
                                       "The requested processed audio range could not be decoded. "
@@ -2464,6 +2538,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             .arg(static_cast<int>(remainingSec)));
 
         QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+        if (progressCallback
+            && !progressCallback(100 + doneCount * 850
+                                      / std::max(1, framesToExport),
+                                 1000)) {
+            cancelled = true;
+            break;
+        }
     }
 
     bool processOk = false;
@@ -2493,6 +2574,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                       && doneCount == framesToExport && validOutputFile(processOutputPath);
     const bool success = encoded && outputStillSafe()
                       && replaceWithStagedFile(processOutputPath, options.outputPath);
+    if (cancelled) mWasCancelled = true;
     if (!success) {
         removePartialOutput(processOutputPath);
         QString errOutput = QString::fromUtf8(diagnostics);
@@ -2501,6 +2583,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         if (writeFailed && errOutput.trimmed().isEmpty())
             errOutput = "The FFmpeg input pipe closed before all frames were written.";
         qWarning() << "[Exporter] FFmpeg export error:" << errOutput;
+        mLastError = errOutput.trimmed();
         VDLogWindow::instance(parentWidget)->appendLog(QString("[Export Error] %1").arg(errOutput));
         if (parentWidget && !cancelled) {
             QString userMsg = "Video export failed.\n\n";
@@ -2514,6 +2597,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             QMessageBox::critical(parentWidget, "Export Error", userMsg);
         }
     }
+
+    if (success && progressCallback) progressCallback(1000, 1000);
 
     return success;
 }
