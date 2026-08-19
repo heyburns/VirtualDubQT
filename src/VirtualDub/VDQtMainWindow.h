@@ -59,6 +59,7 @@ private Q_SLOTS:
     void onViewLogWindow();
 
     void onVideoModeDirectStream();
+    void onVideoModeFastRecompress();
     void onVideoModeNormalRecompress();
     void onVideoModeFullProcessing();
     void onVideoDecodeFormat();
@@ -141,6 +142,7 @@ private:
     QAction *mRecentSeparator;
 
     QAction *actVideoDirectStream;
+    QAction *actVideoFastRecompress;
     QAction *actVideoNormalRecompress;
     QAction *actVideoFullProcessing;
     QAction *actVideoCompression;

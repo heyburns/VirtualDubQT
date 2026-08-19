@@ -255,6 +255,12 @@ void VDQtMainWindow::createMenus() {
     actVideoDirectStream->setCheckable(true);
     grpVideoMode->addAction(actVideoDirectStream);
 
+    actVideoFastRecompress = mVideo->addAction("Fast recompress", this, &VDQtMainWindow::onVideoModeFastRecompress);
+    actVideoFastRecompress->setCheckable(true);
+    actVideoFastRecompress->setToolTip(
+        "Recompress through FFmpeg's native pixel formats without RGB conversion or video filters.");
+    grpVideoMode->addAction(actVideoFastRecompress);
+
     actVideoNormalRecompress = mVideo->addAction("Normal recompress", this, &VDQtMainWindow::onVideoModeNormalRecompress);
     actVideoNormalRecompress->setCheckable(true);
     grpVideoMode->addAction(actVideoNormalRecompress);
@@ -1495,6 +1501,14 @@ void VDQtMainWindow::onVideoModeDirectStream() {
     actVideoDirectStream->setChecked(true);
     statusBar()->showMessage("Video Mode: Direct Stream Copy (Bypasses video codecs & filters)");
     VDLogWindow::instance(this)->appendLog("[Video] Mode set to Direct Stream Copy");
+}
+
+void VDQtMainWindow::onVideoModeFastRecompress() {
+    mVideoMode = VideoMode_FastRecompress;
+    actVideoFastRecompress->setChecked(true);
+    statusBar()->showMessage(
+        "Video Mode: Fast Recompress (Native pixel formats; video filters bypassed)");
+    VDLogWindow::instance(this)->appendLog("[Video] Mode set to Fast Recompress");
 }
 
 void VDQtMainWindow::onVideoModeNormalRecompress() {

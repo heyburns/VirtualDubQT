@@ -839,6 +839,67 @@ int main(int argc, char **argv) {
             worker, [worker]() { worker->closeSource(); }, Qt::BlockingQueuedConnection);
         decodeThread.quit();
         decodeThread.wait();
+
+        VDVideoCodecParams fastParams =
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("ffv1"));
+        fastParams.pixFmt = QStringLiteral("yuv420p");
+        fastParams.ffv1Slices = 4;
+        VDQtCodecEngine::instance().setVideoParams(fastParams);
+        const QString fastSelectionPath =
+            settingsDirectory.filePath(QStringLiteral("nonzero_bframes_fast_selection.mkv"));
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = fixturePath;
+        options.outputPath = fastSelectionPath;
+        options.startFrame = 5;
+        options.endFrame = 8;
+        options.videoMode = VideoMode_FastRecompress;
+        options.containerType = QStringLiteral("mkv");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder),
+                     "fast recompress exact B-frame selection"))
+            return 1;
+
+        QByteArray selectedReference;
+        QByteArray selectedOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), fixturePath,
+                           QStringLiteral("-vf"), QStringLiteral("select=eq(n\\,5)"),
+                           QStringLiteral("-frames:v"), QStringLiteral("1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                           QStringLiteral("-f"), QStringLiteral("rawvideo"), QStringLiteral("-") },
+                         &ffmpegError, &selectedReference),
+                     "decode fast selection source reference")
+            || !require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), fastSelectionPath,
+                           QStringLiteral("-frames:v"), QStringLiteral("1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                           QStringLiteral("-f"), QStringLiteral("rawvideo"), QStringLiteral("-") },
+                         &ffmpegError, &selectedOutput),
+                     "decode fast selection first output frame")
+            || !require(!selectedReference.isEmpty()
+                        && selectedReference == selectedOutput,
+                        "fast recompress begins on the exact selected B-frame"))
+            return 1;
+
+        QByteArray frameCountOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"), QStringLiteral("stream=nb_read_frames"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"),
+                           fastSelectionPath },
+                         &ffmpegError, &frameCountOutput),
+                     "probe fast B-frame selection count")
+            || !require(frameCountOutput.trimmed() == QByteArray("4"),
+                        "fast recompress honors the exclusive four-frame selection"))
+            return 1;
+        VDQtCodecEngine::instance().resetToDefaults();
     }
 
     {
@@ -899,6 +960,67 @@ int main(int argc, char **argv) {
                      "probe filtered 10-bit export")
             || !require(pixelFormatOutput.trimmed() == QByteArray("yuv420p10le"),
                         "filtered export retains 10-bit output precision"))
+            return 1;
+
+        // Fast recompress must keep FFmpeg-native planar video out of the
+        // QImage/filter path. FFV1 makes the bypass observable byte-for-byte:
+        // the active grayscale filter would otherwise change this color frame.
+        VDVideoCodecParams fastParams =
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("ffv1"));
+        fastParams.pixFmt = QStringLiteral("yuv420p10le");
+        fastParams.ffv1Slices = 4;
+        VDQtCodecEngine::instance().setVideoParams(fastParams);
+        const QString fastOutput =
+            settingsDirectory.filePath(QStringLiteral("ten_bit_fast_recompress.mkv"));
+        options.outputPath = fastOutput;
+        options.videoMode = VideoMode_FastRecompress;
+        int fastFrameCallbacks = 0;
+        if (!require(exporter.exportVideo(
+                         options, &decoder, nullptr, nullptr,
+                         [&fastFrameCallbacks](int, const QImage&, const QImage&) {
+                             ++fastFrameCallbacks;
+                         }),
+                     "fast recompress 10-bit native-planar video")
+            || !require(fastFrameCallbacks == 0,
+                        "fast recompress bypasses the QImage frame callback path"))
+            return 1;
+
+        QByteArray sourceRgb;
+        QByteArray fastRgb;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), fixturePath,
+                           QStringLiteral("-frames:v"), QStringLiteral("1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                           QStringLiteral("-f"), QStringLiteral("rawvideo"), QStringLiteral("-") },
+                         &ffmpegError, &sourceRgb),
+                     "decode source reference for fast recompress")
+            || !require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), fastOutput,
+                           QStringLiteral("-frames:v"), QStringLiteral("1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                           QStringLiteral("-f"), QStringLiteral("rawvideo"), QStringLiteral("-") },
+                         &ffmpegError, &fastRgb),
+                     "decode fast recompress result")
+            || !require(!sourceRgb.isEmpty() && sourceRgb == fastRgb,
+                        "fast recompress bypasses the active grayscale filter without RGB loss"))
+            return 1;
+
+        pixelFormatOutput.clear();
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"), QStringLiteral("stream=pix_fmt"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"),
+                           fastOutput },
+                         &ffmpegError, &pixelFormatOutput),
+                     "probe fast recompress pixel format")
+            || !require(pixelFormatOutput.trimmed() == QByteArray("yuv420p10le"),
+                        "fast recompress retains native 10-bit planar precision"))
             return 1;
         VDQtFilterSystem::instance().clearFilters();
         VDQtCodecEngine::instance().resetToDefaults();
@@ -969,6 +1091,70 @@ int main(int argc, char **argv) {
             std::cerr << avsAudioError.toStdString() << '\n';
             return 1;
         }
+    }
+
+    {
+        const QString scriptPath =
+            settingsDirectory.filePath(QStringLiteral("fast_recompress_planar.avs"));
+        const QString outputPath =
+            settingsDirectory.filePath(QStringLiteral("fast_recompress_planar.mkv"));
+        const QByteArray script =
+            "BlankClip(length=5, width=64, height=48, fps=25, "
+            "pixel_type=\"YUV420P10\", audio_rate=48000, channels=1, "
+            "sample_type=\"16bit\")\n";
+        if (!require(writeFile(scriptPath, script),
+                     "write AviSynth fast recompress script"))
+            return 1;
+
+        VDQtVideoDecoder decoder;
+        VDQtAudioPlayer audioPlayer;
+        if (!require(decoder.openFile(scriptPath),
+                     "open AviSynth fast recompress script")) {
+            std::cerr << decoder.getLastError().toStdString() << '\n';
+            return 1;
+        }
+        if (!require(audioPlayer.openAvsClip(decoder.getAvsClip(), decoder.getAvsVi()),
+                     "open AviSynth audio for fast recompress"))
+            return 1;
+
+        VDVideoCodecParams videoParams =
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("ffv1"));
+        videoParams.pixFmt = QStringLiteral("yuv420p10le");
+        videoParams.ffv1Slices = 4;
+        VDQtCodecEngine::instance().setVideoParams(videoParams);
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = scriptPath;
+        options.outputPath = outputPath;
+        options.videoMode = VideoMode_FastRecompress;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        options.containerType = QStringLiteral("mkv");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder, &audioPlayer),
+                     "fast recompress native AviSynth planar video and audio"))
+            return 1;
+
+        QByteArray ffmpegError;
+        QByteArray probeOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=codec_type,codec_name,pix_fmt,nb_read_frames"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"), outputPath },
+                         &ffmpegError, &probeOutput),
+                     "probe AviSynth fast recompress output")
+            || !require(probeOutput.contains("codec_type=video")
+                        && probeOutput.contains("codec_name=ffv1")
+                        && probeOutput.contains("pix_fmt=yuv420p10le")
+                        && probeOutput.contains("nb_read_frames=5")
+                        && probeOutput.contains("codec_type=audio")
+                        && probeOutput.contains("codec_name=pcm_s16le"),
+                        "AviSynth fast recompress retains planar depth and script audio")) {
+            std::cerr << probeOutput.constData() << '\n';
+            return 1;
+        }
+        VDQtCodecEngine::instance().resetToDefaults();
     }
 
     {
@@ -1149,12 +1335,19 @@ int main(int argc, char **argv) {
             int endFrame;
             int decimate;
             bool bob;
+            int videoMode;
+            double customFps;
+            bool convertFps;
             int expectedFrames;
             const char *expectedDuration;
         } vfrVariants[] = {
-            { "selection", 1, 2, 1, false, 2, "2.000" },
-            { "decimation", 0, -1, 2, false, 2, "2.100" },
-            { "bob", 0, -1, 1, true, 6, "2.100" }
+            { "selection", 1, 2, 1, false, VideoMode_NormalRecompress, 0.0, false, 2, "2.000" },
+            { "decimation", 0, -1, 2, false, VideoMode_NormalRecompress, 0.0, false, 2, "2.100" },
+            { "bob", 0, -1, 1, true, VideoMode_FullProcessing, 0.0, false, 6, "2.100" },
+            { "fast", 0, -1, 1, false, VideoMode_FastRecompress, 0.0, false, 3, "2.100" },
+            { "fast_selection", 1, 2, 1, false, VideoMode_FastRecompress, 0.0, false, 2, "2.000" },
+            { "fast_decimation", 0, -1, 2, false, VideoMode_FastRecompress, 0.0, false, 2, "2.100" },
+            { "fast_cfr_conversion", 0, -1, 1, false, VideoMode_FastRecompress, 10.0, true, 21, "2.100" }
         };
         codecs.setVideoParams(VDQtCodecEngine::getDefaultVideoParamsForCodec(
             QStringLiteral("libx264")));
@@ -1169,8 +1362,9 @@ int main(int argc, char **argv) {
             options.startFrame = variant.startFrame;
             options.endFrame = variant.endFrame;
             options.decimateFactor = variant.decimate;
-            options.videoMode = variant.bob
-                ? VideoMode_FullProcessing : VideoMode_NormalRecompress;
+            options.videoMode = variant.videoMode;
+            options.customFps = variant.customFps;
+            options.convertFpsPreserveDuration = variant.convertFps;
             if (!require(exporter.exportVideo(options, &decoder),
                          "export VFR selection/decimation/temporal-filter variant"))
                 return 1;
@@ -1279,6 +1473,160 @@ int main(int argc, char **argv) {
             std::cerr << audioProbeOutput.constData() << '\n';
             return 1;
         }
+
+        VDQtCodecEngine::instance().setVideoParams(
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("libx264")));
+        const QString fastOutput =
+            settingsDirectory.filePath(QStringLiteral("fast_recompress_selected_audio.mkv"));
+        options.outputPath = fastOutput;
+        options.startFrame = 5;
+        options.endFrame = 14;
+        options.videoMode = VideoMode_FastRecompress;
+        if (!require(exporter.exportVideo(options, &decoder, &audioPlayer),
+                     "fast recompress exact selection with processed audio"))
+            return 1;
+
+        QByteArray fastProbeOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=index,codec_type,codec_name,pix_fmt,sample_rate,channels,nb_read_frames:format=duration"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"), fastOutput },
+                         &ffmpegError, &fastProbeOutput),
+                     "probe selected fast recompress output")
+            || !require(fastProbeOutput.contains("codec_type=video")
+                        && fastProbeOutput.contains("codec_name=h264")
+                        && fastProbeOutput.contains("nb_read_frames=10")
+                        && fastProbeOutput.contains("codec_type=audio")
+                        && fastProbeOutput.contains("codec_name=aac")
+                        && fastProbeOutput.contains("sample_rate=44100")
+                        && fastProbeOutput.contains("channels=1"),
+                        "fast recompress retains selected frames, duration, and audio settings")) {
+            std::cerr << fastProbeOutput.constData() << '\n';
+            return 1;
+        }
+        double fastContainerDuration = -1.0;
+        for (const QByteArray& line : fastProbeOutput.split('\n')) {
+            if (line.startsWith("duration="))
+                fastContainerDuration = line.mid(sizeof("duration=") - 1).toDouble();
+        }
+        // AAC's final coded frame can extend the mux duration by up to one
+        // 1024-sample packet even though the video selection is exactly 1.0s.
+        if (!require(fastContainerDuration >= 1.0 && fastContainerDuration <= 1.03,
+                     "fast recompress bounds processed audio to one codec frame past video")) {
+            std::cerr << fastProbeOutput.constData() << '\n';
+            return 1;
+        }
+
+        const QString fastCopyAudioOutput =
+            settingsDirectory.filePath(QStringLiteral("fast_recompress_copied_audio.mkv"));
+        options.outputPath = fastCopyAudioOutput;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        if (!require(exporter.exportVideo(options, &decoder, &audioPlayer),
+                     "fast recompress exact selection with copied compressed audio"))
+            return 1;
+        QByteArray fastCopyProbe;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=codec_type,codec_name,nb_read_frames"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                           fastCopyAudioOutput },
+                         &ffmpegError, &fastCopyProbe),
+                     "probe fast recompress copied-audio output")
+            || !require(fastCopyProbe.contains("codec_type=video")
+                        && fastCopyProbe.contains("codec_name=h264")
+                        && fastCopyProbe.contains("nb_read_frames=10")
+                        && fastCopyProbe.contains("codec_type=audio")
+                        && fastCopyProbe.contains("codec_name=aac"),
+                        "fast recompress supports compressed audio stream copy")) {
+            std::cerr << fastCopyProbe.constData() << '\n';
+            return 1;
+        }
+        VDQtCodecEngine::instance().resetToDefaults();
+    }
+
+    {
+        const QString sourcePath =
+            settingsDirectory.filePath(QStringLiteral("fast_offset_source.mkv"));
+        const QString outputPath =
+            settingsDirectory.filePath(QStringLiteral("fast_offset_output.mkv"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("testsrc2=size=64x48:rate=10:duration=2"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"),
+                           QStringLiteral("aevalsrc=if(lt(t\\,2)\\,0\\,0.5*sin(2*PI*440*t)):s=48000:d=4"),
+                           QStringLiteral("-filter_complex"), QStringLiteral("[0:v]setpts=PTS+2/TB[v]"),
+                           QStringLiteral("-map"), QStringLiteral("[v]"),
+                           QStringLiteral("-map"), QStringLiteral("1:a:0"),
+                           QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-copyts"),
+                           QStringLiteral("-avoid_negative_ts"), QStringLiteral("disabled"),
+                           QStringLiteral("-y"), sourcePath },
+                         &ffmpegError),
+                     "create delayed-video fast recompress fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoDecoder decoder;
+        VDQtAudioPlayer audioPlayer;
+        if (!require(decoder.openFile(sourcePath) && audioPlayer.openFile(sourcePath),
+                     "open delayed-video fast recompress fixture"))
+            return 1;
+
+        VDVideoCodecParams videoParams =
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(QStringLiteral("ffv1"));
+        videoParams.pixFmt = QStringLiteral("yuv420p");
+        videoParams.ffv1Slices = 4;
+        VDQtCodecEngine::instance().setVideoParams(videoParams);
+        VDAudioCodecParams audioParams;
+        audioParams.codecId = QStringLiteral("pcm_s16le");
+        audioParams.sampleRate = 48000;
+        audioParams.channels = 1;
+        audioParams.bitDepth = 16;
+        VDQtCodecEngine::instance().setAudioParams(audioParams);
+
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = sourcePath;
+        options.outputPath = outputPath;
+        options.videoMode = VideoMode_FastRecompress;
+        options.audioMode = AudioMode_FullProcessing;
+        options.containerType = QStringLiteral("mkv");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder, &audioPlayer),
+                     "fast recompress aligns audio to a delayed video origin"))
+            return 1;
+
+        QByteArray leadingAudio;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-i"), outputPath,
+                           QStringLiteral("-map"), QStringLiteral("0:a:0"),
+                           QStringLiteral("-t"), QStringLiteral("0.1"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-f"), QStringLiteral("s16le"), QStringLiteral("-") },
+                         &ffmpegError, &leadingAudio),
+                     "decode leading fast recompress audio"))
+            return 1;
+        const qsizetype nonZeroBytes = std::count_if(
+            leadingAudio.cbegin(), leadingAudio.cend(),
+            [](char value) { return value != 0; });
+        if (!require(leadingAudio.size() >= 9000
+                     && nonZeroBytes > leadingAudio.size() / 3,
+                     "fast recompress removes pre-video silence using the common media origin"))
+            return 1;
         VDQtCodecEngine::instance().resetToDefaults();
     }
 

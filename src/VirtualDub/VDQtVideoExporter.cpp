@@ -110,6 +110,152 @@ VDAudioCodecParams configuredAudioParams()
     return VDQtCodecEngine::audioParamsFromConfig(fallback);
 }
 
+bool appendVideoEncoderArguments(QStringList& args,
+                                 const VDVideoCodecParams& params,
+                                 int sourceBitDepth,
+                                 bool sourceHasAlpha,
+                                 bool preserveNativeVfr,
+                                 const QString& container,
+                                 QString *errorMessage,
+                                 QString *resolvedPixelFormat = nullptr)
+{
+    QString outputPixelFormat = params.pixFmt.trimmed().toLower();
+    const QString codecId = params.codecId.trimmed();
+    if (codecId.compare(QStringLiteral("(Uncompressed)"), Qt::CaseInsensitive) == 0
+        || codecId.compare(QStringLiteral("uncompressed"), Qt::CaseInsensitive) == 0
+        || codecId.isEmpty()) {
+        args << "-c:v" << "rawvideo";
+        if (sourceBitDepth > 8)
+            outputPixelFormat = sourceHasAlpha ? QStringLiteral("rgba64le")
+                                               : QStringLiteral("rgb48le");
+        else
+            outputPixelFormat = sourceHasAlpha ? QStringLiteral("rgba")
+                                               : QStringLiteral("bgr24");
+        if (container == QStringLiteral("mkv")
+            || container == QStringLiteral("matroska")) {
+            args << "-allow_raw_vfw" << "1";
+        }
+    } else if (codecId == QStringLiteral("libx264_10bit")) {
+        args << "-c:v" << "libx264";
+        outputPixelFormat = QStringLiteral("yuv420p10le");
+    } else if (codecId == QStringLiteral("libx265_lossless")) {
+        args << "-c:v" << "libx265" << "-x265-params" << "lossless=1";
+        outputPixelFormat = QStringLiteral("yuv420p");
+    } else {
+        args << "-c:v" << codecId;
+    }
+
+    if (codecId == QStringLiteral("prores_ks")) {
+        args << "-profile:v" << QString::number(params.proresProfile);
+        if (!params.proresVendor.isEmpty())
+            args << "-vendor" << params.proresVendor;
+        outputPixelFormat = params.proresProfile >= 4
+            ? (sourceHasAlpha ? QStringLiteral("yuva444p10le")
+                              : QStringLiteral("yuv444p10le"))
+            : QStringLiteral("yuv422p10le");
+    } else if (codecId == QStringLiteral("ffv1")) {
+        args << "-level" << QString::number(params.ffv1Version)
+             << "-coder" << QString::number(params.ffv1Coder)
+             << "-slices" << QString::number(params.ffv1Slices);
+    } else if (codecId == QStringLiteral("huffyuv")) {
+        args << "-pred" << QString::number(params.huffyuvPredictor);
+        if (outputPixelFormat.isEmpty())
+            outputPixelFormat = QStringLiteral("yuv422p");
+    } else if (codecId == QStringLiteral("cfhd")) {
+        args << "-quality" << QString::number(params.cineformQuality);
+        outputPixelFormat = QStringLiteral("yuv422p10le");
+    } else if (codecId == QStringLiteral("libx264")
+               || codecId == QStringLiteral("libx265")) {
+        if (params.rateMode == QStringLiteral("crf"))
+            args << "-crf" << QString::number(params.crf);
+        else
+            args << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
+        if (!params.preset.isEmpty()) args << "-preset" << params.preset;
+        if (!params.tune.isEmpty() && params.tune != QStringLiteral("none"))
+            args << "-tune" << params.tune;
+    } else if (codecId == QStringLiteral("libvpx")
+               || codecId == QStringLiteral("libvpx-vp9")
+               || codecId == QStringLiteral("libsvtav1")) {
+        args << "-crf" << QString::number(params.crf)
+             << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
+    }
+
+    if (params.keyframeInterval > 0 && params.keyframeInterval <= 10000)
+        args << "-g" << QString::number(params.keyframeInterval);
+    if (preserveNativeVfr && params.bFrames > 0)
+        args << "-bf" << "0";
+    else if (params.bFrames > 0 && params.bFrames <= 16)
+        args << "-bf" << QString::number(params.bFrames);
+    if (!params.colorMatrix.isEmpty()
+        && params.colorMatrix != QStringLiteral("auto")
+        && params.colorMatrix != QStringLiteral("none")) {
+        args << "-colorspace" << params.colorMatrix
+             << "-color_primaries" << params.colorMatrix
+             << "-color_trc" << params.colorMatrix;
+    }
+
+    if (!outputPixelFormat.isEmpty()) {
+        const QByteArray formatName = outputPixelFormat.toUtf8();
+        const AVPixelFormat outputFormat = av_get_pix_fmt(formatName.constData());
+        const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(outputFormat);
+        int outputBitDepth = 0;
+        bool outputHasAlpha = false;
+        if (descriptor) {
+            for (int component = 0; component < descriptor->nb_components; ++component) {
+                outputBitDepth = std::max(
+                    outputBitDepth,
+                    static_cast<int>(descriptor->comp[component].depth));
+            }
+            outputHasAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+        }
+        if (!descriptor || (sourceBitDepth > 8 && outputBitDepth < sourceBitDepth)
+            || (sourceHasAlpha && !outputHasAlpha)) {
+            if (errorMessage) {
+                *errorMessage = QString(
+                    "The selected output pixel format '%1' cannot preserve the source's "
+                    "%2-bit%3 video data. Choose a matching high-bit-depth/alpha-capable "
+                    "format or use direct stream copy.")
+                    .arg(outputPixelFormat)
+                    .arg(sourceBitDepth)
+                    .arg(sourceHasAlpha ? QStringLiteral(" alpha") : QString());
+            }
+            return false;
+        }
+        args << "-pix_fmt" << outputPixelFormat;
+    }
+    if (resolvedPixelFormat)
+        *resolvedPixelFormat = outputPixelFormat;
+    return true;
+}
+
+void appendContainerArguments(QStringList& args,
+                              const VDQtVideoExporter::ExportOptions& options)
+{
+    if (options.fastStart || options.containerType.contains(QStringLiteral("faststart")))
+        args << "-movflags" << "+faststart";
+
+    const QString container = options.containerType.toLower();
+    if (container == QStringLiteral("webm")
+        || options.outputPath.endsWith(QStringLiteral(".webm"), Qt::CaseInsensitive)) {
+        args << "-f" << "webm";
+    } else if (container == QStringLiteral("nut")
+               || options.outputPath.endsWith(QStringLiteral(".nut"), Qt::CaseInsensitive)) {
+        args << "-f" << "nut";
+    } else if (container.startsWith(QStringLiteral("mov"))
+               || options.outputPath.endsWith(QStringLiteral(".mov"), Qt::CaseInsensitive)) {
+        args << "-f" << "mov";
+    } else if (container.startsWith(QStringLiteral("mp4"))
+               || options.outputPath.endsWith(QStringLiteral(".mp4"), Qt::CaseInsensitive)) {
+        args << "-f" << "mp4";
+    } else if (container == QStringLiteral("mkv")
+               || options.outputPath.endsWith(QStringLiteral(".mkv"), Qt::CaseInsensitive)) {
+        args << "-f" << "matroska";
+    } else if (container.startsWith(QStringLiteral("avi"))
+               || options.outputPath.endsWith(QStringLiteral(".avi"), Qt::CaseInsensitive)) {
+        args << "-f" << "avi";
+    }
+}
+
 void appendBounded(QByteArray& destination, const QByteArray& data) {
     if (data.isEmpty()) return;
     destination += data;
@@ -149,6 +295,38 @@ bool waitForProcess(QProcess& process, QProgressDialog& progress,
     }
     drainProcessOutput(process, diagnostics);
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+
+bool waitForProcessPair(QProcess& producer,
+                        QProcess& consumer,
+                        QProgressDialog& progress,
+                        QByteArray& diagnostics,
+                        bool& cancelled)
+{
+    while (producer.state() != QProcess::NotRunning
+           || consumer.state() != QProcess::NotRunning) {
+        if (producer.state() != QProcess::NotRunning)
+            producer.waitForFinished(kProcessPollMs);
+        if (consumer.state() != QProcess::NotRunning)
+            consumer.waitForFinished(kProcessPollMs);
+        drainProcessOutput(producer, diagnostics);
+        drainProcessOutput(consumer, diagnostics);
+        QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+        if (progress.wasCanceled()) {
+            cancelled = true;
+            stopProcess(producer);
+            stopProcess(consumer);
+            drainProcessOutput(producer, diagnostics);
+            drainProcessOutput(consumer, diagnostics);
+            return false;
+        }
+    }
+    drainProcessOutput(producer, diagnostics);
+    drainProcessOutput(consumer, diagnostics);
+    return producer.exitStatus() == QProcess::NormalExit
+        && producer.exitCode() == 0
+        && consumer.exitStatus() == QProcess::NormalExit
+        && consumer.exitCode() == 0;
 }
 
 bool writeFrame(QProcess& process, const QImage& image,
@@ -685,6 +863,193 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     const QString processOutputPath = stagedOutput.fileName();
     stagedOutput.close();
 
+    // Fast Recompress keeps decoded video in FFmpeg's native pixel formats.
+    // Unlike Normal/Full Processing, frames never cross the QImage/RGB boundary
+    // and the Qt filter chain is deliberately bypassed.
+    if (options.videoMode == VideoMode_FastRecompress) {
+        QProcess videoDecoderProcess;
+        QProcess ffmpeg;
+        QByteArray diagnostics;
+        bool cancelled = false;
+
+        const QFileInfo inputInfo(options.inputPath);
+        const QString inputPath = inputInfo.absoluteFilePath();
+        if (VDQtSourceSafety::isScriptPath(inputPath)) {
+            videoDecoderProcess.setWorkingDirectory(inputInfo.absolutePath());
+            ffmpeg.setWorkingDirectory(inputInfo.absolutePath());
+        }
+
+        double inputStartSeconds = sourceStartSeconds;
+        if (!decoder.isAvsNative())
+            inputStartSeconds += sourceAudioProbe.videoStartOffsetSeconds;
+        inputStartSeconds = std::max(0.0, inputStartSeconds);
+        const double outputDurationSeconds = preserveNativeVfr
+            ? sourceDurationSeconds
+            : static_cast<double>(framesToExport) / fps;
+
+        QStringList videoFilters;
+        // Input seeking establishes the first selected frame. An explicit frame
+        // bound prevents a retimed/slowed output from consuming frames beyond
+        // the editor's exclusive out marker.
+        videoFilters << QString("trim=start_frame=0:end_frame=%1")
+                            .arg(selectedSourceFrames);
+        if (step > 1)
+            videoFilters << QString("select=not(mod(n\\,%1))").arg(step);
+
+        if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
+            videoFilters << QStringLiteral("setpts=PTS-STARTPTS")
+                         << QString("fps=fps=%1:round=near")
+                                .arg(QString::number(fps, 'f', 12));
+        } else if (options.customFps > 0.0) {
+            videoFilters << QString("setpts=N/(%1*TB)")
+                                .arg(QString::number(fps, 'f', 12));
+        } else {
+            videoFilters << QStringLiteral("setpts=PTS-STARTPTS");
+        }
+
+        QStringList encoderArgs;
+        encoderArgs << "-nostdin" << "-y"
+                    << "-f" << "nut" << "-i" << "-";
+        if (sourceHasAudio) {
+            if (inputStartSeconds > 1e-9)
+                encoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
+            encoderArgs << "-i" << inputPath;
+        }
+        encoderArgs << "-map" << "0:v:0";
+        if (sourceHasAudio) {
+            if (decoder.isAvsNative())
+                encoderArgs << "-map" << "1:a:0";
+            else
+                encoderArgs << "-map"
+                            << QString("1:%1").arg(sourceAudioProbe.bestAudioStreamIndex);
+        }
+
+        const VDVideoCodecParams videoParams =
+            VDQtCodecEngine::instance().getVideoParams();
+        QString videoEncodingError;
+        QString fastPixelFormat;
+        if (!appendVideoEncoderArguments(
+                encoderArgs, videoParams, decoder.getSourceBitDepth(),
+                decoder.sourceHasAlpha(), preserveNativeVfr,
+                options.containerType.toLower(), &videoEncodingError,
+                &fastPixelFormat)) {
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Video Precision Error", videoEncodingError);
+            removePartialOutput(processOutputPath);
+            return false;
+        }
+        if (fastPixelFormat.isEmpty()) {
+            fastPixelFormat = decoder.getSourceBitDepth() > 8
+                ? QStringLiteral("yuv420p10le")
+                : (decoder.sourceHasAlpha() ? QStringLiteral("rgba")
+                                            : QStringLiteral("yuv420p"));
+            encoderArgs << "-pix_fmt" << fastPixelFormat;
+        }
+
+        if (options.convertFpsPreserveDuration || options.customFps > 0.0) {
+            encoderArgs << "-r" << QString::number(fps, 'f', 12)
+                        << "-fps_mode" << "cfr";
+        } else {
+            encoderArgs << "-fps_mode" << "vfr";
+            if (preserveNativeVfr) {
+                encoderArgs << "-enc_time_base:v" << "1:1000000"
+                            << "-avoid_negative_ts" << "disabled";
+            }
+        }
+
+        if (sourceHasAudio) {
+            if (options.audioMode == AudioMode_DirectStreamCopy)
+                encoderArgs << "-c:a" << "copy";
+            else
+                encoderArgs << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
+                    configuredAudioParams());
+        }
+
+        encoderArgs << "-t" << QString::number(outputDurationSeconds, 'f', 9);
+        appendContainerArguments(encoderArgs, options);
+        encoderArgs << processOutputPath;
+
+        QStringList decoderArgs;
+        decoderArgs << "-nostdin" << "-hide_banner" << "-loglevel" << "error";
+        if (inputStartSeconds > 1e-9)
+            decoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
+        decoderArgs << "-i" << inputPath
+                    << "-map" << "0:v:0"
+                    << "-vf" << videoFilters.join(QLatin1Char(','))
+                    << "-an"
+                    << "-c:v" << "rawvideo"
+                    << "-pix_fmt" << fastPixelFormat;
+        if (options.convertFpsPreserveDuration || options.customFps > 0.0) {
+            decoderArgs << "-r" << QString::number(fps, 'f', 12)
+                        << "-fps_mode" << "cfr";
+        } else {
+            decoderArgs << "-fps_mode" << "vfr"
+                        << "-enc_time_base:v" << "1:1000000"
+                        << "-avoid_negative_ts" << "disabled";
+        }
+        decoderArgs << "-t" << QString::number(outputDurationSeconds, 'f', 9)
+                    << "-f" << "nut" << "-";
+
+        qDebug() << "[Exporter] Fast Recompress decoder args:"
+                 << decoderArgs.join(" ");
+        qDebug() << "[Exporter] Fast Recompress encoder args:"
+                 << encoderArgs.join(" ");
+
+        QProgressDialog progress(
+            "Fast recompressing video in native pixel formats...", "Cancel",
+            0, 0, parentWidget);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+
+        // QProcess connects the producer's stdout directly to the encoder's
+        // stdin, so planar frames never accumulate in application memory.
+        videoDecoderProcess.setStandardOutputProcess(&ffmpeg);
+        ffmpeg.start("ffmpeg", encoderArgs);
+        if (!ffmpeg.waitForStarted(3000)) {
+            removePartialOutput(processOutputPath);
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Fast Recompress Failed",
+                                      "The FFmpeg encoder process could not be started.");
+            return false;
+        }
+        videoDecoderProcess.start("ffmpeg", decoderArgs);
+        if (!videoDecoderProcess.waitForStarted(3000)) {
+            stopProcess(ffmpeg);
+            removePartialOutput(processOutputPath);
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Fast Recompress Failed",
+                                      "The native-format FFmpeg decoder process could not be started.");
+            return false;
+        }
+
+        const bool processOk = waitForProcessPair(
+            videoDecoderProcess, ffmpeg, progress, diagnostics, cancelled)
+            && validOutputFile(processOutputPath);
+        const bool success = processOk && outputStillSafe()
+                          && replaceWithStagedFile(processOutputPath, options.outputPath);
+        progress.setRange(0, 100);
+        progress.setValue(100);
+        progress.close();
+        if (!success) {
+            removePartialOutput(processOutputPath);
+            if (!cancelled && parentWidget) {
+                QString message = processOk
+                    ? QStringLiteral(
+                          "The completed output could not be committed to its destination.")
+                    : QString::fromUtf8(diagnostics).trimmed();
+                if (message.isEmpty())
+                    message = QStringLiteral("FFmpeg did not produce a valid output file.");
+                if (options.audioMode == AudioMode_DirectStreamCopy && sourceHasAudio) {
+                    message.prepend(
+                        "The destination container must support the source audio codec when "
+                        "Audio > Direct stream copy is selected.\n\n");
+                }
+                QMessageBox::critical(parentWidget, "Fast Recompress Failed", message);
+            }
+        }
+        return success;
+    }
+
     // 0. Direct Stream Copy Mode (For media files / containers)
     if (options.videoMode == VideoMode_DirectStreamCopy && decoder.isAvsNative()) {
         if (parentWidget) {
@@ -940,115 +1305,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // 4. Video Codec & Options
-    QString container = options.containerType.toLower();
-    QString outPixFmt = vParams.pixFmt.toLower();
-    if (options.videoMode == VideoMode_DirectStreamCopy) {
-        args << "-c:v" << "rawvideo";
-        outPixFmt = "rgb24";
-    } else if (vParams.codecId == "(Uncompressed)" || vParams.codecId.isEmpty()) {
-        args << "-c:v" << "rawvideo";
-        if (decoder.getSourceBitDepth() > 8)
-            outPixFmt = decoder.sourceHasAlpha() ? "rgba64le" : "rgb48le";
-        else
-            outPixFmt = decoder.sourceHasAlpha() ? "rgba" : "bgr24";
-        if (container == "mkv" || container == "matroska") {
-            args << "-allow_raw_vfw" << "1";
-        }
-    } else if (vParams.codecId == "libx264_10bit") {
-        args << "-c:v" << "libx264";
-        outPixFmt = "yuv420p10le";
-    } else if (vParams.codecId == "libx265_lossless") {
-        args << "-c:v" << "libx265" << "-x265-params" << "lossless=1";
-        outPixFmt = "yuv420p";
-    } else {
-        args << "-c:v" << vParams.codecId;
-    }
-
-    if (options.videoMode != VideoMode_DirectStreamCopy) {
-        if (vParams.codecId == "prores_ks") {
-            args << "-profile:v" << QString::number(vParams.proresProfile);
-            if (!vParams.proresVendor.isEmpty()) {
-                args << "-vendor" << vParams.proresVendor;
-            }
-            if (vParams.proresProfile >= 4) {
-                outPixFmt = decoder.sourceHasAlpha() ? "yuva444p10le" : "yuv444p10le";
-            } else {
-                outPixFmt = "yuv422p10le";
-            }
-        } else if (vParams.codecId == "ffv1") {
-            args << "-level" << QString::number(vParams.ffv1Version);
-            args << "-coder" << QString::number(vParams.ffv1Coder);
-            args << "-slices" << QString::number(vParams.ffv1Slices);
-        } else if (vParams.codecId == "huffyuv") {
-            args << "-pred" << QString::number(vParams.huffyuvPredictor);
-            if (outPixFmt.isEmpty()) outPixFmt = "yuv422p";
-        } else if (vParams.codecId == "cfhd") {
-            args << "-quality" << QString::number(vParams.cineformQuality);
-            outPixFmt = "yuv422p10le";
-        } else if (vParams.codecId == "libx264" || vParams.codecId == "libx265") {
-            if (vParams.rateMode == "crf") {
-                args << "-crf" << QString::number(vParams.crf);
-            } else {
-                args << "-b:v" << QString("%1k").arg(vParams.targetBitrateKbps);
-            }
-            if (!vParams.preset.isEmpty()) args << "-preset" << vParams.preset;
-            if (!vParams.tune.isEmpty() && vParams.tune != "none") args << "-tune" << vParams.tune;
-        } else if (vParams.codecId == "libvpx" || vParams.codecId == "libvpx-vp9" || vParams.codecId == "libsvtav1") {
-            args << "-crf" << QString::number(vParams.crf);
-            args << "-b:v" << QString("%1k").arg(vParams.targetBitrateKbps);
-        }
-
-        if (vParams.keyframeInterval > 0 && vParams.keyframeInterval <= 10000) {
-            args << "-g" << QString::number(vParams.keyframeInterval);
-        }
-        // With sparse VFR timestamps, FFmpeg/libx264 can reorder a far-future
-        // B-frame before earlier presentation frames. MP4/MOV then derive a
-        // decode-track duration shorter than the largest PTS and may stop
-        // playback early. Keep PTS/DTS monotonic for native VFR exports.
-        if (preserveNativeVfr && vParams.bFrames > 0) {
-            args << "-bf" << "0";
-        } else if (vParams.bFrames > 0 && vParams.bFrames <= 16) {
-            args << "-bf" << QString::number(vParams.bFrames);
-        }
-        if (!vParams.colorMatrix.isEmpty() && vParams.colorMatrix != "auto" && vParams.colorMatrix != "none") {
-            args << "-colorspace" << vParams.colorMatrix
-                 << "-color_primaries" << vParams.colorMatrix
-                 << "-color_trc" << vParams.colorMatrix;
-        }
-    }
-
-    if (!outPixFmt.isEmpty()) {
-        const QByteArray pixelFormatName = outPixFmt.toUtf8();
-        const AVPixelFormat outputFormat = av_get_pix_fmt(pixelFormatName.constData());
-        const AVPixFmtDescriptor *outputDescriptor = av_pix_fmt_desc_get(outputFormat);
-        int outputBitDepth = 0;
-        bool outputHasAlpha = false;
-        if (outputDescriptor) {
-            for (int component = 0; component < outputDescriptor->nb_components; ++component) {
-                outputBitDepth = std::max(
-                    outputBitDepth,
-                    static_cast<int>(outputDescriptor->comp[component].depth));
-            }
-            outputHasAlpha = (outputDescriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
-        }
-        if (!outputDescriptor
-            || (decoder.getSourceBitDepth() > 8
-                && outputBitDepth < decoder.getSourceBitDepth())
-            || (decoder.sourceHasAlpha() && !outputHasAlpha)) {
-            if (parentWidget) {
-                QMessageBox::critical(
-                    parentWidget,
-                    "Video Precision Error",
-                    QString("The selected output pixel format '%1' cannot preserve the source's "
-                            "%2-bit%3 video data. Choose a matching high-bit-depth/alpha-capable "
-                            "format or use direct stream copy.")
-                        .arg(outPixFmt)
-                        .arg(decoder.getSourceBitDepth())
-                        .arg(decoder.sourceHasAlpha() ? QStringLiteral(" alpha") : QString()));
-            }
-            return false;
-        }
-        args << "-pix_fmt" << outPixFmt;
+    const QString container = options.containerType.toLower();
+    QString videoEncodingError;
+    if (!appendVideoEncoderArguments(
+            args, vParams, decoder.getSourceBitDepth(), decoder.sourceHasAlpha(),
+            preserveNativeVfr, container, &videoEncodingError)) {
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Video Precision Error", videoEncodingError);
+        return false;
     }
     if (preserveNativeVfr) {
         args << "-fps_mode" << "vfr"
@@ -1075,23 +1339,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // 6. Container Format & Output Path
-    if (options.fastStart || options.containerType.contains("faststart")) {
-        args << "-movflags" << "+faststart";
-    }
-
-    if (container == "webm" || options.outputPath.endsWith(".webm", Qt::CaseInsensitive)) {
-        args << "-f" << "webm";
-    } else if (container == "nut" || options.outputPath.endsWith(".nut", Qt::CaseInsensitive)) {
-        args << "-f" << "nut";
-    } else if (container.startsWith("mov") || options.outputPath.endsWith(".mov", Qt::CaseInsensitive)) {
-        args << "-f" << "mov";
-    } else if (container.startsWith("mp4") || options.outputPath.endsWith(".mp4", Qt::CaseInsensitive)) {
-        args << "-f" << "mp4";
-    } else if (container == "mkv" || options.outputPath.endsWith(".mkv", Qt::CaseInsensitive)) {
-        args << "-f" << "matroska";
-    } else if (container.startsWith("avi") || options.outputPath.endsWith(".avi", Qt::CaseInsensitive)) {
-        args << "-f" << "avi";
-    }
+    appendContainerArguments(args, options);
 
     args << processOutputPath;
 

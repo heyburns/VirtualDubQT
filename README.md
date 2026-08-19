@@ -1,19 +1,19 @@
-# VirtualDubQt (v0.1)
+# VirtualDubQT (v0.1)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/heyburns/VirtualDubQT/main/docs/screenshot.png" alt="VirtualDubQt Screenshot" width="800">
 </p>
 
-> **THIS IS INCOMPLETE AND BUGGY. USE AT YOUR OWN RISK. IF YOU FIND A BUG, PLEASE SUBMIT A REPORT AND/OR A PULL REQUEST.**
+> **THIS IS INCOMPLETE AND BUGGY, SO USE AT YOUR OWN RISK. IF YOU FIND A BUG, PLEASE SUBMIT A REPORT AND/OR A PULL REQUEST.**
 
-**VirtualDubQt** is a modern 64-bit native Linux port of **VirtualDub2**, rewritten in clean C++17 and Qt6. It brings VirtualDub's video filtration, AviSynth+ script hosting, frame-accurate timeline manipulation, and multiformat audio/video transcoding pipelines to modern desktop platforms without emulation or Wine.
+VirtualDub is one of those indispensible video editing apps that simply has no equivalent in the Linux ecosystem. **VirtualDubQT** is an attempt to create a modern 64-bit native Linux port of **VirtualDub2**, rewritten in clean C++17 and Qt6. It brings VirtualDub's video filtration, AviSynth+ script hosting, frame-accurate timeline manipulation, and multiformat audio/video transcoding pipelines to modern desktop platforms without the performance overhead of using virtualization or wine.
 
 ---
 
 ### Important Requirements & Codec Dependencies
 
-* **FFmpeg Dependency**: VirtualDubQt relies heavily on **FFmpeg** (`libavcodec`, `libavformat`, `libavutil`, `libswscale`, `libswresample`) for container demuxing, video/audio stream decoding, and encoding. **Any video or audio codecs you plan on using (e.g. `libx264`, `libx265`, `libmp3lame`, `libopus`, `libvorbis`, `prores`, etc.) must be enabled and compiled into your system's FFmpeg installation.**
-* **AviSynth+ Script Support**: If you plan to import and process **AviSynth (`.avs`) scripts**, your FFmpeg build **must** be compiled with AviSynth support enabled (`--enable-avisynth`), and native **[AviSynth+ for Linux](https://github.com/AviSynth/AviSynthPlus)** (`libavisynth`) must be compiled and installed on your Linux system (note: this requires the native Linux build of AviSynth+, not the Windows version). For native Linux-compatible AviSynth plugins and filters (such as MaskTools2, RgTools, NNEDI3, TIVTC, etc.), refer to **[pinterf's ported plugin repositories](https://github.com/pinterf)**.
+* **FFmpeg Dependency**: VirtualDubQT relies almost exclusively on **FFmpeg** (`libavcodec`, `libavformat`, `libavutil`, `libswscale`, `libswresample`) for container demuxing, video/audio stream decoding, and encoding. **Any video or audio codecs you plan on using (e.g. `libx264`, `libx265`, `libmp3lame`, `libopus`, `libvorbis`, `prores`, etc.) must be enabled and compiled into your system's FFmpeg installation.**
+* **AviSynth+ Script Support**: If you plan to import and process **AviSynth (`.avs`) scripts**, your FFmpeg build **must** be compiled with AviSynth support enabled (`--enable-avisynth`), and native **[AviSynth+ for Linux](https://github.com/AviSynth/AviSynthPlus)** (`libavisynth`) must be compiled and installed on your Linux system. For some native Linux-compatible AviSynth plugins and filters (such as MaskTools2, RgTools, NNEDI3, TIVTC, etc.), refer to **[pinterf's ported plugin repositories](https://github.com/pinterf)**.
 
 ---
 
