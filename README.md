@@ -6,7 +6,7 @@
 
 > **THIS IS INCOMPLETE AND BUGGY, SO USE AT YOUR OWN RISK. IF YOU FIND A BUG, PLEASE SUBMIT A REPORT AND/OR A PULL REQUEST.**
 
-VirtualDub is one of those indispensible video editing apps that simply has no equivalent in the Linux ecosystem. **VirtualDubQT** is an attempt to create a modern 64-bit native Linux port of **VirtualDub2**, rewritten in clean C++17 and Qt6. It brings VirtualDub's video filtration, AviSynth+ script hosting, frame-accurate timeline manipulation, and multiformat audio/video transcoding pipelines to modern desktop platforms without the performance overhead of using virtualization or wine.
+VirtualDub is one of those indispensible video editing apps that simply has no equivalent in the Linux ecosystem. **VirtualDubQT** is an attempt to create a modern 64-bit native Linux port of **VirtualDub2**, rewritten in clean C++17 and Qt6. It brings VirtualDub's utility to Linux desktop platforms without the performance overhead of using virtualization or wine.
 
 ---
 
@@ -18,43 +18,47 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
 
 ---
 
-## Features
+## What Works
 
-* **Native Modern UI (Qt6)**:
-  * High DPI, dark theme, responsive dual-pane (Input / Output) video viewport.
-  * Direct clipboard capture, frame stepping, timeline selection markers, and live zoom/panning.
-* **Modern Video & Container Pipeline**:
-  * Direct decoding and encoding of H.264 (`libx264`), HEVC (`libx265`), Apple ProRes (`prores_ks`), VP9, VP8, FFV1, HuffYUV, CineForm, UtVideo, and Uncompressed RGB/YUV.
-  * Native export to MP4, MKV, WebM, MOV, NUT, and AVI containers with customizable FastStart and rate control modes (CRF, CBR/VBR, Lossless).
-  * Headerless raw-video export with selectable RGB/YUV layouts, bit depth, scanline alignment, chroma-plane order, and vertical orientation.
-  * Animated GIF and image-sequence export, container text metadata, VFR/null-frame timing preservation, and optional gap collapse for video-only recompression.
-  * Image-sequence and headerless raw-video input with explicit frame rate, pixel layout, geometry, and header-byte offset.
-  * Conservative smart rendering: clean GOP-aligned selections are stream copied; selections requiring exact cuts, retiming, audio processing, or filters safely use the selected recompression mode.
-* **High-Fidelity Audio Compression & Processing**:
-  * Audio extraction and transcode support for AAC, MP3 (`libmp3lame`), Opus (`libopus`), Ogg Vorbis (`libvorbis`), Dolby Digital AC-3 (`ac3`), FLAC (levels 0–8), and raw PCM.
-  * Dynamic downsampling, channel conversion, and constrained VBR / hard CBR modes.
-  * Selectable embedded streams, native AviSynth audio, external audio files, or explicit video-only output.
-  * Ordered audio filters for gain, low/high-pass filtering, resampling, channel mixing, pitch shift, time stretch, center cut/mix, and chorus; the same graph is used by processed exports.
-* **Native AviSynth+ Integration**:
-  * Direct `.avs` script hosting through native AviSynth+, including planar/interleaved pixel-format negotiation.
-  * Optional `.vpy` hosting through FFmpeg's VapourSynth input module.
-* **Video Filter Engine**:
-  * Session-based filter chain with 6-axis color correction, bob doubling, box blur, brightness/contrast, horizontal and vertical flip, grayscale, invert, resize, rotate, sharpen, deinterlace, emboss, field swap, HSV, levels, threshold, posterize, gamma, spatial smoothing, crop, chroma shift, and pixelation.
-  * Parallel scanline/block processing, a cached interpolated 6-axis color LUT, and separable sliding-window blur keep heavy Play Preview chains responsive while retaining 16-bit image precision.
-* **Editing Sessions and Automation**:
-  * Non-destructive frame edit lists with cut/copy/paste/delete/crop, undo/redo, selection navigation, scene-change search, and frame-accurate audio/video rendering of reordered or repeated ranges.
-  * Strictly validated append-segment timelines with source-overwrite protection and multi-segment project round-tripping.
-  * Versioned `.vdqproject` project files and `.vdqsettings` processing snapshots, both using atomic writes and relative media paths where possible.
-  * Session job control, batch job creation, and portable `.vdqjobs` scripts with per-job processing snapshots, retry, cancellation, and atomic destination replacement.
-  * Filtered audio/video frame serving through a temporary RGB/PCM NUT named pipe for local Linux applications.
-  * Linux V4L2/ALSA capture with staged output, plus runtime FFmpeg codec/filter/device and native AviSynth plugin catalogs.
-  * Codec, filter, decoder, raw-export, smart-render, and preference choices remain live for the application session and reset on the next launch unless explicitly saved to a project/settings file.
+- Open common video files, play them, scrub the timeline, step through frames, and move between keyframes.
+- Mark a range and cut, copy, paste, delete, crop, undo, redo, or append compatible video segments.
+- View the original and filtered video side by side and use Play Preview.
+- Use 23 built-in video filters and 10 audio filters.
+- Use Direct Stream Copy, Fast Recompress, Normal Recompress, and Full Processing modes.
+- Save AVI, MKV, MP4, MOV, WebM, and NUT files, plus raw video, image sequences, animated GIFs, and processed audio.
+- Open image sequences, raw video, AviSynth scripts, and supported VapourSynth scripts.
+- Save VirtualDubQT projects and settings, and create batch jobs through Job Control.
+- Use a basic local frame server and record from Linux video and audio devices.
+
+## Partly Implemented
+
+- **Play Preview:** Normal video and audio preview work, but variable frame-rate timing, frame-rate changes, bob-doubled output, and some audio filters may not play exactly as they will appear in the final export.
+- **Video filters:** The most common filters are present, but many VirtualDub2 filters are still missing. Third-party VirtualDub filters cannot be loaded.
+- **Smart rendering:** A clean range can be copied without re-encoding. More complicated cuts or edits re-encode the full range instead of only the frames around the cut.
+- **Capture:** Basic recording works, but there is no full capture workspace with live meters, dropped-frame tools, device controls, timed stops, or disk-spanning capture.
+- **Codecs and color formats:** A useful set is available, but the program does not expose every choice installed on the system or all of VirtualDub2's advanced options.
+- **Audio:** Processed audio export works, but direct extraction of the original compressed audio, detailed audio timing controls, and a full audio routing graph are not available.
+- **Batch and jobs:** Video, audio, raw video, image sequence, and analysis jobs work. Folder scanning, remote queues, and arbitrary scripted jobs are not included.
+- **Frame server:** The local Linux frame server works, but it is not compatible with the original Windows VirtualDub frame server.
+- **Video analysis:** The current command scans for damaged or unreadable frames. It does not yet run the full processing analysis pass from VirtualDub2.
+
+## Not Implemented
+
+- Windows VirtualDub plugins, video codecs, and audio codecs.
+- VirtualDub `.vdscript` automation, the script editor, and the original command-line batch commands.
+- Opening or saving original VirtualDub project and settings files.
+- Two-pass video encoding, external encoder sets, and VirtualDub output plugins.
+- Segmented or striped AVI output, animated PNG, and filmstrip export.
+- Advanced timeline tools such as masks, general markers, waveform display, and timeline zoom ranges.
+- The original histogram, profiling, RIFF inspection, hex viewer, sparse AVI, and file-management tools.
+- Automatic recovery of an unsaved editing session after a crash. Job queues are saved automatically.
 
 ---
 
 ## Build Instructions
 
 ### Prerequisites (Ubuntu / Debian / Linux Mint)
+
 ```bash
 sudo apt update
 sudo apt install build-essential cmake qt6-base-dev qt6-multimedia-dev \
@@ -63,17 +67,20 @@ sudo apt install build-essential cmake qt6-base-dev qt6-multimedia-dev \
 ```
 
 ### Prerequisites (Arch Linux / Manjaro)
+
 ```bash
 sudo pacman -S base-devel cmake qt6-base qt6-multimedia ffmpeg avisynthplus yasm
 ```
 
 ### Prerequisites (Fedora / RHEL)
+
 ```bash
 sudo dnf install gcc-c++ cmake qt6-qtbase-devel qt6-qtmultimedia-devel \
     ffmpeg-free-devel avisynthplus-devel yasm
 ```
 
 ### Compiling
+
 ```bash
 mkdir -p build && cd build
 cmake ..
@@ -81,6 +88,7 @@ cmake --build . -j$(nproc)
 ```
 
 ### Running
+
 ```bash
 ./VirtualDubQt
 ```
