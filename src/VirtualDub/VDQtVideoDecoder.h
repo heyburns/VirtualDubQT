@@ -78,6 +78,13 @@ public:
     quint64 getDecodedFrameCount() const { return mDecodedFrameCount; }
     void resetPerformanceCounters() { mSeekCount = 0; mDecodedFrameCount = 0; }
     static constexpr qsizetype getFrameCacheBudgetKiB() { return 64 * 1024; }
+    struct ScriptDependencyReport {
+        QStringList resolvedPaths;
+        QStringList unresolvedPathLiterals;
+        QStringList diagnostics;
+        bool complete = false;
+    };
+    static ScriptDependencyReport auditScriptDependencies(const QString& scriptPath);
     static QString parseScriptSource(const QString& scriptPath);
     static QStringList parseScriptSources(const QString& scriptPath);
 

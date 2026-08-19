@@ -10,6 +10,7 @@
 #include "VDQtPositionControl.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoExporter.h"
+#include "VDQtSourceSafety.h"
 #include <vd2/system/atomic.h>
 #include <vd2/system/binary.h>
 
@@ -132,9 +133,85 @@ int main(int argc, char **argv) {
         grayscale.type = VDFilterType::Grayscale;
         grayscale.enabled = true;
         geometricFilters.replaceActiveChainTransient({ grayscale });
-        if (!require(geometricFilters.processFrame(highPrecision).isNull(),
-                     "byte-oriented filters reject high-depth input instead of quantizing it"))
+        const QImage grayscaleHigh = geometricFilters.processFrame(highPrecision);
+        const QRgba64 grayscalePixel = reinterpret_cast<const QRgba64 *>(
+            grayscaleHigh.constScanLine(0))[0];
+        if (!require(!grayscaleHigh.isNull() && grayscaleHigh.depth() == 64
+                     && grayscalePixel.red() == grayscalePixel.green()
+                     && grayscalePixel.green() == grayscalePixel.blue()
+                     && grayscalePixel.alpha() == 4000,
+                     "grayscale processes high-depth input and preserves alpha"))
             return 1;
+
+        const std::array<VDFilterType, 5> highDepthPixelFilters = {
+            VDFilterType::SixAxis,
+            VDFilterType::BrightnessContrast,
+            VDFilterType::Blur,
+            VDFilterType::Sharpen,
+            VDFilterType::BobDoubler
+        };
+        for (VDFilterType type : highDepthPixelFilters) {
+            VDQtFilterSystem highDepthFilter;
+            highDepthFilter.addFilter(type);
+            QList<QImage> outputs;
+            if (!require(highDepthFilter.processFrameSequence(highPrecision, outputs)
+                         && !outputs.isEmpty(),
+                         "existing pixel filter accepts high-depth input"))
+                return 1;
+            for (const QImage& output : outputs) {
+                const QRgba64 pixel = reinterpret_cast<const QRgba64 *>(
+                    output.constScanLine(0))[0];
+                if (!require(!output.isNull() && output.depth() == 64
+                             && pixel.red() == 1000
+                             && pixel.green() == 2000
+                             && pixel.blue() == 3000
+                             && pixel.alpha() == 4000,
+                             "identity high-depth filter is bit-exact and preserves alpha"))
+                    return 1;
+            }
+        }
+
+        QImage highDepthImpulse(3, 3, QImage::Format_RGBA64);
+        highDepthImpulse.fill(QColor::fromRgba64(10000, 12000, 14000, 4321));
+        reinterpret_cast<QRgba64 *>(highDepthImpulse.scanLine(1))[1] =
+            QRgba64::fromRgba64(30000, 26000, 22000, 4321);
+        const struct {
+            VDFilterType type;
+            QMap<QString, double> params;
+        } nonIdentityCases[] = {
+            { VDFilterType::SixAxis,
+              { { QStringLiteral("intensity"), 0.8 },
+                { QStringLiteral("red"), 1.4 } } },
+            { VDFilterType::BrightnessContrast,
+              { { QStringLiteral("bright"), 10.0 },
+                { QStringLiteral("cont"), 20.0 } } },
+            { VDFilterType::Blur,
+              { { QStringLiteral("width"), 1.0 },
+                { QStringLiteral("power"), 1.0 } } },
+            { VDFilterType::Sharpen,
+              { { QStringLiteral("amount"), 12.0 } } }
+        };
+        for (const auto& testCase : nonIdentityCases) {
+            VDQtFilterSystem highDepthFilter;
+            highDepthFilter.addFilter(testCase.type);
+            QMap<QString, double> params =
+                highDepthFilter.getActiveChain().first().params;
+            for (auto it = testCase.params.cbegin(); it != testCase.params.cend(); ++it)
+                params.insert(it.key(), it.value());
+            highDepthFilter.updateFilterParams(0, params);
+            const QImage output = highDepthFilter.processFrame(highDepthImpulse);
+            const QRgba64 original = reinterpret_cast<const QRgba64 *>(
+                highDepthImpulse.constScanLine(1))[1];
+            const QRgba64 filtered = reinterpret_cast<const QRgba64 *>(
+                output.constScanLine(1))[1];
+            if (!require(!output.isNull() && output.depth() == 64
+                         && filtered.alpha() == 4321
+                         && (filtered.red() != original.red()
+                             || filtered.green() != original.green()
+                             || filtered.blue() != original.blue()),
+                         "non-identity high-depth filter performs 16-bit arithmetic"))
+                return 1;
+        }
 
         QImage alphaImage(2, 2, QImage::Format_RGBA8888);
         alphaImage.fill(QColor(20, 80, 140, 73));
@@ -230,6 +307,62 @@ int main(int argc, char **argv) {
                          .contains(QStringLiteral("pcm_s24le")),
                      "uncompressed audio honors configured bit depth"))
             return 1;
+
+        VDAudioCodecConfig fdkConfig;
+        fdkConfig.codecId = QStringLiteral("libfdk_aac");
+        fdkConfig.rateControlMode = QStringLiteral("vbr");
+        fdkConfig.vbrQuality = 4;
+        fdkConfig.sampleRate = 0;
+        fdkConfig.channels = 0;
+        const VDAudioCodecParams converted =
+            VDQtCodecEngine::audioParamsFromConfig(fdkConfig, 44100, 6);
+        const QStringList convertedArgs =
+            VDQtCodecEngine::buildFfmpegAudioEncodeArguments(converted);
+        if (!require(containsOptionValue(convertedArgs,
+                                         QStringLiteral("-c:a"), QStringLiteral("libfdk_aac"))
+                     && containsOptionValue(convertedArgs,
+                                            QStringLiteral("-vbr"), QStringLiteral("4"))
+                     && !convertedArgs.contains(QStringLiteral("-q:a"))
+                     && containsOptionValue(convertedArgs,
+                                            QStringLiteral("-ar"), QStringLiteral("44100"))
+                     && containsOptionValue(convertedArgs,
+                                            QStringLiteral("-ac"), QStringLiteral("6")),
+                     "legacy audio settings use the canonical FFmpeg mapping"))
+            return 1;
+
+        const struct {
+            const char *codec;
+            const char *rateMode;
+            int quality;
+            int bitrate;
+            int sampleRate;
+            const char *expectedOption;
+            const char *expectedValue;
+        } audioArgumentCases[] = {
+            { "libmp3lame", "vbr", 2, 192, 44100, "-q:a", "2" },
+            { "libvorbis", "vbr", 6, 160, 48000, "-q:a", "6" },
+            { "flac", "vbr", 8, 0, 96000, "-compression_level", "8" },
+            { "ac3", "cbr", 0, 384, 12345, "-ar", "48000" },
+            { "libopus", "cbr", 0, 128, 44100, "-ar", "48000" },
+            { "pcm_s32le", "cbr", 0, 0, 48000, "-c:a", "pcm_s32le" }
+        };
+        for (const auto& testCase : audioArgumentCases) {
+            VDAudioCodecParams params;
+            params.codecId = QString::fromLatin1(testCase.codec);
+            params.rateMode = QString::fromLatin1(testCase.rateMode);
+            params.vbrQuality = testCase.quality;
+            params.bitrateKbps = testCase.bitrate;
+            params.sampleRate = testCase.sampleRate;
+            params.channels = 2;
+            const QStringList arguments =
+                VDQtCodecEngine::buildFfmpegAudioEncodeArguments(params);
+            if (!require(containsOptionValue(
+                             arguments,
+                             QString::fromLatin1(testCase.expectedOption),
+                             QString::fromLatin1(testCase.expectedValue)),
+                         "canonical audio argument table covers supported codec policy"))
+                return 1;
+        }
 
         VDQtCodecSettings freshSettingsSession;
         if (!require(freshSettingsSession.getAudioConfig().bitrateKbps == 192,
@@ -329,6 +462,47 @@ int main(int argc, char **argv) {
             || !require(VDQtVideoDecoder::parseScriptSources(vapourSynthScript)
                             .contains(QFileInfo(firstSource).absoluteFilePath()),
                         "VapourSynth path variables are discovered"))
+            return 1;
+
+        const QString literalScript =
+            settingsDirectory.filePath(QStringLiteral("literal-only.avs"));
+        const QString unrelatedOutput =
+            settingsDirectory.filePath(QStringLiteral("existing-output.mkv"));
+        if (!require(writeFile(literalScript,
+                               QByteArray("AVISource(\"dependency-one.avi\")\n")),
+                     "write literal-only dependency script")
+            || !require(writeFile(unrelatedOutput, QByteArray("sentinel")),
+                        "write unrelated existing output"))
+            return 1;
+        const VDQtVideoDecoder::ScriptDependencyReport literalAudit =
+            VDQtVideoDecoder::auditScriptDependencies(literalScript);
+        if (!require(literalAudit.complete
+                     && literalAudit.resolvedPaths.contains(
+                         QFileInfo(firstSource).absoluteFilePath()),
+                     "literal-only script dependency audit is complete")
+            || !require(VDQtSourceSafety::evaluateOutputPath(
+                            unrelatedOutput, { literalScript }, literalScript).isSafe(),
+                        "complete script audit permits an unrelated existing destination")
+            || !require(!VDQtSourceSafety::evaluateOutputPath(
+                             firstSource, { literalScript }, literalScript).isSafe(),
+                        "script dependency aliases remain protected"))
+            return 1;
+
+        const QString dynamicScript =
+            settingsDirectory.filePath(QStringLiteral("dynamic-path.avs"));
+        if (!require(writeFile(dynamicScript,
+                               QByteArray("base=\"dependency-\"\n"
+                                          "name=\"one.avi\"\n"
+                                          "AVISource(base+name)\n")),
+                     "write dynamic dependency script"))
+            return 1;
+        const VDQtVideoDecoder::ScriptDependencyReport dynamicAudit =
+            VDQtVideoDecoder::auditScriptDependencies(dynamicScript);
+        if (!require(!dynamicAudit.complete,
+                     "computed script source is reported as incomplete")
+            || !require(!VDQtSourceSafety::evaluateOutputPath(
+                             unrelatedOutput, { dynamicScript }, dynamicScript).isSafe(),
+                        "incomplete script audit refuses an existing destination"))
             return 1;
     }
 
@@ -695,6 +869,39 @@ int main(int argc, char **argv) {
                      && frame.depth() == 64,
                      "10-bit source is retained in a 16-bit-per-channel image"))
             return 1;
+
+        VDQtFilterSystem::instance().clearFilters();
+        VDQtFilterSystem::instance().addFilter(VDFilterType::Grayscale);
+        VDQtCodecEngine::instance().setVideoParams(
+            VDQtCodecEngine::getDefaultVideoParamsForCodec(
+                QStringLiteral("libx264_10bit")));
+        const QString filteredOutput =
+            settingsDirectory.filePath(QStringLiteral("ten_bit_filtered.mkv"));
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = fixturePath;
+        options.outputPath = filteredOutput;
+        options.videoMode = VideoMode_FullProcessing;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        options.containerType = QStringLiteral("mkv");
+        VDQtVideoExporter exporter;
+        if (!require(exporter.exportVideo(options, &decoder),
+                     "export filtered 10-bit video"))
+            return 1;
+        QByteArray pixelFormatOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"), QStringLiteral("stream=pix_fmt"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"),
+                           filteredOutput },
+                         &ffmpegError, &pixelFormatOutput),
+                     "probe filtered 10-bit export")
+            || !require(pixelFormatOutput.trimmed() == QByteArray("yuv420p10le"),
+                        "filtered export retains 10-bit output precision"))
+            return 1;
+        VDQtFilterSystem::instance().clearFilters();
+        VDQtCodecEngine::instance().resetToDefaults();
     }
 
     {
@@ -860,15 +1067,145 @@ int main(int argc, char **argv) {
         }
         const QList<QByteArray> timestampLines =
             timestampOutput.trimmed().split('\n');
-        if (!require(timestampLines.size() == 4
+        if (!require(timestampLines.size() == 3
                      && std::abs(timestampLines[0].trimmed().toDouble() - 0.0) < 0.00001
                      && std::abs(timestampLines[1].trimmed().toDouble() - 0.1) < 0.00001
-                     && std::abs(timestampLines[2].trimmed().toDouble() - 2.0) < 0.00001
-                     && std::abs(timestampLines[3].trimmed().toDouble() - 2.1) < 0.00001,
-                     "VFR export retains nonuniform frame presentation times")) {
+                     && std::abs(timestampLines[2].trimmed().toDouble() - 2.0) < 0.00001,
+                     "VFR export retains nonuniform frame presentation times without a sentinel frame")) {
             std::cerr << timestampOutput.constData() << '\n';
             return 1;
         }
+        QByteArray durationOutput;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-show_entries"), QStringLiteral("format=duration"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"), outputPath },
+                         &ffmpegError, &durationOutput),
+                     "probe native VFR export duration"))
+            return 1;
+        if (!require(std::abs(durationOutput.trimmed().toDouble() - 2.1) < 0.001,
+                     "VFR final-frame duration is retained without an endpoint frame")) {
+            std::cerr << "duration=" << durationOutput.constData() << '\n';
+            return 1;
+        }
+
+        const struct {
+            const char *extension;
+            const char *container;
+            const char *codec;
+        } vfrContainers[] = {
+            { "mkv", "mkv", "libx264" },
+            { "mov", "mov", "libx264" },
+            { "nut", "nut", "libx264" },
+            { "webm", "webm", "libvpx-vp9" }
+        };
+        for (const auto& target : vfrContainers) {
+            codecs.setVideoParams(VDQtCodecEngine::getDefaultVideoParamsForCodec(
+                QString::fromLatin1(target.codec)));
+            options.outputPath = settingsDirectory.filePath(
+                QStringLiteral("native_vfr_output.%1")
+                    .arg(QString::fromLatin1(target.extension)));
+            options.containerType = QString::fromLatin1(target.container);
+            if (!require(exporter.exportVideo(options, &decoder),
+                         "export timestamped VFR container matrix"))
+                return 1;
+            QByteArray matrixProbe;
+            const bool isNut = QString::fromLatin1(target.extension)
+                == QStringLiteral("nut");
+            if (!require(runProcess(
+                             QStringLiteral("ffprobe"),
+                             { QStringLiteral("-v"), QStringLiteral("error"),
+                               QStringLiteral("-count_frames"),
+                               QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                               QStringLiteral("-show_entries"),
+                               QStringLiteral("stream=nb_read_frames:format=duration"),
+                               QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                               options.outputPath },
+                             &ffmpegError, &matrixProbe),
+                         "probe timestamped VFR container matrix")
+                || !require(matrixProbe.contains("nb_read_frames=3")
+                            && matrixProbe.contains(isNut
+                                ? QByteArray("duration=2.000")
+                                : QByteArray("duration=2.100")),
+                            "VFR containers retain frame count and final duration")) {
+                std::cerr << matrixProbe.constData() << '\n';
+                QByteArray detailedProbe;
+                runProcess(QStringLiteral("ffprobe"),
+                           { QStringLiteral("-v"), QStringLiteral("error"),
+                             QStringLiteral("-show_entries"),
+                             QStringLiteral("stream=time_base,r_frame_rate,avg_frame_rate,duration:frame=best_effort_timestamp_time,pkt_duration_time:packet=pts_time,duration_time"),
+                             QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                             options.outputPath },
+                           &ffmpegError, &detailedProbe);
+                std::cerr << detailedProbe.constData() << '\n';
+                return 1;
+            }
+        }
+
+        const struct {
+            const char *name;
+            int startFrame;
+            int endFrame;
+            int decimate;
+            bool bob;
+            int expectedFrames;
+            const char *expectedDuration;
+        } vfrVariants[] = {
+            { "selection", 1, 2, 1, false, 2, "2.000" },
+            { "decimation", 0, -1, 2, false, 2, "2.100" },
+            { "bob", 0, -1, 1, true, 6, "2.100" }
+        };
+        codecs.setVideoParams(VDQtCodecEngine::getDefaultVideoParamsForCodec(
+            QStringLiteral("libx264")));
+        for (const auto& variant : vfrVariants) {
+            VDQtFilterSystem::instance().clearFilters();
+            if (variant.bob)
+                VDQtFilterSystem::instance().addFilter(VDFilterType::BobDoubler);
+            options.outputPath = settingsDirectory.filePath(
+                QStringLiteral("native_vfr_%1.mp4")
+                    .arg(QString::fromLatin1(variant.name)));
+            options.containerType = QStringLiteral("mp4");
+            options.startFrame = variant.startFrame;
+            options.endFrame = variant.endFrame;
+            options.decimateFactor = variant.decimate;
+            options.videoMode = variant.bob
+                ? VideoMode_FullProcessing : VideoMode_NormalRecompress;
+            if (!require(exporter.exportVideo(options, &decoder),
+                         "export VFR selection/decimation/temporal-filter variant"))
+                return 1;
+            QByteArray variantProbe;
+            if (!require(runProcess(
+                             QStringLiteral("ffprobe"),
+                             { QStringLiteral("-v"), QStringLiteral("error"),
+                               QStringLiteral("-count_frames"),
+                               QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                               QStringLiteral("-show_entries"),
+                               QStringLiteral("stream=nb_read_frames:format=duration"),
+                               QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                               options.outputPath },
+                             &ffmpegError, &variantProbe),
+                         "probe VFR export variant")
+                || !require(variantProbe.contains(
+                                QByteArray("nb_read_frames=")
+                                    + QByteArray::number(variant.expectedFrames))
+                            && variantProbe.contains(
+                                QByteArray("duration=") + variant.expectedDuration),
+                            "VFR variants retain selected timing and output phases")) {
+                std::cerr << variantProbe.constData() << '\n';
+                QByteArray detailedVariantProbe;
+                runProcess(QStringLiteral("ffprobe"),
+                           { QStringLiteral("-v"), QStringLiteral("error"),
+                             QStringLiteral("-show_entries"),
+                             QStringLiteral("frame=best_effort_timestamp_time,pkt_duration_time:packet=pts_time,dts_time,duration_time:stream=r_frame_rate,avg_frame_rate,time_base,duration"),
+                             QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                             options.outputPath },
+                           &ffmpegError, &detailedVariantProbe);
+                std::cerr << detailedVariantProbe.constData() << '\n';
+                return 1;
+            }
+        }
+        VDQtFilterSystem::instance().clearFilters();
         codecs.resetToDefaults();
     }
 

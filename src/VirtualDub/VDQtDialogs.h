@@ -510,20 +510,6 @@ private:
     QComboBox *mChannelsCombo;
 };
 
-// Go To Frame Dialog
-class VDGoToFrameDialog : public QDialog {
-    Q_OBJECT
-public:
-    explicit VDGoToFrameDialog(QWidget *parent = nullptr);
-    int getFrameNumber() const;
-
-private:
-    QRadioButton *mRadioFrame;
-    QRadioButton *mRadioTime;
-    QSpinBox *mFrameSpin;
-    QLineEdit *mTimeEdit;
-};
-
 // About Dialog
 class VDAboutDialog : public QDialog {
     Q_OBJECT

@@ -1,4 +1,5 @@
 #include "VDQtMainWindow.h"
+#include "VDQtSourceSafety.h"
 #include <QApplication>
 #include <QKeySequence>
 #include <QScreen>
@@ -26,57 +27,22 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <sys/stat.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
 namespace {
 
-bool pathsReferToSameFile(const QString& firstPath, const QString& secondPath) {
-    if (firstPath.isEmpty() || secondPath.isEmpty()) return false;
-    const QFileInfo first(firstPath);
-    const QFileInfo second(secondPath);
-    if (first.absoluteFilePath() == second.absoluteFilePath()) return true;
-
-    struct stat firstStatus = {};
-    struct stat secondStatus = {};
-    const QByteArray firstName = QFile::encodeName(first.absoluteFilePath());
-    const QByteArray secondName = QFile::encodeName(second.absoluteFilePath());
-    return ::stat(firstName.constData(), &firstStatus) == 0
-        && ::stat(secondName.constData(), &secondStatus) == 0
-        && firstStatus.st_dev == secondStatus.st_dev
-        && firstStatus.st_ino == secondStatus.st_ino;
-}
-
-QString aliasedLoadedSource(const QString& outputPath,
-                            const VDQtVideoDecoder& decoder,
-                            const VDQtAudioPlayer& audioPlayer) {
-    QStringList protectedSources;
-    protectedSources.append(decoder.getFilePath());
-    protectedSources.append(audioPlayer.getSourcePath());
+VDQtOutputSafetyReport loadedOutputSafety(const QString& outputPath,
+                                          const VDQtVideoDecoder& decoder,
+                                          const VDQtAudioPlayer& audioPlayer) {
+    const QStringList protectedSources = {
+        decoder.getFilePath(), audioPlayer.getSourcePath()
+    };
     const QString scriptPath = decoder.getFilePath();
-    if (scriptPath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
-        || scriptPath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive)) {
-        protectedSources.append(VDQtVideoDecoder::parseScriptSources(scriptPath));
-    }
-
-    for (const QString& sourcePath : protectedSources) {
-        if (pathsReferToSameFile(outputPath, sourcePath))
-            return sourcePath;
-    }
-    return {};
-}
-
-bool scriptOutputWouldReplaceExisting(const QString& outputPath,
-                                      const VDQtVideoDecoder& decoder) {
-    const QString sourcePath = decoder.getFilePath();
-    const bool scriptBacked = decoder.isAvsNative()
-        || sourcePath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
-        || sourcePath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive);
-    if (!scriptBacked) return false;
-    const QFileInfo target(outputPath);
-    return target.exists() || target.isSymLink();
+    return VDQtSourceSafety::evaluateOutputPath(
+        outputPath, protectedSources,
+        VDQtSourceSafety::isScriptPath(scriptPath) ? scriptPath : QString());
 }
 
 QString stagedOutputTemplate(const QString& outputPath) {
@@ -546,14 +512,17 @@ void VDQtMainWindow::onFileSaveAudio() {
         QString outPath = dlg.getSelectedFilePath();
         VDAudioCodecConfig audioCfg = dlg.getAudioConfig();
 
-        if (!aliasedLoadedSource(outPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+        const VDQtOutputSafetyReport audioSafety =
+            loadedOutputSafety(outPath, mVideoDecoder, mAudioPlayer);
+        if (audioSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
             QMessageBox::critical(this, "Unsafe Output Path",
                                   "The output file is a currently loaded source. Choose a different path.");
             return;
         }
 
         const QFileInfo audioTarget(outPath);
-        if (scriptOutputWouldReplaceExisting(outPath, mVideoDecoder)) {
+        if (audioSafety.issue
+            == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
             QMessageBox::critical(
                 this, "Unsafe Script Output Path",
                 "An existing destination cannot be replaced while an AviSynth script is loaded, "
@@ -734,80 +703,10 @@ void VDQtMainWindow::onFileSaveAudio() {
                     }
                 } else {
                     args << "-y" << "-i" << tempWav;
-
-                    if (audioCodec == "libmp3lame" || audioCodec == "mp3") {
-                        args << "-c:a" << "libmp3lame";
-                        if (isVbr) {
-                            args << "-q:a" << QString::number(std::clamp(audioCfg.vbrQuality, 0, 9));
-                        } else {
-                            const int br = audioCfg.bitrateKbps > 0 ? audioCfg.bitrateKbps : 192;
-                            args << "-b:a" << QString("%1k").arg(br);
-                        }
-                    } else if (audioCodec == "aac" || audioCodec == "libfdk_aac") {
-                        args << "-c:a" << audioCodec;
-                        if (isVbr) {
-                            static const double aacQ[] = { 0.2, 0.5, 0.9, 1.4, 2.0 };
-                            int qIdx = std::clamp(audioCfg.vbrQuality - 1, 0, 4);
-                            args << "-q:a" << QString::number(aacQ[qIdx], 'f', 2);
-                        } else {
-                            int br = (audioCfg.bitrateKbps > 0) ? audioCfg.bitrateKbps : 192;
-                            args << "-b:a" << QString("%1k").arg(br);
-                        }
-                    } else if (audioCodec == "libopus" || audioCodec == "opus") {
-                        if (avcodec_find_encoder_by_name("libopus") != nullptr) {
-                            args << "-c:a" << "libopus";
-                        } else {
-                            args << "-c:a" << "opus" << "-strict" << "-2";
-                        }
-                        int br = (audioCfg.bitrateKbps > 0) ? audioCfg.bitrateKbps : 160;
-                        args << "-b:a" << QString("%1k").arg(br);
-                        if (isVbr) args << "-vbr" << "on";
-                        else args << "-vbr" << "off";
-                    } else if (audioCodec == "libvorbis" || audioCodec == "vorbis") {
-                        args << "-c:a" << "libvorbis";
-                        if (isVbr) {
-                            args << "-q:a" << QString::number(audioCfg.vbrQuality);
-                        } else {
-                            int br = (audioCfg.bitrateKbps > 0) ? audioCfg.bitrateKbps : 160;
-                            args << "-b:a" << QString("%1k").arg(br);
-                        }
-                    } else if (audioCodec == "flac") {
-                        args << "-c:a" << "flac";
-                        int compLevel = std::clamp(audioCfg.vbrQuality, 0, 8);
-                        if (compLevel == 0 && audioCfg.rateControlMode != "vbr") compLevel = 5;
-                        args << "-compression_level" << QString::number(compLevel);
-                    } else if (audioCodec == "ac3") {
-                        args << "-c:a" << "ac3";
-                        int br = (audioCfg.bitrateKbps > 0) ? audioCfg.bitrateKbps : 384;
-                        args << "-b:a" << QString("%1k").arg(br);
-                    } else if (audioCodec == "pcm_s16le" || audioCodec == "(uncompressed)") {
-                        args << "-c:a" << "pcm_s16le";
-                    } else {
-                        args << "-c:a" << audioCodec;
-                    }
-
-                    if (audioCodec == "libopus" || audioCodec == "opus") {
-                        int opusRate = audioCfg.sampleRate;
-                        if (opusRate != 8000 && opusRate != 12000 && opusRate != 16000 && opusRate != 24000 && opusRate != 48000) {
-                            opusRate = 48000;
-                        }
-                        args << "-ar" << QString::number(opusRate);
-                    } else if (audioCodec == "ac3") {
-                        int ac3Rate = audioCfg.sampleRate;
-                        if (ac3Rate == 0) {
-                            if (sampleRate == 48000 || sampleRate == 44100 || sampleRate == 32000) {
-                                ac3Rate = sampleRate;
-                            } else {
-                                ac3Rate = 48000;
-                            }
-                        } else if (ac3Rate != 48000 && ac3Rate != 44100 && ac3Rate != 32000) {
-                            ac3Rate = 48000;
-                        }
-                        args << "-ar" << QString::number(ac3Rate);
-                    } else if (audioCfg.sampleRate > 0) {
-                        args << "-ar" << QString::number(audioCfg.sampleRate);
-                    }
-                    if (audioCfg.channels > 0) args << "-ac" << QString::number(audioCfg.channels);
+                    const VDAudioCodecParams encodeParams =
+                        VDQtCodecEngine::audioParamsFromConfig(
+                            audioCfg, sampleRate, mAudioPlayer.getChannels());
+                    args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(encodeParams);
 
                     const int64_t progressSamples = sampleCount > 0
                         ? sampleCount
@@ -876,9 +775,16 @@ void VDQtMainWindow::onFileSaveAudio() {
         progress.close();
         QCoreApplication::processEvents();
 
-        if (ok && !replaceWithStagedFile(workingOutputPath, outPath)) {
-            ok = false;
-            errorMsg = "The completed audio output could not be committed to its destination.";
+        if (ok) {
+            const VDQtOutputSafetyReport commitSafety =
+                loadedOutputSafety(outPath, mVideoDecoder, mAudioPlayer);
+            if (!commitSafety.isSafe()) {
+                ok = false;
+                errorMsg = "The destination became unsafe while audio was encoding; the existing file was not changed.";
+            } else if (!replaceWithStagedFile(workingOutputPath, outPath)) {
+                ok = false;
+                errorMsg = "The completed audio output could not be committed to its destination.";
+            }
         }
         if (!ok) QFile::remove(workingOutputPath);
 
@@ -948,13 +854,16 @@ void VDQtMainWindow::onFileSaveAVI() {
         mPlaybackTimer->stop();
         mAudioPlayer.stop();
 
-        if (!aliasedLoadedSource(savePath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+        const VDQtOutputSafetyReport videoSafety =
+            loadedOutputSafety(savePath, mVideoDecoder, mAudioPlayer);
+        if (videoSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
             QMessageBox::critical(this, "Unsafe Output Path",
                                   "The output file is a currently loaded source. Choose a different path.");
             return;
         }
         const QFileInfo videoTarget(savePath);
-        if (scriptOutputWouldReplaceExisting(savePath, mVideoDecoder)) {
+        if (videoSafety.issue
+            == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
             QMessageBox::critical(
                 this, "Unsafe Script Output Path",
                 "An existing destination cannot be replaced while an AviSynth script is loaded, "
@@ -1133,13 +1042,16 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                 .arg(baseName)
                 .arg(outputNumber, 5, 10, QChar('0'))
                 .arg(ext);
-            if (!aliasedLoadedSource(targetPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+            const VDQtOutputSafetyReport imageSafety =
+                loadedOutputSafety(targetPath, mVideoDecoder, mAudioPlayer);
+            if (imageSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
                 QMessageBox::critical(this, "Unsafe Image Sequence Path",
                                       QString("Generated image path aliases a loaded source:\n%1").arg(targetPath));
                 return;
             }
             const QFileInfo targetInfo(targetPath);
-            if (scriptOutputWouldReplaceExisting(targetPath, mVideoDecoder)) {
+            if (imageSafety.issue
+                == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
                 QMessageBox::critical(
                     this, "Unsafe Script Image Path",
                     QString("An existing generated image cannot be replaced while an AviSynth script is loaded:\n%1\n"
@@ -1239,7 +1151,9 @@ void VDQtMainWindow::onFileSaveImageSequence() {
     // Recheck aliases/collisions after rendering to close the user-visible
     // race window before any destination is changed.
     for (const QString& targetPath : targetPaths) {
-        if (!aliasedLoadedSource(targetPath, mVideoDecoder, mAudioPlayer).isEmpty()) {
+        const VDQtOutputSafetyReport imageSafety =
+            loadedOutputSafety(targetPath, mVideoDecoder, mAudioPlayer);
+        if (imageSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
             QMessageBox::critical(this, "Unsafe Image Sequence Path",
                                   "A generated image path became an alias of a loaded source. Existing files were not changed.");
             return;
@@ -1252,7 +1166,8 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                                           "Existing files were not changed.").arg(targetPath));
             return;
         }
-        if (scriptOutputWouldReplaceExisting(targetPath, mVideoDecoder)) {
+        if (imageSafety.issue
+            == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
             QMessageBox::critical(
                 this, "Unsafe Script Image Path",
                 QString("A generated destination appeared while the script sequence was rendering:\n%1\n"

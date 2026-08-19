@@ -29,9 +29,9 @@
   * Audio extraction and transcode support for AAC, MP3 (`libmp3lame`), Opus (`libopus`), Ogg Vorbis (`libvorbis`), Dolby Digital AC-3 (`ac3`), FLAC (levels 0–8), and raw PCM.
   * Dynamic downsampling, channel conversion, and constrained VBR / hard CBR modes.
 * **Native AviSynth+ Integration**:
-  * Direct script hosting with full syntax-highlighted script editor, live reload, and native planar/interleaved pixel format negotiation.
+  * Direct `.avs` script hosting through native AviSynth+, including planar/interleaved pixel-format negotiation.
 * **Video Filter Engine**:
-  * Native implementation of VirtualDub's filter subsystem, including standard filters (Resize, Brightness/Contrast, Blur, Box Blur, Deinterlace, Field Delay, Invert, Rotate, Sharpen, Threshold, WarpSharp) plus modern neural network filters (NNEDI3).
+  * Session-based filter chain with 6-axis color correction, bob doubling, box blur, brightness/contrast, horizontal and vertical flip, grayscale, invert, resize, rotate, and sharpen.
 
 ---
 

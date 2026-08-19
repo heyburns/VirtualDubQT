@@ -3770,49 +3770,11 @@ void VDAudioCompressionDialog::onSaveClicked() {
 
     VDQtCodecSettings::instance().setAudioConfig(cfg);
 
-    VDAudioCodecParams aParams;
-    aParams.codecId = cfg.codecId;
-    aParams.rateMode = cfg.rateControlMode;
-    aParams.vbrQuality = cfg.vbrQuality;
-    aParams.bitrateKbps = cfg.bitrateKbps;
-    aParams.sampleRate = cfg.sampleRate;
-    aParams.channels = cfg.channels;
+    const VDAudioCodecParams aParams =
+        VDQtCodecEngine::audioParamsFromConfig(cfg);
     VDQtCodecEngine::instance().setAudioParams(aParams);
 
     accept();
-}
-
-// -----------------------------------------------------------------------------
-// VDGoToFrameDialog
-// -----------------------------------------------------------------------------
-VDGoToFrameDialog::VDGoToFrameDialog(QWidget *parent)
-    : QDialog(parent) {
-    setWindowTitle("Go To Position");
-    resize(340, 180);
-    setStyleSheet(kDialogStyle);
-
-    QVBoxLayout *mainLayout = new QVBoxLayout(this);
-
-    mRadioFrame = new QRadioButton("Jump to Frame Number:", this);
-    mRadioFrame->setChecked(true);
-    mFrameSpin = new QSpinBox(this);
-    mFrameSpin->setRange(0, 10000000);
-    mainLayout->addWidget(mRadioFrame);
-    mainLayout->addWidget(mFrameSpin);
-
-    mRadioTime = new QRadioButton("Jump to Time (hh:mm:ss.ms):", this);
-    mTimeEdit = new QLineEdit("00:00:00.000", this);
-    mainLayout->addWidget(mRadioTime);
-    mainLayout->addWidget(mTimeEdit);
-
-    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    connect(box, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    mainLayout->addWidget(box);
-}
-
-int VDGoToFrameDialog::getFrameNumber() const {
-    return mFrameSpin->value();
 }
 
 // -----------------------------------------------------------------------------

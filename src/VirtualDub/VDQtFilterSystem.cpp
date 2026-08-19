@@ -1,12 +1,30 @@
 #include "VDQtFilterSystem.h"
 #include <QTransform>
 #include <QUuid>
+#include <QRgba64>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
 
 constexpr int kMaxSequencedBobFilters = 6;
+
+quint16 rgba64Channel(const QRgba64& pixel, int channel) {
+    switch (channel) {
+    case 0: return pixel.red();
+    case 1: return pixel.green();
+    default: return pixel.blue();
+    }
+}
+
+void setRgba64Channel(QRgba64& pixel, int channel, quint16 value) {
+    switch (channel) {
+    case 0: pixel.setRed(value); break;
+    case 1: pixel.setGreen(value); break;
+    default: pixel.setBlue(value); break;
+    }
+}
 
 } // namespace
 
@@ -190,23 +208,10 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
 
     const bool highPrecision = inputFrame.depth() > 32;
-    if (highPrecision) {
-        // Qt's geometric operations retain 16-bit channel data. The legacy
-        // pixel filters below are byte-oriented; reject those combinations
-        // instead of silently quantizing a 10/12/16-bit source to RGB24.
-        for (const auto& filter : mActiveChain) {
-            if (!filter.enabled) continue;
-            if (filter.type != VDFilterType::Resize
-                && filter.type != VDFilterType::Rotate
-                && filter.type != VDFilterType::FlipHorizontal
-                && filter.type != VDFilterType::FlipVertical
-                && filter.type != VDFilterType::InvertColor) {
-                return QImage();
-            }
-        }
-    }
 
-    QImage result = inputFrame;
+    QImage result = highPrecision
+        ? inputFrame.convertToFormat(QImage::Format_RGBA64)
+        : inputFrame;
     if (!highPrecision) {
         result = inputFrame.hasAlphaChannel()
             ? inputFrame.convertToFormat(QImage::Format_RGBA8888)
@@ -263,9 +268,6 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
                 retainedFieldIsOdd = !retainedFieldIsOdd;
             ++bobFilterIndex;
 
-            if (result.depth() > 32) return QImage();
-
-            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
             int h = result.height();
 
@@ -275,6 +277,71 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
                 break;
 
             QImage temp = result;
+
+            if (highPrecision) {
+                for (int y = 0; y < h; ++y) {
+                    const bool scanIsOdd = (y & 1) != 0;
+                    if (scanIsOdd == retainedFieldIsOdd)
+                        continue;
+
+                    QRgba64 *dst = reinterpret_cast<QRgba64 *>(result.scanLine(y));
+                    int previousLine = y - 1;
+                    int nextLine = y + 1;
+                    if (previousLine < 0)
+                        previousLine = nextLine < h ? nextLine : y;
+                    if (nextLine >= h)
+                        nextLine = previousLine >= 0 ? previousLine : y;
+                    const QRgba64 *src1 = reinterpret_cast<const QRgba64 *>(
+                        temp.constScanLine(previousLine));
+                    const QRgba64 *src2 = reinterpret_cast<const QRgba64 *>(
+                        temp.constScanLine(nextLine));
+
+                    if (mode == 0) {
+                        for (int x = 0; x < w; ++x) {
+                            dst[x] = QRgba64::fromRgba64(
+                                static_cast<quint16>((static_cast<quint32>(src1[x].red()) + src2[x].red() + 1U) >> 1),
+                                static_cast<quint16>((static_cast<quint32>(src1[x].green()) + src2[x].green() + 1U) >> 1),
+                                static_cast<quint16>((static_cast<quint32>(src1[x].blue()) + src2[x].blue() + 1U) >> 1),
+                                static_cast<quint16>((static_cast<quint32>(src1[x].alpha()) + src2[x].alpha() + 1U) >> 1));
+                        }
+                    } else if (mode == 1 || mode == 2) {
+                        for (int x = 0; x < w; ++x) {
+                            const int xPrev = std::clamp(x - 1, 0, w - 1);
+                            const int xNext = std::clamp(x + 1, 0, w - 1);
+                            qint64 d0 = 0, d1 = 0, d2 = 0;
+                            for (int c = 0; c < 3; ++c) {
+                                d0 += std::abs(static_cast<int>(rgba64Channel(src1[xPrev], c))
+                                             - static_cast<int>(rgba64Channel(src2[xNext], c)));
+                                d1 += std::abs(static_cast<int>(rgba64Channel(src1[x], c))
+                                             - static_cast<int>(rgba64Channel(src2[x], c)));
+                                d2 += std::abs(static_cast<int>(rgba64Channel(src1[xNext], c))
+                                             - static_cast<int>(rgba64Channel(src2[xPrev], c)));
+                            }
+                            const QRgba64 *a = src1;
+                            const QRgba64 *b = src2;
+                            int ax = x;
+                            int bx = x;
+                            if (d0 < d1 && d0 < d2) {
+                                ax = xPrev;
+                                bx = xNext;
+                            } else if (d2 < d1 && d2 < d0) {
+                                ax = xNext;
+                                bx = xPrev;
+                            }
+                            dst[x] = QRgba64::fromRgba64(
+                                static_cast<quint16>((static_cast<quint32>(a[ax].red()) + b[bx].red() + 1U) >> 1),
+                                static_cast<quint16>((static_cast<quint32>(a[ax].green()) + b[bx].green() + 1U) >> 1),
+                                static_cast<quint16>((static_cast<quint32>(a[ax].blue()) + b[bx].blue() + 1U) >> 1),
+                                src1[x].alpha());
+                        }
+                    } else {
+                        memcpy(dst, src1, static_cast<size_t>(w) * sizeof(QRgba64));
+                    }
+                }
+                break;
+            }
+
+            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
 
             for (int y = 0; y < h; ++y) {
                 const bool scanIsOdd = (y & 1) != 0;
@@ -345,14 +412,76 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             float blueGain = static_cast<float>(filter.params.value("blue", 1.0));
             float purpleGain = static_cast<float>(filter.params.value("purple", 1.0));
 
-            if (result.depth() > 32) return QImage();
-
-            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
-            int h = result.height();
-            int w = result.width();
-
             const float axesAngles[6] = { 0.0f, 30.0f, 90.0f, 180.0f, 240.0f, 300.0f };
             const float axesGains[6] = { redGain, orangeGain, limeGain, emeraldGain, blueGain, purpleGain };
+
+            auto adjustPixel = [&](float r, float g, float b) {
+                float cmax = std::max(r, std::max(g, b));
+                float cmin = std::min(r, std::min(g, b));
+                float delta = cmax - cmin;
+                float hue = 0.0f;
+                const float saturation = cmax > 1e-5f ? delta / cmax : 0.0f;
+                const float value = cmax;
+                if (delta > 1e-5f) {
+                    if (cmax == r)
+                        hue = 60.0f * std::fmod(((g - b) / delta) + 6.0f, 6.0f);
+                    else if (cmax == g)
+                        hue = 60.0f * (((b - r) / delta) + 2.0f);
+                    else
+                        hue = 60.0f * (((r - g) / delta) + 4.0f);
+                }
+
+                float axisMod = 0.0f;
+                for (int k = 0; k < 6; ++k) {
+                    float diff = std::abs(hue - axesAngles[k]);
+                    if (diff > 180.0f) diff = 360.0f - diff;
+                    if (diff < 60.0f)
+                        axisMod += (1.0f - diff / 60.0f) * (axesGains[k] - 1.0f);
+                }
+
+                const float newS = std::clamp(
+                    saturation * satGlobal * (1.0f + axisMod), 0.0f, 1.0f);
+                const float chroma = value * newS;
+                const float intermediate = chroma
+                    * (1.0f - std::abs(std::fmod(hue / 60.0f, 2.0f) - 1.0f));
+                const float match = value - chroma;
+                float nr = 0.0f, ng = 0.0f, nb = 0.0f;
+                if (hue < 60.0f)       { nr = chroma; ng = intermediate; }
+                else if (hue < 120.0f) { nr = intermediate; ng = chroma; }
+                else if (hue < 180.0f) { ng = chroma; nb = intermediate; }
+                else if (hue < 240.0f) { ng = intermediate; nb = chroma; }
+                else if (hue < 300.0f) { nr = intermediate; nb = chroma; }
+                else                   { nr = chroma; nb = intermediate; }
+
+                return std::array<float, 3>{
+                    (nr + match) * intensity + redGreen * 0.15f + yellowBlue * 0.08f,
+                    (ng + match) * intensity - redGreen * 0.15f + yellowBlue * 0.08f,
+                    (nb + match) * intensity - yellowBlue * 0.16f
+                };
+            };
+
+            int h = result.height();
+            int w = result.width();
+            if (highPrecision) {
+                for (int y = 0; y < h; ++y) {
+                    QRgba64 *scan = reinterpret_cast<QRgba64 *>(result.scanLine(y));
+                    for (int x = 0; x < w; ++x) {
+                        const QRgba64 original = scan[x];
+                        const auto adjusted = adjustPixel(
+                            original.red() / 65535.0f,
+                            original.green() / 65535.0f,
+                            original.blue() / 65535.0f);
+                        scan[x] = QRgba64::fromRgba64(
+                            static_cast<quint16>(std::clamp(std::lround(adjusted[0] * 65535.0f), 0L, 65535L)),
+                            static_cast<quint16>(std::clamp(std::lround(adjusted[1] * 65535.0f), 0L, 65535L)),
+                            static_cast<quint16>(std::clamp(std::lround(adjusted[2] * 65535.0f), 0L, 65535L)),
+                            original.alpha());
+                    }
+                }
+                break;
+            }
+
+            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
 
             for (int y = 0; y < h; ++y) {
                 uchar *scan = result.scanLine(y);
@@ -432,7 +561,24 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
                 table[i] = static_cast<uint8_t>(std::clamp(y, 0, 255));
             }
 
-            if (result.depth() > 32) return QImage();
+            if (highPrecision) {
+                for (int y = 0; y < result.height(); ++y) {
+                    QRgba64 *scan = reinterpret_cast<QRgba64 *>(result.scanLine(y));
+                    for (int x = 0; x < result.width(); ++x) {
+                        QRgba64 pixel = scan[x];
+                        for (int c = 0; c < 3; ++c) {
+                            const qint64 source = rgba64Channel(pixel, c);
+                            const qint64 mapped = static_cast<qint64>(std::llround(
+                                static_cast<double>(source) * scale
+                                + static_cast<double>(bright) * 257.0));
+                            setRgba64Channel(pixel, c, static_cast<quint16>(
+                                std::clamp<qint64>(mapped, 0, 65535)));
+                        }
+                        scan[x] = pixel;
+                    }
+                }
+                break;
+            }
 
             int bytesPerPixel = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int h = result.height();
@@ -454,11 +600,67 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             if (power < 1) power = 1;
             if (power > 3) power = 3;
 
-            if (result.depth() > 32) return QImage();
-
-            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
             int h = result.height();
+
+            if (highPrecision) {
+                auto boxBlurPass64 = [w, h](QImage& image, int radius) {
+                    if (radius <= 0 || w <= 0 || h <= 0) return;
+                    QImage horizontal = image;
+                    const qint64 windowSize = static_cast<qint64>(radius) * 2 + 1;
+                    for (int y = 0; y < h; ++y) {
+                        const QRgba64 *src = reinterpret_cast<const QRgba64 *>(
+                            image.constScanLine(y));
+                        QRgba64 *dst = reinterpret_cast<QRgba64 *>(horizontal.scanLine(y));
+                        for (int c = 0; c < 3; ++c) {
+                            qint64 sum = 0;
+                            for (int offset = -radius; offset <= radius; ++offset)
+                                sum += rgba64Channel(src[std::clamp(offset, 0, w - 1)], c);
+                            for (int x = 0; x < w; ++x) {
+                                QRgba64 pixel = dst[x];
+                                setRgba64Channel(pixel, c,
+                                    static_cast<quint16>(sum / windowSize));
+                                dst[x] = pixel;
+                                const int left = std::clamp(x - radius, 0, w - 1);
+                                const int right = std::clamp(x + radius + 1, 0, w - 1);
+                                sum += static_cast<qint64>(rgba64Channel(src[right], c))
+                                     - static_cast<qint64>(rgba64Channel(src[left], c));
+                            }
+                        }
+                    }
+                    for (int x = 0; x < w; ++x) {
+                        for (int c = 0; c < 3; ++c) {
+                            qint64 sum = 0;
+                            for (int offset = -radius; offset <= radius; ++offset) {
+                                const int row = std::clamp(offset, 0, h - 1);
+                                const QRgba64 *src = reinterpret_cast<const QRgba64 *>(
+                                    horizontal.constScanLine(row));
+                                sum += rgba64Channel(src[x], c);
+                            }
+                            for (int y = 0; y < h; ++y) {
+                                QRgba64 *dst = reinterpret_cast<QRgba64 *>(image.scanLine(y));
+                                QRgba64 pixel = dst[x];
+                                setRgba64Channel(pixel, c,
+                                    static_cast<quint16>(sum / windowSize));
+                                dst[x] = pixel;
+                                const int top = std::clamp(y - radius, 0, h - 1);
+                                const int bottom = std::clamp(y + radius + 1, 0, h - 1);
+                                const QRgba64 *topRow = reinterpret_cast<const QRgba64 *>(
+                                    horizontal.constScanLine(top));
+                                const QRgba64 *bottomRow = reinterpret_cast<const QRgba64 *>(
+                                    horizontal.constScanLine(bottom));
+                                sum += static_cast<qint64>(rgba64Channel(bottomRow[x], c))
+                                     - static_cast<qint64>(rgba64Channel(topRow[x], c));
+                            }
+                        }
+                    }
+                };
+                for (int i = 0; i < power; ++i)
+                    boxBlurPass64(result, width);
+                break;
+            }
+
+            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
 
             auto boxBlurPass = [bpp, w, h](QImage &img, int radius) {
                 if (radius <= 0 || w <= 0 || h <= 0) return;
@@ -508,7 +710,22 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             break;
         }
         case VDFilterType::Grayscale: {
-            if (result.depth() > 32) return QImage();
+            if (highPrecision) {
+                for (int y = 0; y < result.height(); ++y) {
+                    QRgba64 *scan = reinterpret_cast<QRgba64 *>(result.scanLine(y));
+                    for (int x = 0; x < result.width(); ++x) {
+                        const QRgba64 pixel = scan[x];
+                        const quint16 gray = static_cast<quint16>((
+                            static_cast<quint64>(pixel.red()) * 19595U
+                            + static_cast<quint64>(pixel.green()) * 38470U
+                            + static_cast<quint64>(pixel.blue()) * 7471U
+                            + 32768U) >> 16);
+                        scan[x] = QRgba64::fromRgba64(
+                            gray, gray, gray, pixel.alpha());
+                    }
+                }
+                break;
+            }
             const int bpp = result.format() == QImage::Format_RGB888 ? 3 : 4;
             for (int y = 0; y < result.height(); y++) {
                 uchar *scan = result.scanLine(y);
@@ -532,14 +749,51 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
             int v = static_cast<int>(filter.params.value("amount", 16));
             if (v <= 0) break;
 
-            if (result.depth() > 32) return QImage();
-
-            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int w = result.width();
             int h = result.height();
 
             QImage temp = result;
-            int centerWeight = 256 + 8 * v;
+            const qint64 centerWeight = 256LL + 8LL * v;
+
+            if (highPrecision) {
+                for (int y = 0; y < h; ++y) {
+                    QRgba64 *dst = reinterpret_cast<QRgba64 *>(result.scanLine(y));
+                    const int yPrev = std::clamp(y - 1, 0, h - 1);
+                    const int yNext = std::clamp(y + 1, 0, h - 1);
+                    const QRgba64 *previous = reinterpret_cast<const QRgba64 *>(
+                        temp.constScanLine(yPrev));
+                    const QRgba64 *current = reinterpret_cast<const QRgba64 *>(
+                        temp.constScanLine(y));
+                    const QRgba64 *next = reinterpret_cast<const QRgba64 *>(
+                        temp.constScanLine(yNext));
+                    for (int x = 0; x < w; ++x) {
+                        const int xPrev = std::clamp(x - 1, 0, w - 1);
+                        const int xNext = std::clamp(x + 1, 0, w - 1);
+                        QRgba64 pixel = dst[x];
+                        for (int c = 0; c < 3; ++c) {
+                            const qint64 neighbors =
+                                rgba64Channel(previous[xPrev], c)
+                                + rgba64Channel(previous[x], c)
+                                + rgba64Channel(previous[xNext], c)
+                                + rgba64Channel(current[xPrev], c)
+                                + rgba64Channel(current[xNext], c)
+                                + rgba64Channel(next[xPrev], c)
+                                + rgba64Channel(next[x], c)
+                                + rgba64Channel(next[xNext], c);
+                            const qint64 value =
+                                (static_cast<qint64>(rgba64Channel(current[x], c))
+                                     * centerWeight
+                                 - neighbors * static_cast<qint64>(v) + 128LL) >> 8;
+                            setRgba64Channel(pixel, c, static_cast<quint16>(
+                                std::clamp<qint64>(value, 0, 65535)));
+                        }
+                        dst[x] = pixel;
+                    }
+                }
+                break;
+            }
+
+            int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
 
             for (int y = 0; y < h; ++y) {
                 uchar *dstRow = result.scanLine(y);

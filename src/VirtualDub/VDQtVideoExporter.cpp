@@ -2,6 +2,7 @@
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtAudioPlayer.h"
+#include "VDQtSourceSafety.h"
 #include <QProcess>
 #include <QProgressDialog>
 #include <QApplication>
@@ -16,8 +17,8 @@
 #include <QTemporaryFile>
 #include <cmath>
 #include <cstdio>
+#include <cerrno>
 #include <utility>
-#include <sys/stat.h>
 #include "VDQtDialogs.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -106,13 +107,7 @@ VDAudioCodecParams configuredAudioParams()
     if (!params.codecId.trimmed().isEmpty()) return params;
 
     const VDAudioCodecConfig fallback = VDQtCodecSettings::instance().getAudioConfig();
-    params.codecId = fallback.codecId;
-    params.rateMode = fallback.rateControlMode;
-    params.bitrateKbps = fallback.bitrateKbps;
-    params.vbrQuality = fallback.vbrQuality;
-    params.sampleRate = fallback.sampleRate;
-    params.channels = fallback.channels;
-    return params;
+    return VDQtCodecEngine::audioParamsFromConfig(fallback);
 }
 
 void appendBounded(QByteArray& destination, const QByteArray& data) {
@@ -193,6 +188,179 @@ bool writeFrame(QProcess& process, const QImage& image,
     return true;
 }
 
+class TimestampedNutWriter {
+public:
+    ~TimestampedNutWriter() { release(); }
+
+    bool open(QProcess& process,
+              QProgressDialog& progress,
+              QByteArray& diagnostics,
+              bool& cancelled,
+              int width,
+              int height,
+              AVPixelFormat pixelFormat,
+              AVRational averageFrameRate) {
+        mProcess = &process;
+        mProgress = &progress;
+        mDiagnostics = &diagnostics;
+        mCancelled = &cancelled;
+
+        int result = avformat_alloc_output_context2(&mFormat, nullptr, "nut", nullptr);
+        if (result < 0 || !mFormat)
+            return fail(QStringLiteral("Could not initialize the timestamped NUT stream."), result);
+
+        AVStream *stream = avformat_new_stream(mFormat, nullptr);
+        if (!stream)
+            return fail(QStringLiteral("Could not create the timestamped video stream."), AVERROR(ENOMEM));
+        mStreamIndex = stream->index;
+        stream->time_base = AVRational{1, 1000000};
+        stream->avg_frame_rate = averageFrameRate;
+        stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        stream->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
+        stream->codecpar->format = pixelFormat;
+        stream->codecpar->width = width;
+        stream->codecpar->height = height;
+        stream->codecpar->codec_tag = 0;
+
+        constexpr int ioBufferSize = 64 * 1024;
+        unsigned char *buffer = static_cast<unsigned char *>(av_malloc(ioBufferSize));
+        if (!buffer)
+            return fail(QStringLiteral("Could not allocate the timestamped stream buffer."), AVERROR(ENOMEM));
+        mIo = avio_alloc_context(buffer, ioBufferSize, 1, this, nullptr,
+                                 &TimestampedNutWriter::writePacket, nullptr);
+        if (!mIo) {
+            av_free(buffer);
+            return fail(QStringLiteral("Could not create the timestamped stream pipe."), AVERROR(ENOMEM));
+        }
+        mFormat->pb = mIo;
+        mFormat->flags |= AVFMT_FLAG_CUSTOM_IO;
+        result = avformat_write_header(mFormat, nullptr);
+        if (result < 0)
+            return fail(QStringLiteral("Could not write the timestamped stream header."), result);
+        mStreamTimeBase = stream->time_base;
+        mHeaderWritten = true;
+        return true;
+    }
+
+    bool writeImage(const QImage& image, qint64 ptsUs, qint64 durationUs) {
+        if (!mFormat || !mHeaderWritten || image.isNull() || durationUs <= 0)
+            return false;
+        const int bytesPerPixel = image.depth() / 8;
+        if (bytesPerPixel != 3 && bytesPerPixel != 4 && bytesPerPixel != 8)
+            return fail(QStringLiteral("The timestamped pipe received an unsupported image format."), AVERROR(EINVAL));
+        const qint64 rowBytes = static_cast<qint64>(image.width()) * bytesPerPixel;
+        const qint64 packetBytes = rowBytes * image.height();
+        if (packetBytes <= 0 || packetBytes > std::numeric_limits<int>::max())
+            return fail(QStringLiteral("A timestamped video frame is too large."), AVERROR(EINVAL));
+
+        AVPacket *packet = av_packet_alloc();
+        if (!packet)
+            return fail(QStringLiteral("Could not allocate a timestamped video packet."), AVERROR(ENOMEM));
+        int result = av_new_packet(packet, static_cast<int>(packetBytes));
+        if (result >= 0) {
+            unsigned char *destination = packet->data;
+            for (int y = 0; y < image.height(); ++y) {
+                memcpy(destination, image.constScanLine(y), static_cast<size_t>(rowBytes));
+                destination += rowBytes;
+            }
+            packet->stream_index = mStreamIndex;
+            const AVRational microseconds{1, 1000000};
+            packet->pts = av_rescale_q(ptsUs, microseconds, mStreamTimeBase);
+            packet->dts = packet->pts;
+            packet->duration = std::max<int64_t>(
+                1, av_rescale_q(durationUs, microseconds, mStreamTimeBase));
+            packet->pos = -1;
+            packet->flags |= AV_PKT_FLAG_KEY;
+            result = av_interleaved_write_frame(mFormat, packet);
+        }
+        av_packet_free(&packet);
+        if (result < 0)
+            return fail(QStringLiteral("Could not write a timestamped video frame."), result);
+        return true;
+    }
+
+    bool finish() {
+        if (!mFormat || !mHeaderWritten) return false;
+        const int result = av_write_trailer(mFormat);
+        mHeaderWritten = false;
+        if (mIo) avio_flush(mIo);
+        if (result < 0)
+            return fail(QStringLiteral("Could not finalize the timestamped video stream."), result);
+        release();
+        return true;
+    }
+
+private:
+    static int writePacket(void *opaque, const uint8_t *buffer, int size) {
+        return static_cast<TimestampedNutWriter *>(opaque)->writeBytes(buffer, size);
+    }
+
+    int writeBytes(const uint8_t *buffer, int size) {
+        if (!mProcess || !mProgress || !mDiagnostics || !mCancelled)
+            return AVERROR(EIO);
+        int remaining = size;
+        const char *source = reinterpret_cast<const char *>(buffer);
+        while (remaining > 0) {
+            while (mProcess->bytesToWrite() >= kMaxQueuedFfmpegBytes) {
+                if (mProcess->state() == QProcess::NotRunning) {
+                    drainProcessOutput(*mProcess, *mDiagnostics);
+                    return AVERROR(EPIPE);
+                }
+                mProcess->waitForBytesWritten(kProcessPollMs);
+                drainProcessOutput(*mProcess, *mDiagnostics);
+                QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+                if (mProgress->wasCanceled()) {
+                    *mCancelled = true;
+                    return AVERROR_EXIT;
+                }
+            }
+            const qint64 written = mProcess->write(source, remaining);
+            if (written <= 0) {
+                drainProcessOutput(*mProcess, *mDiagnostics);
+                return AVERROR(EPIPE);
+            }
+            source += written;
+            remaining -= static_cast<int>(written);
+        }
+        drainProcessOutput(*mProcess, *mDiagnostics);
+        return size;
+    }
+
+    bool fail(const QString& message, int errorCode) {
+        QByteArray detail = message.toUtf8();
+        if (errorCode < 0) {
+            char errorBuffer[AV_ERROR_MAX_STRING_SIZE] = {};
+            av_strerror(errorCode, errorBuffer, sizeof errorBuffer);
+            detail += QByteArrayLiteral(" ") + errorBuffer;
+        }
+        detail += '\n';
+        if (mDiagnostics) appendBounded(*mDiagnostics, detail);
+        return false;
+    }
+
+    void release() {
+        if (mFormat) mFormat->pb = nullptr;
+        if (mIo) {
+            av_freep(&mIo->buffer);
+            avio_context_free(&mIo);
+        }
+        if (mFormat) avformat_free_context(mFormat);
+        mFormat = nullptr;
+        mStreamIndex = -1;
+        mHeaderWritten = false;
+    }
+
+    QProcess *mProcess = nullptr;
+    QProgressDialog *mProgress = nullptr;
+    QByteArray *mDiagnostics = nullptr;
+    bool *mCancelled = nullptr;
+    AVFormatContext *mFormat = nullptr;
+    AVIOContext *mIo = nullptr;
+    int mStreamIndex = -1;
+    AVRational mStreamTimeBase{1, 1000000};
+    bool mHeaderWritten = false;
+};
+
 bool validOutputFile(const QString& path) {
     const QFileInfo info(path);
     return info.exists() && info.isFile() && info.size() > 0;
@@ -201,21 +369,6 @@ bool validOutputFile(const QString& path) {
 void removePartialOutput(const QString& path) {
     if (!path.isEmpty() && QFileInfo::exists(path))
         QFile::remove(path);
-}
-
-bool pathsReferToSameFile(const QString& firstPath, const QString& secondPath) {
-    const QFileInfo first(firstPath);
-    const QFileInfo second(secondPath);
-    if (first.absoluteFilePath() == second.absoluteFilePath()) return true;
-
-    struct stat firstStatus = {};
-    struct stat secondStatus = {};
-    const QByteArray firstName = QFile::encodeName(first.absoluteFilePath());
-    const QByteArray secondName = QFile::encodeName(second.absoluteFilePath());
-    return ::stat(firstName.constData(), &firstStatus) == 0
-        && ::stat(secondName.constData(), &secondStatus) == 0
-        && firstStatus.st_dev == secondStatus.st_dev
-        && firstStatus.st_ino == secondStatus.st_ino;
 }
 
 QString stagedOutputTemplate(const QString& outputPath) {
@@ -253,7 +406,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     QWidget *parentWidget,
                                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback) {
     if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) return false;
-    if (pathsReferToSameFile(options.inputPath, options.outputPath)) {
+    if (VDQtSourceSafety::pathsReferToSameFile(options.inputPath, options.outputPath)) {
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsafe Output Path",
                                   "The output file is the currently loaded source. Choose a different path.");
@@ -286,35 +439,37 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
     }
     const QString loadedSourcePath = decoder.getFilePath();
-    const bool scriptBackedInput = decoder.isAvsNative()
-        || options.inputPath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
-        || options.inputPath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive)
-        || loadedSourcePath.endsWith(QStringLiteral(".avs"), Qt::CaseInsensitive)
-        || loadedSourcePath.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive);
-    if (scriptBackedInput) {
-        const QStringList scriptSources = VDQtVideoDecoder::parseScriptSources(options.inputPath);
-        for (const QString& sourcePath : scriptSources) {
-            if (pathsReferToSameFile(sourcePath, options.outputPath)) {
-                if (parentWidget) {
-                    QMessageBox::critical(
-                        parentWidget, "Unsafe Output Path",
-                        QString("The output aliases media referenced by the AviSynth script:\n%1\n"
-                                "Choose a different destination.").arg(sourcePath));
-                }
-                return false;
-            }
+    const QString scriptPath = VDQtSourceSafety::isScriptPath(loadedSourcePath)
+        ? loadedSourcePath
+        : (VDQtSourceSafety::isScriptPath(options.inputPath)
+               ? options.inputPath : QString());
+    QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
+    if (audioPlayer)
+        directlyLoadedSources.append(audioPlayer->getSourcePath());
+    const VDQtOutputSafetyReport outputSafety = VDQtSourceSafety::evaluateOutputPath(
+        options.outputPath, directlyLoadedSources, scriptPath);
+    if (!outputSafety.isSafe()) {
+        if (parentWidget) {
+            const bool aliases = outputSafety.issue
+                == VDQtOutputSafetyIssue::AliasesLoadedSource;
+            QMessageBox::critical(
+                parentWidget,
+                aliases ? "Unsafe Output Path" : "Unsafe Script Output Path",
+                aliases
+                    ? QString("The output aliases a loaded or script-referenced source:\n%1\n"
+                              "Choose a different destination.")
+                          .arg(outputSafety.aliasedPath)
+                    : QStringLiteral(
+                          "An existing destination cannot be replaced because the loaded script "
+                          "contains unresolved or dynamically computed source paths. Choose a new output path."));
         }
-        const QFileInfo existingOutput(options.outputPath);
-        if (existingOutput.exists() || existingOutput.isSymLink()) {
-            if (parentWidget) {
-                QMessageBox::critical(
-                    parentWidget, "Unsafe Script Output Path",
-                    "An existing destination cannot be replaced while exporting an AviSynth script, "
-                    "because scripts can compute source paths dynamically. Choose a new output path.");
-            }
-            return false;
-        }
+        return false;
     }
+    const auto outputStillSafe = [&]() {
+        return VDQtSourceSafety::evaluateOutputPath(
+                   options.outputPath, directlyLoadedSources, scriptPath)
+            .isSafe();
+    };
 
     AudioStreamProbe sourceAudioProbe;
     if (!decoder.isAvsNative()) {
@@ -474,6 +629,17 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         && presentationTimestampsUsable
         && !options.convertFpsPreserveDuration
         && options.customFps <= 0.0;
+    if (preserveNativeVfr
+        && (options.containerType.startsWith(QStringLiteral("avi"), Qt::CaseInsensitive)
+            || options.outputPath.endsWith(QStringLiteral(".avi"), Qt::CaseInsensitive))) {
+        if (parentWidget) {
+            QMessageBox::critical(
+                parentWidget, "Unsupported VFR Container",
+                "AVI cannot reliably represent this source's variable frame timing. "
+                "Choose MKV, MP4, MOV, WebM, or NUT, or explicitly convert to a constant frame rate.");
+        }
+        return false;
+    }
     if (options.convertFpsPreserveDuration && options.customFps > 0.0)
         useTimestampFrameMapping = presentationTimestampsUsable;
 
@@ -493,9 +659,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     } else if (options.customFps > 0.0) {
         fps = options.customFps;
     } else if (preserveNativeVfr) {
-        // The VFR path stages one lossless image per processed source frame and
-        // gives FFmpeg an explicit duration for each image. `fps` remains an
-        // informational/codec fallback value; it no longer determines PTS.
+        // The timestamped NUT pipe gives every processed frame an explicit PTS
+        // and duration. `fps` is informational only and does not determine PTS.
         fps = static_cast<double>(framesToExport) / sourceDurationSeconds;
     } else if ((indexedForExport || hasFrameSelection)
                && std::isfinite(sourceDurationSeconds) && sourceDurationSeconds > 0.0) {
@@ -614,7 +779,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
         const bool processOk = waitForProcess(ffmpeg, progress, diagnostics, cancelled)
                             && validOutputFile(processOutputPath);
-        const bool ok = processOk && replaceWithStagedFile(processOutputPath, options.outputPath);
+        const bool ok = processOk && outputStillSafe()
+                     && replaceWithStagedFile(processOutputPath, options.outputPath);
         progress.setValue(100);
         if (!ok) {
             removePartialOutput(processOutputPath);
@@ -737,148 +903,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         rawInputImageFormat = QImage::Format_RGBA8888;
     }
 
-    QTemporaryDir vfrFrameDirectory(
-        QDir::tempPath() + QStringLiteral("/virtualdub-vfr-XXXXXX"));
-    QString vfrManifestPath;
-    if (preserveNativeVfr) {
-        if (!vfrFrameDirectory.isValid()) {
-            if (parentWidget)
-                QMessageBox::critical(parentWidget, "Export Error",
-                                      "Temporary storage for variable-frame-rate frames could not be created.");
-            return false;
-        }
-
-        QProgressDialog stagingProgress(
-            "Preparing timestamped variable-frame-rate frames...", "Cancel",
-            0, std::max(1, framesToExport), parentWidget);
-        stagingProgress.setWindowModality(Qt::WindowModal);
-        stagingProgress.setMinimumDuration(0);
-
-        QByteArray manifest("ffconcat version 1.0\n");
-        QString lastFrameName;
-        int stagedFrames = 0;
-        bool stagingFailed = false;
-        QString stagingError;
-
-        for (int64_t sourceFrame64 = startFrame;
-             sourceFrame64 <= endFrame;
-             sourceFrame64 += step) {
-            const int sourceFrame = static_cast<int>(sourceFrame64);
-            QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
-            if (stagingProgress.wasCanceled()) {
-                stagingError = QStringLiteral("Variable-frame-rate export was cancelled.");
-                stagingFailed = true;
-                break;
-            }
-
-            QImage rawFrame = decoder.getFrameImage(sourceFrame);
-            if (rawFrame.isNull()) {
-                stagingError = QString("Failed to decode source frame %1.").arg(sourceFrame);
-                stagingFailed = true;
-                break;
-            }
-
-            QList<QImage> filteredFrames;
-            if (applyFilters) {
-                if (!VDQtFilterSystem::instance().processFrameSequence(rawFrame, filteredFrames)
-                    || filteredFrames.size() != filterFramesPerInput) {
-                    stagingError = QString("The temporal filter chain failed at source frame %1.")
-                                       .arg(sourceFrame);
-                    stagingFailed = true;
-                    break;
-                }
-            } else {
-                filteredFrames.append(rawFrame);
-            }
-
-            const double frameStart = decoder.getFrameTimestampSeconds(sourceFrame);
-            const int nextSourceFrame = sourceFrame + step;
-            const double frameEnd = nextSourceFrame <= endFrame
-                ? decoder.getFrameTimestampSeconds(nextSourceFrame)
-                : sourceStartSeconds + sourceDurationSeconds;
-            if (!std::isfinite(frameStart) || !std::isfinite(frameEnd)
-                || frameEnd <= frameStart) {
-                stagingError = QString("Source frame %1 has an invalid presentation duration.")
-                                   .arg(sourceFrame);
-                stagingFailed = true;
-                break;
-            }
-            const double phaseDuration = (frameEnd - frameStart) / filteredFrames.size();
-            if (!std::isfinite(phaseDuration) || phaseDuration < 0.000001) {
-                stagingError = QString("Source frame %1 has a presentation phase shorter than one microsecond.")
-                                   .arg(sourceFrame);
-                stagingFailed = true;
-                break;
-            }
-
-            for (const QImage& filteredFrame : std::as_const(filteredFrames)) {
-                if (filteredFrame.isNull()
-                    || filteredFrame.width() != outW
-                    || filteredFrame.height() != outH) {
-                    stagingError = QString("Filter output dimensions changed at frame %1.")
-                                       .arg(sourceFrame);
-                    stagingFailed = true;
-                    break;
-                }
-
-                const QString frameName = QString("frame_%1.png")
-                                              .arg(stagedFrames, 8, 10, QLatin1Char('0'));
-                const QString framePath = vfrFrameDirectory.filePath(frameName);
-                if (!filteredFrame.save(framePath, "PNG")) {
-                    stagingError = QString("Could not stage processed frame %1.").arg(sourceFrame);
-                    stagingFailed = true;
-                    break;
-                }
-
-                manifest += "file '" + frameName.toUtf8() + "'\n";
-                // A microsecond image-demuxer time base preserves source PTS.
-                // A repeated final image below supplies the end timestamp for
-                // the preceding frame; its one-microsecond sentinel duration is
-                // visually inert but allows muxers to retain that final dwell.
-                manifest += "option framerate 1000000\n";
-                manifest += "duration "
-                         + QString::number(phaseDuration, 'f', 12).toLatin1()
-                         + '\n';
-                lastFrameName = frameName;
-                ++stagedFrames;
-
-                if (frameCallback)
-                    frameCallback(sourceFrame, rawFrame, filteredFrame);
-                stagingProgress.setValue(stagedFrames);
-            }
-            if (stagingFailed) break;
-        }
-
-        if (!stagingFailed && stagedFrames != framesToExport) {
-            stagingError = QString("Prepared %1 frames, but %2 were expected.")
-                               .arg(stagedFrames).arg(framesToExport);
-            stagingFailed = true;
-        }
-        if (!stagingFailed) {
-            manifest += "file '" + lastFrameName.toUtf8() + "'\n";
-            manifest += "option framerate 1000000\n";
-            vfrManifestPath = vfrFrameDirectory.filePath(QStringLiteral("timeline.ffconcat"));
-            QFile manifestFile(vfrManifestPath);
-            if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
-                || manifestFile.write(manifest) != manifest.size()) {
-                stagingError = QStringLiteral("The variable-frame-rate timeline could not be written.");
-                stagingFailed = true;
-            }
-        }
-        stagingProgress.close();
-        if (stagingFailed) {
-            qWarning() << "[Exporter]" << stagingError;
-            if (parentWidget && !stagingProgress.wasCanceled())
-                QMessageBox::critical(parentWidget, "Export Error", stagingError);
-            return false;
-        }
-    }
-
     args << "-y";
     if (preserveNativeVfr) {
-        args << "-f" << "concat"
-             << "-safe" << "0"
-             << "-i" << vfrManifestPath;
+        args << "-f" << "nut" << "-i" << "-";
     } else {
         args << "-f" << "rawvideo"
              << "-pix_fmt" << rawInputPixelFormat
@@ -974,7 +1001,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         if (vParams.keyframeInterval > 0 && vParams.keyframeInterval <= 10000) {
             args << "-g" << QString::number(vParams.keyframeInterval);
         }
-        if (vParams.bFrames > 0 && vParams.bFrames <= 16) {
+        // With sparse VFR timestamps, FFmpeg/libx264 can reorder a far-future
+        // B-frame before earlier presentation frames. MP4/MOV then derive a
+        // decode-track duration shorter than the largest PTS and may stop
+        // playback early. Keep PTS/DTS monotonic for native VFR exports.
+        if (preserveNativeVfr && vParams.bFrames > 0) {
+            args << "-bf" << "0";
+        } else if (vParams.bFrames > 0 && vParams.bFrames <= 16) {
             args << "-bf" << QString::number(vParams.bFrames);
         }
         if (!vParams.colorMatrix.isEmpty() && vParams.colorMatrix != "auto" && vParams.colorMatrix != "none") {
@@ -1017,8 +1050,11 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
         args << "-pix_fmt" << outPixFmt;
     }
-    if (preserveNativeVfr)
-        args << "-fps_mode" << "vfr";
+    if (preserveNativeVfr) {
+        args << "-fps_mode" << "vfr"
+             << "-enc_time_base:v" << "1:1000000"
+             << "-avoid_negative_ts" << "disabled";
+    }
 
     // 5. Audio Codec & Options
     if (hasAudioInput) {
@@ -1034,8 +1070,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
         // Bound the mux to the generated video duration. Using -shortest here
         // would let a slightly shorter audio stream truncate valid video frames.
-        const double muxDuration = outputDurationSeconds
-                                 + (preserveNativeVfr ? 0.000001 : 0.0);
+        const double muxDuration = outputDurationSeconds;
         args << "-t" << QString::number(muxDuration, 'f', 9);
     }
 
@@ -1080,10 +1115,33 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     QElapsedTimer timer;
     timer.start();
 
-    int doneCount = preserveNativeVfr ? framesToExport : 0;
-    for (int inputIndex = 0;
-         !preserveNativeVfr && inputIndex < inputFramesToProcess;
-         ++inputIndex) {
+    TimestampedNutWriter timestampedWriter;
+    if (preserveNativeVfr) {
+        const AVPixelFormat inputPixelFormat =
+            av_get_pix_fmt(rawInputPixelFormat.toUtf8().constData());
+        const int finalSourceFrame = startFrame
+            + std::max(0, inputFramesToProcess - 1) * step;
+        const double finalSourceTimestamp =
+            decoder.getFrameTimestampSeconds(std::min(finalSourceFrame, endFrame));
+        const double finalPhaseDuration =
+            (sourceStartSeconds + sourceDurationSeconds - finalSourceTimestamp)
+            / std::max(1, filterFramesPerInput);
+        const AVRational terminalFrameRate =
+            std::isfinite(finalPhaseDuration) && finalPhaseDuration > 0.0
+                ? av_d2q(1.0 / finalPhaseDuration, 1000000)
+                : av_d2q(sourceFps * filterFramesPerInput, 1000000);
+        if (inputPixelFormat == AV_PIX_FMT_NONE
+            || !timestampedWriter.open(ffmpeg, progress, diagnostics, cancelled,
+                                       outW, outH, inputPixelFormat,
+                                       terminalFrameRate)) {
+            stopProcess(ffmpeg);
+            removePartialOutput(processOutputPath);
+            return false;
+        }
+    }
+
+    int doneCount = 0;
+    for (int inputIndex = 0; inputIndex < inputFramesToProcess; ++inputIndex) {
         if (progress.wasCanceled()) {
             cancelled = true;
             break;
@@ -1135,7 +1193,26 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             filteredFrames.append(rawFrame);
         }
 
-        for (QImage filtered : filteredFrames) {
+        double vfrFrameStart = 0.0;
+        double vfrFrameEnd = 0.0;
+        if (preserveNativeVfr) {
+            vfrFrameStart = decoder.getFrameTimestampSeconds(f);
+            const int nextSourceFrame = f + step;
+            vfrFrameEnd = nextSourceFrame <= endFrame
+                ? decoder.getFrameTimestampSeconds(nextSourceFrame)
+                : sourceStartSeconds + sourceDurationSeconds;
+            if (!std::isfinite(vfrFrameStart) || !std::isfinite(vfrFrameEnd)
+                || vfrFrameEnd <= vfrFrameStart) {
+                appendBounded(diagnostics,
+                    QString("Source frame %1 has an invalid presentation duration.\n")
+                        .arg(f).toUtf8());
+                writeFailed = true;
+                break;
+            }
+        }
+
+        for (int phase = 0; phase < filteredFrames.size(); ++phase) {
+            QImage filtered = filteredFrames.at(phase);
             if (filtered.isNull() || filtered.width() != outW || filtered.height() != outH) {
                 appendBounded(diagnostics,
                     QString("Filter output dimensions changed at frame %1; expected %2x%3, got %4x%5.\n")
@@ -1146,7 +1223,25 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             if (filtered.format() != rawInputImageFormat)
                 filtered = filtered.convertToFormat(rawInputImageFormat);
 
-            if (!writeFrame(ffmpeg, filtered, progress, diagnostics, cancelled)) {
+            bool frameWritten = false;
+            if (preserveNativeVfr) {
+                const double phaseStart = vfrFrameStart
+                    + (vfrFrameEnd - vfrFrameStart)
+                        * static_cast<double>(phase) / filteredFrames.size();
+                const double phaseEnd = vfrFrameStart
+                    + (vfrFrameEnd - vfrFrameStart)
+                        * static_cast<double>(phase + 1) / filteredFrames.size();
+                const qint64 ptsUs = std::llround(
+                    (phaseStart - sourceStartSeconds) * 1000000.0);
+                const qint64 endUs = std::llround(
+                    (phaseEnd - sourceStartSeconds) * 1000000.0);
+                frameWritten = endUs > ptsUs
+                    && timestampedWriter.writeImage(filtered, ptsUs, endUs - ptsUs);
+            } else {
+                frameWritten = writeFrame(
+                    ffmpeg, filtered, progress, diagnostics, cancelled);
+            }
+            if (!frameWritten) {
                 writeFailed = !cancelled;
                 break;
             }
@@ -1176,15 +1271,17 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     bool processOk = false;
-    if (preserveNativeVfr) {
-        progress.setLabelText("Encoding timestamped variable-frame-rate video...");
-        progress.setValue(50);
-        QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
-        processOk = waitForProcess(ffmpeg, progress, diagnostics, cancelled);
-    } else if (cancelled || writeFailed) {
+    if (cancelled || writeFailed) {
         stopProcess(ffmpeg);
         drainProcessOutput(ffmpeg, diagnostics);
     } else {
+        if (preserveNativeVfr && !timestampedWriter.finish()) {
+            writeFailed = true;
+            stopProcess(ffmpeg);
+            drainProcessOutput(ffmpeg, diagnostics);
+        }
+    }
+    if (!cancelled && !writeFailed) {
         ffmpeg.closeWriteChannel();
         progress.setLabelText("Finalizing video stream and container metadata...");
         progress.setValue(96);
@@ -1198,7 +1295,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
     const bool encoded = !cancelled && !writeFailed && processOk
                       && doneCount == framesToExport && validOutputFile(processOutputPath);
-    const bool success = encoded && replaceWithStagedFile(processOutputPath, options.outputPath);
+    const bool success = encoded && outputStillSafe()
+                      && replaceWithStagedFile(processOutputPath, options.outputPath);
     if (!success) {
         removePartialOutput(processOutputPath);
         QString errOutput = QString::fromUtf8(diagnostics);

@@ -13,29 +13,11 @@ VDQtCodecSettings& VDQtCodecSettings::instance() {
     return sInst;
 }
 
-void VDQtCodecSettings::setVideoConfig(const VDVideoCodecConfig& cfg) {
-    mVideoConfig = cfg;
-}
-
 void VDQtCodecSettings::setAudioConfig(const VDAudioCodecConfig& cfg) {
     mAudioConfig = cfg;
 }
 
 void VDQtCodecSettings::resetToDefaults() {
-    // Video defaults
-    mVideoConfig.codecId = "libx264";
-    mVideoConfig.codecName = "H.264 / AVC (libx264)";
-    mVideoConfig.rateControlMode = "crf";
-    mVideoConfig.crf = 23;
-    mVideoConfig.targetBitrateKbps = 5000;
-    mVideoConfig.maxBitrateKbps = 10000;
-    mVideoConfig.preset = "medium";
-    mVideoConfig.tune = "none";
-    mVideoConfig.profile = "high";
-    mVideoConfig.proresProfile = 2; // Standard / SQ
-    mVideoConfig.pixFmt = "yuv420p";
-    mVideoConfig.keyframeInterval = 250;
-
     // Audio defaults
     mAudioConfig.codecId = "aac";
     mAudioConfig.codecName = "AAC (Advanced Audio Coding)";

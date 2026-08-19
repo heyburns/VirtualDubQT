@@ -6,6 +6,8 @@
 #include <QList>
 #include <QMap>
 
+struct VDAudioCodecConfig;
+
 // Video Codec Definitions
 struct VDVideoCodecInfo {
     QString id;                 // e.g. "libx264", "prores_ks", "ffv1", "huffyuv", "cfhd"
@@ -104,6 +106,10 @@ public:
     // Builds the complete FFmpeg audio encoder option set used by every video
     // export path. Keeping this centralized prevents direct-video-copy exports
     // from silently ignoring rate control, resampling, or channel settings.
+    static VDAudioCodecParams audioParamsFromConfig(
+        const VDAudioCodecConfig& config,
+        int sourceSampleRate = 0,
+        int sourceChannels = 0);
     static QStringList buildFfmpegAudioEncodeArguments(const VDAudioCodecParams& params);
 
     void resetToDefaults();

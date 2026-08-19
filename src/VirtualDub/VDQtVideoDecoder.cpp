@@ -128,11 +128,28 @@ QStringList resolveScriptPathLiteral(const QString& literal, const QDir& scriptD
     return matches;
 }
 
+bool looksLikePathLiteral(const QString& literal) {
+    const QString value = literal.trimmed();
+    if (value.contains(QLatin1Char('/')) || value.contains(QLatin1Char('\\'))
+        || value.contains(QLatin1Char('*')) || value.contains(QLatin1Char('#'))
+        || value.contains(QRegularExpression(QStringLiteral("%[-+0 #]*\\d*(?:\\.\\d+)?[diu]")))) {
+        return true;
+    }
+    static const QRegularExpression extensionRegex(QStringLiteral(
+        R"(\.(?:avs|avsi|vpy|py|avi|mp4|m4v|mkv|mov|webm|nut|ts|m2ts|mpg|mpeg|vob|wav|flac|mp3|aac|m4a|ogg|opus|png|jpe?g|bmp|tiff?|webp)$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    return extensionRegex.match(value).hasMatch();
+}
+
 void collectScriptDependencies(const QString& scriptPath,
                                QSet<QString>& visitedScripts,
-                               QStringList& dependencies,
+                               VDQtVideoDecoder::ScriptDependencyReport& report,
                                int depth) {
-    if (depth > 32) return;
+    if (depth > 32) {
+        report.complete = false;
+        report.diagnostics.append(QStringLiteral("Script import depth exceeds 32 levels."));
+        return;
+    }
     const QFileInfo scriptInfo(scriptPath);
     const QString absoluteScriptPath = scriptInfo.absoluteFilePath();
     const QString visitKey = scriptInfo.canonicalFilePath().isEmpty()
@@ -142,7 +159,13 @@ void collectScriptDependencies(const QString& scriptPath,
     visitedScripts.insert(visitKey);
 
     QFile scriptFile(absoluteScriptPath);
-    if (!scriptFile.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    if (!scriptFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        report.complete = false;
+        report.unresolvedPathLiterals.append(absoluteScriptPath);
+        report.diagnostics.append(QStringLiteral("Cannot read script dependency: %1")
+                                      .arg(absoluteScriptPath));
+        return;
+    }
     const QString content = QString::fromUtf8(scriptFile.readAll());
     scriptFile.close();
 
@@ -160,11 +183,63 @@ void collectScriptDependencies(const QString& scriptPath,
             ? match.captured(2)
             : match.captured(1);
         const QStringList resolved = resolveScriptPathLiteral(literal, scriptDirectory);
+        if (resolved.isEmpty() && looksLikePathLiteral(literal)) {
+            report.complete = false;
+            const QString unresolved = QFileInfo(literal).isAbsolute()
+                ? QDir::cleanPath(literal)
+                : QDir::cleanPath(scriptDirectory.absoluteFilePath(literal));
+            if (!report.unresolvedPathLiterals.contains(unresolved))
+                report.unresolvedPathLiterals.append(unresolved);
+        }
         for (const QString& dependency : resolved) {
-            if (!dependencies.contains(dependency))
-                dependencies.append(dependency);
+            if (!report.resolvedPaths.contains(dependency))
+                report.resolvedPaths.append(dependency);
             if (isScriptDependencyFile(dependency))
-                collectScriptDependencies(dependency, visitedScripts, dependencies, depth + 1);
+                collectScriptDependencies(dependency, visitedScripts, report, depth + 1);
+        }
+    }
+
+    // A dependency audit can only be called complete for the deliberately
+    // narrow literal-source subset. Anything capable of constructing a path
+    // at runtime keeps the conservative existing-destination guard enabled.
+    static const QRegularExpression dynamicPathRegex(QStringLiteral(
+        R"((?:\+\s*[A-Za-z_]|[A-Za-z_]\s*\+|\b(?:eval|exec|getenv|environ|glob|format)\b|\$\{|\{[^}\r\n]*\}))"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression sourceCallRegex(QStringLiteral(
+        R"(\b(?:AVISource|OpenDMLSource|DirectShowSource|FFVideoSource|FFAudioSource|LWLibavVideoSource|LWLibavAudioSource|ImageSource|ImageReader|Import|Source)\s*\(\s*(?:[A-Za-z_]\w*\s*=\s*)?([^,\)\r\n]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (dynamicPathRegex.match(content).hasMatch()) {
+        report.complete = false;
+        report.diagnostics.append(QStringLiteral("The script contains runtime path construction."));
+    }
+    QRegularExpressionMatchIterator sourceCalls = sourceCallRegex.globalMatch(content);
+    while (sourceCalls.hasNext()) {
+        const QString argument = sourceCalls.next().captured(1).trimmed();
+        if (!argument.startsWith(QLatin1Char('"')) && !argument.startsWith(QLatin1Char('\''))) {
+            report.complete = false;
+            report.diagnostics.append(
+                QStringLiteral("A source path is supplied through a variable or expression: %1")
+                    .arg(argument.left(160)));
+        }
+    }
+    static const QSet<QString> auditedCalls = {
+        QStringLiteral("avisource"), QStringLiteral("opendmlsource"),
+        QStringLiteral("directshowsource"), QStringLiteral("ffvideosource"),
+        QStringLiteral("ffaudiosource"), QStringLiteral("lwlibavvideosource"),
+        QStringLiteral("lwlibavaudiosource"), QStringLiteral("imagesource"),
+        QStringLiteral("imagereader"), QStringLiteral("import"),
+        QStringLiteral("source")
+    };
+    static const QRegularExpression functionCallRegex(QStringLiteral(
+        R"(\b([A-Za-z_]\w*)\s*\()"));
+    QRegularExpressionMatchIterator functionCalls = functionCallRegex.globalMatch(content);
+    while (functionCalls.hasNext()) {
+        const QString functionName = functionCalls.next().captured(1).toLower();
+        if (!auditedCalls.contains(functionName)) {
+            report.complete = false;
+            report.diagnostics.append(
+                QStringLiteral("Dependency behavior of script function '%1' cannot be proven.")
+                    .arg(functionName));
         }
     }
 }
@@ -220,10 +295,26 @@ QString VDQtVideoDecoder::parseScriptSource(const QString& scriptPath) {
 }
 
 QStringList VDQtVideoDecoder::parseScriptSources(const QString& scriptPath) {
-    QStringList resolvedSources;
+    return auditScriptDependencies(scriptPath).resolvedPaths;
+}
+
+VDQtVideoDecoder::ScriptDependencyReport
+VDQtVideoDecoder::auditScriptDependencies(const QString& scriptPath) {
+    ScriptDependencyReport report;
+    report.complete = true;
+    const QFileInfo info(scriptPath);
+    if (!isScriptDependencyFile(scriptPath) || (!info.exists() && !info.isSymLink())) {
+        report.complete = false;
+        report.unresolvedPathLiterals.append(info.absoluteFilePath());
+        report.diagnostics.append(QStringLiteral("The script file does not exist or has an unsupported extension."));
+        return report;
+    }
     QSet<QString> visitedScripts;
-    collectScriptDependencies(scriptPath, visitedScripts, resolvedSources, 0);
-    return resolvedSources;
+    collectScriptDependencies(scriptPath, visitedScripts, report, 0);
+    report.resolvedPaths.removeDuplicates();
+    report.unresolvedPathLiterals.removeDuplicates();
+    report.diagnostics.removeDuplicates();
+    return report;
 }
 
 QImage VDQtVideoDecoder::generateSyntheticFrame(int frameIndex) {

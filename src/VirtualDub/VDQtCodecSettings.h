@@ -3,30 +3,6 @@
 
 #include <QString>
 
-struct VDVideoCodecConfig {
-    QString codecId = "libx264";
-    QString codecName = "H.264 / AVC (libx264)";
-    
-    // Rate Control Mode: "crf", "bitrate", "cqp"
-    QString rateControlMode = "crf";
-    int crf = 23;
-    int targetBitrateKbps = 5000;
-    int maxBitrateKbps = 10000;
-    
-    // Encoder Speed / Preset
-    QString preset = "medium";
-    QString tune = "none";
-    QString profile = "high";
-    
-    // ProRes specific
-    int proresProfile = 3;
-    
-    // Pixel Format
-    QString pixFmt = "yuv420p";
-    
-    int keyframeInterval = 0;
-};
-
 struct VDAudioCodecConfig {
     QString codecId = "aac";
     QString codecName = "AAC (Advanced Audio Coding)";
@@ -65,9 +41,6 @@ public:
 
     static VDQtCodecSettings& instance();
 
-    const VDVideoCodecConfig& getVideoConfig() const { return mVideoConfig; }
-    void setVideoConfig(const VDVideoCodecConfig& cfg);
-
     const VDAudioCodecConfig& getAudioConfig() const { return mAudioConfig; }
     void setAudioConfig(const VDAudioCodecConfig& cfg);
 
@@ -80,7 +53,6 @@ public:
     void resetToDefaults();
 
 private:
-    VDVideoCodecConfig mVideoConfig;
     VDAudioCodecConfig mAudioConfig;
     VDSaveAudioSessionConfig mSaveAudioConfig;
     VDSaveVideoSessionConfig mSaveVideoConfig;

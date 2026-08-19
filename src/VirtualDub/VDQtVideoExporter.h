@@ -40,9 +40,6 @@ public:
         int decimateFactor = 1;
         int videoMode = VideoMode_FullProcessing;
         int audioMode = AudioMode_DirectStreamCopy;
-        QString codecName; // e.g. "libx264", "libx265", "mpeg4"
-        int crf = 23;      // Constant Rate Factor (e.g. 23)
-        int bitrate = 0;   // Target bitrate in kbps if CRF disabled
         QString containerType; // e.g. "mov_faststart", "mp4_faststart", "webm", "mkv"
         bool fastStart = false;
     };

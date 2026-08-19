@@ -1,4 +1,5 @@
 #include "VDQtCodecEngine.h"
+#include "VDQtCodecSettings.h"
 #include <algorithm>
 
 VDQtCodecEngine::VDQtCodecEngine() {
@@ -128,6 +129,30 @@ void VDQtCodecEngine::resetToDefaults() {
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+}
+
+VDAudioCodecParams VDQtCodecEngine::audioParamsFromConfig(
+    const VDAudioCodecConfig& config,
+    int sourceSampleRate,
+    int sourceChannels)
+{
+    VDAudioCodecParams params;
+    params.codecId = config.codecId;
+    params.rateMode = config.rateControlMode;
+    params.vbrQuality = config.vbrQuality;
+    params.bitrateKbps = config.bitrateKbps;
+    params.sampleRate = config.sampleRate > 0 ? config.sampleRate
+                                              : std::max(0, sourceSampleRate);
+    params.channels = config.channels > 0 ? config.channels
+                                           : std::max(0, sourceChannels);
+    if (config.codecId.compare(QStringLiteral("pcm_s24le"), Qt::CaseInsensitive) == 0)
+        params.bitDepth = 24;
+    else if (config.codecId.compare(QStringLiteral("pcm_s32le"), Qt::CaseInsensitive) == 0
+             || config.codecId.compare(QStringLiteral("pcm_f32le"), Qt::CaseInsensitive) == 0)
+        params.bitDepth = 32;
+    else
+        params.bitDepth = 16;
+    return params;
 }
 
 QStringList VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
