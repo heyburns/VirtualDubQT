@@ -25,7 +25,8 @@ bool VDQtSourceSafety::pathsReferToSameFile(const QString& firstPath,
 bool VDQtSourceSafety::isScriptPath(const QString& path) {
     const QString suffix = QFileInfo(path).suffix().toLower();
     return suffix == QStringLiteral("avs") || suffix == QStringLiteral("avsi")
-        || suffix == QStringLiteral("vpy") || suffix == QStringLiteral("py");
+        || suffix == QStringLiteral("vpy") || suffix == QStringLiteral("py")
+        || suffix == QStringLiteral("ffconcat");
 }
 
 VDQtOutputSafetyReport VDQtSourceSafety::evaluateOutputPath(

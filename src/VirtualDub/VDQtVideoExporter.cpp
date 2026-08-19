@@ -18,12 +18,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cerrno>
+#include <cstring>
+#include <memory>
 #include <utility>
 #include "VDQtDialogs.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
 }
 
 namespace {
@@ -40,11 +44,38 @@ struct AudioStreamProbe {
     QString error;
 };
 
+bool isConcatManifest(const QString& path) {
+    return path.endsWith(QStringLiteral(".ffconcat"), Qt::CaseInsensitive);
+}
+
+bool isVapourSynthScript(const QString& path) {
+    return path.endsWith(QStringLiteral(".vpy"), Qt::CaseInsensitive);
+}
+
+void appendInputFile(QStringList& arguments, const QString& path) {
+    if (isConcatManifest(path)) arguments << "-safe" << "0";
+    if (isVapourSynthScript(path)) arguments << "-f" << "vapoursynth";
+    arguments << "-i" << path;
+}
+
 AudioStreamProbe probeAudioStream(const QString& path) {
     AudioStreamProbe probe;
     AVFormatContext* formatContext = nullptr;
     const QByteArray encodedPath = QFile::encodeName(path);
-    int result = avformat_open_input(&formatContext, encodedPath.constData(), nullptr, nullptr);
+    const AVInputFormat *inputFormat = isConcatManifest(path)
+        ? av_find_input_format("concat")
+        : (isVapourSynthScript(path)
+               ? av_find_input_format("vapoursynth") : nullptr);
+    if (isVapourSynthScript(path) && !inputFormat) {
+        probe.error = QStringLiteral(
+            "This FFmpeg build does not provide the VapourSynth input module.");
+        return probe;
+    }
+    AVDictionary *inputOptions = nullptr;
+    if (isConcatManifest(path)) av_dict_set(&inputOptions, "safe", "0", 0);
+    int result = avformat_open_input(
+        &formatContext, encodedPath.constData(), inputFormat, &inputOptions);
+    av_dict_free(&inputOptions);
     if (result < 0) {
         char errorBuffer[AV_ERROR_MAX_STRING_SIZE] = {};
         av_strerror(result, errorBuffer, sizeof errorBuffer);
@@ -208,8 +239,11 @@ bool appendVideoEncoderArguments(QStringList& args,
             }
             outputHasAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
         }
-        if (!descriptor || (sourceBitDepth > 8 && outputBitDepth < sourceBitDepth)
-            || (sourceHasAlpha && !outputHasAlpha)) {
+        const bool deliberatePaletteReduction = codecId == QStringLiteral("gif");
+        if (!descriptor
+            || (!deliberatePaletteReduction
+                && ((sourceBitDepth > 8 && outputBitDepth < sourceBitDepth)
+                    || (sourceHasAlpha && !outputHasAlpha)))) {
             if (errorMessage) {
                 *errorMessage = QString(
                     "The selected output pixel format '%1' cannot preserve the source's "
@@ -253,6 +287,19 @@ void appendContainerArguments(QStringList& args,
     } else if (container.startsWith(QStringLiteral("avi"))
                || options.outputPath.endsWith(QStringLiteral(".avi"), Qt::CaseInsensitive)) {
         args << "-f" << "avi";
+    } else if (container == QStringLiteral("gif")
+               || options.outputPath.endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive)) {
+        args << "-loop" << "0" << "-f" << "gif";
+    }
+}
+
+void appendMetadataArguments(QStringList& args,
+                             const QMap<QString, QString>& metadata) {
+    for (auto it = metadata.cbegin(); it != metadata.cend(); ++it) {
+        const QString key = it.key().trimmed();
+        if (key.isEmpty() || key.size() > 128 || it.value().size() > 65536)
+            continue;
+        args << "-metadata" << QString("%1=%2").arg(key, it.value());
     }
 }
 
@@ -572,11 +619,548 @@ bool replaceWithStagedFile(const QString& stagedPath, const QString& outputPath)
     return std::rename(stagedName.constData(), outputName.constData()) == 0;
 }
 
+QString avErrorText(int errorCode) {
+    char errorBuffer[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(errorCode, errorBuffer, sizeof errorBuffer);
+    return QString::fromUtf8(errorBuffer);
+}
+
+bool validRawAlignment(int alignment) {
+    return alignment >= 1 && alignment <= 64
+        && (alignment & (alignment - 1)) == 0;
+}
+
+class RawFrameWriter {
+public:
+    ~RawFrameWriter() {
+        if (mFrame) av_frame_free(&mFrame);
+        if (mScaleContext) sws_freeContext(mScaleContext);
+    }
+
+    bool initialize(AVPixelFormat outputFormat,
+                    int width,
+                    int height,
+                    int scanlineAlignment,
+                    bool swapChromaPlanes,
+                    bool bottomUp,
+                    const QString& colorMatrix,
+                    bool fullRange,
+                    QString *errorMessage) {
+        mDescriptor = av_pix_fmt_desc_get(outputFormat);
+        mPlaneCount = av_pix_fmt_count_planes(outputFormat);
+        if (!mDescriptor || mPlaneCount <= 0 || mPlaneCount > 4
+            || (mDescriptor->flags & (AV_PIX_FMT_FLAG_HWACCEL
+                                      | AV_PIX_FMT_FLAG_BITSTREAM
+                                      | AV_PIX_FMT_FLAG_PAL))) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("The selected raw pixel format is not a writable software layout.");
+            return false;
+        }
+        if (width <= 0 || height <= 0 || !validRawAlignment(scanlineAlignment)) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("The raw frame dimensions or scanline alignment are invalid.");
+            return false;
+        }
+
+        mFrame = av_frame_alloc();
+        if (!mFrame) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("Could not allocate a raw conversion frame.");
+            return false;
+        }
+        mFrame->format = outputFormat;
+        mFrame->width = width;
+        mFrame->height = height;
+        const int result = av_frame_get_buffer(mFrame, 64);
+        if (result < 0) {
+            if (errorMessage)
+                *errorMessage = QString("Could not allocate the raw conversion buffer: %1")
+                    .arg(avErrorText(result));
+            return false;
+        }
+
+        if (av_image_fill_linesizes(mPlaneRowBytes, outputFormat, width) < 0) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("Could not determine the raw pixel layout.");
+            return false;
+        }
+        for (int plane = 0; plane < mPlaneCount; ++plane) {
+            if (mPlaneRowBytes[plane] <= 0 || !mFrame->data[plane]) {
+                if (errorMessage)
+                    *errorMessage = QStringLiteral("The raw pixel layout has an unsupported plane arrangement.");
+                return false;
+            }
+            mPlaneHeights[plane] = planeHeight(plane, height);
+            if (mPlaneHeights[plane] <= 0) {
+                if (errorMessage)
+                    *errorMessage = QStringLiteral("The raw pixel layout has an invalid plane height.");
+                return false;
+            }
+        }
+
+        mWidth = width;
+        mHeight = height;
+        mOutputFormat = outputFormat;
+        mAlignment = scanlineAlignment;
+        mSwapChromaPlanes = swapChromaPlanes && hasSeparateChromaPlanes();
+        mBottomUp = bottomUp;
+        mColorMatrix = colorMatrix.toLower();
+        mFullRange = fullRange;
+        return true;
+    }
+
+    bool write(QFile& output, const QImage& inputImage, QString *errorMessage) {
+        if (!mFrame || inputImage.isNull()
+            || inputImage.width() != mWidth || inputImage.height() != mHeight) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("A filter changed the raw frame dimensions during export.");
+            return false;
+        }
+
+        QImage normalized;
+        AVPixelFormat inputFormat = AV_PIX_FMT_NONE;
+        if (inputImage.depth() > 32) {
+            normalized = inputImage.convertToFormat(QImage::Format_RGBA64);
+#if Q_BYTE_ORDER == Q_LITTLE_ENDIAN
+            inputFormat = AV_PIX_FMT_RGBA64LE;
+#else
+            inputFormat = AV_PIX_FMT_RGBA64BE;
+#endif
+        } else if (inputImage.hasAlphaChannel()) {
+            normalized = inputImage.convertToFormat(QImage::Format_RGBA8888);
+            inputFormat = AV_PIX_FMT_RGBA;
+        } else {
+            normalized = inputImage.convertToFormat(QImage::Format_RGB888);
+            inputFormat = AV_PIX_FMT_RGB24;
+        }
+        if (normalized.isNull()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("Could not normalize a decoded frame for raw export.");
+            return false;
+        }
+        if (normalized.bytesPerLine() > std::numeric_limits<int>::max()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("The decoded frame stride is too large for raw conversion.");
+            return false;
+        }
+
+        mScaleContext = sws_getCachedContext(
+            mScaleContext, mWidth, mHeight, inputFormat,
+            mWidth, mHeight, mOutputFormat,
+            SWS_BICUBIC, nullptr, nullptr, nullptr);
+        if (!mScaleContext) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("The selected raw pixel conversion is not supported.");
+            return false;
+        }
+
+        if (!(mDescriptor->flags & AV_PIX_FMT_FLAG_RGB)
+            && mDescriptor->nb_components >= 3) {
+            const int colorSpace = mColorMatrix == QStringLiteral("bt709")
+                ? SWS_CS_ITU709 : SWS_CS_SMPTE170M;
+            const int *coefficients = sws_getCoefficients(colorSpace);
+            if (!coefficients
+                || sws_setColorspaceDetails(
+                       mScaleContext, coefficients, 1,
+                       coefficients, mFullRange ? 1 : 0,
+                       0, 1 << 16, 1 << 16) < 0) {
+                if (errorMessage)
+                    *errorMessage = QStringLiteral("Could not configure the requested YUV matrix and range.");
+                return false;
+            }
+        }
+
+        const int writableResult = av_frame_make_writable(mFrame);
+        if (writableResult < 0) {
+            if (errorMessage)
+                *errorMessage = QString("Could not reuse the raw conversion buffer: %1")
+                    .arg(avErrorText(writableResult));
+            return false;
+        }
+        const uint8_t *sourceData[4] = {
+            normalized.constBits(), nullptr, nullptr, nullptr
+        };
+        const int sourceLinesize[4] = {
+            static_cast<int>(normalized.bytesPerLine()), 0, 0, 0
+        };
+        const int convertedRows = sws_scale(
+            mScaleContext, sourceData, sourceLinesize, 0, mHeight,
+            mFrame->data, mFrame->linesize);
+        if (convertedRows != mHeight) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("Raw pixel conversion stopped before the frame was complete.");
+            return false;
+        }
+
+        int planeOrder[4] = { 0, 1, 2, 3 };
+        if (mSwapChromaPlanes) std::swap(planeOrder[1], planeOrder[2]);
+        const QByteArray zeroPadding(64, '\0');
+        for (int order = 0; order < mPlaneCount; ++order) {
+            const int plane = planeOrder[order];
+            const int rowBytes = mPlaneRowBytes[plane];
+            const int alignedRowBytes = (rowBytes + mAlignment - 1)
+                                      & ~(mAlignment - 1);
+            const int paddingBytes = alignedRowBytes - rowBytes;
+            for (int row = 0; row < mPlaneHeights[plane]; ++row) {
+                const int sourceRow = mBottomUp
+                    ? mPlaneHeights[plane] - 1 - row : row;
+                const char *rowData = reinterpret_cast<const char *>(
+                    mFrame->data[plane] + sourceRow * mFrame->linesize[plane]);
+                if (output.write(rowData, rowBytes) != rowBytes
+                    || (paddingBytes > 0
+                        && output.write(zeroPadding.constData(), paddingBytes)
+                            != paddingBytes)) {
+                    if (errorMessage)
+                        *errorMessage = output.errorString().isEmpty()
+                            ? QStringLiteral("The raw output file could not be written completely.")
+                            : output.errorString();
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+private:
+    int planeHeight(int plane, int frameHeight) const {
+        if ((mDescriptor->flags & AV_PIX_FMT_FLAG_RGB)
+            || mDescriptor->nb_components < 3)
+            return frameHeight;
+        const int uPlane = mDescriptor->comp[1].plane;
+        const int vPlane = mDescriptor->comp[2].plane;
+        return plane == uPlane || plane == vPlane
+            ? AV_CEIL_RSHIFT(frameHeight, mDescriptor->log2_chroma_h)
+            : frameHeight;
+    }
+
+    bool hasSeparateChromaPlanes() const {
+        return !(mDescriptor->flags & AV_PIX_FMT_FLAG_RGB)
+            && mDescriptor->nb_components >= 3
+            && mDescriptor->comp[1].plane != mDescriptor->comp[0].plane
+            && mDescriptor->comp[2].plane != mDescriptor->comp[0].plane
+            && mDescriptor->comp[1].plane != mDescriptor->comp[2].plane;
+    }
+
+    SwsContext *mScaleContext = nullptr;
+    AVFrame *mFrame = nullptr;
+    const AVPixFmtDescriptor *mDescriptor = nullptr;
+    AVPixelFormat mOutputFormat = AV_PIX_FMT_NONE;
+    int mWidth = 0;
+    int mHeight = 0;
+    int mPlaneCount = 0;
+    int mPlaneRowBytes[4] = {};
+    int mPlaneHeights[4] = {};
+    int mAlignment = 1;
+    bool mSwapChromaPlanes = false;
+    bool mBottomUp = false;
+    QString mColorMatrix;
+    bool mFullRange = false;
+};
+
 } // namespace
 
 VDQtVideoExporter::VDQtVideoExporter() {}
 
 VDQtVideoExporter::~VDQtVideoExporter() {}
+
+bool VDQtVideoExporter::exportRawVideo(
+    const RawExportOptions& options,
+    VDQtVideoDecoder *activeDecoder,
+    VDQtAudioPlayer *audioPlayer,
+    QWidget *parentWidget,
+    std::function<bool(int completedFrames, int totalFrames)> progressCallback) {
+    const auto reportError = [parentWidget](const QString& message) {
+        qWarning() << "[Raw Export]" << message;
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Raw Video Export Error", message);
+    };
+
+    if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) {
+        reportError(QStringLiteral("The raw export source or destination path is empty."));
+        return false;
+    }
+    if (!validRawAlignment(options.scanlineAlignment)) {
+        reportError(QStringLiteral("Scanline alignment must be a power of two from 1 through 64 bytes."));
+        return false;
+    }
+    const QByteArray pixelFormatName = options.pixelFormat.trimmed().toLower().toUtf8();
+    const AVPixelFormat outputPixelFormat = av_get_pix_fmt(pixelFormatName.constData());
+    if (outputPixelFormat == AV_PIX_FMT_NONE) {
+        reportError(QString("Unknown raw pixel format: %1").arg(options.pixelFormat));
+        return false;
+    }
+
+    VDQtVideoDecoder localDecoder;
+    VDQtVideoDecoder& decoder = activeDecoder && activeDecoder->isOpen()
+        ? *activeDecoder : localDecoder;
+    if (!decoder.isOpen() && !decoder.openFile(options.inputPath)) {
+        reportError(QStringLiteral("The source video could not be opened for raw export."));
+        return false;
+    }
+
+    const QString loadedSourcePath = decoder.getFilePath();
+    const QString scriptPath = VDQtSourceSafety::isScriptPath(loadedSourcePath)
+        ? loadedSourcePath
+        : (VDQtSourceSafety::isScriptPath(options.inputPath)
+               ? options.inputPath : QString());
+    QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
+    if (audioPlayer) directlyLoadedSources.append(audioPlayer->getSourcePath());
+    const auto outputIsSafe = [&]() {
+        return VDQtSourceSafety::evaluateOutputPath(
+                   options.outputPath, directlyLoadedSources, scriptPath)
+            .isSafe();
+    };
+    if (!outputIsSafe()) {
+        reportError(QStringLiteral(
+            "The destination aliases a loaded/script source, or an existing script-backed "
+            "destination cannot be audited safely. Choose another path."));
+        return false;
+    }
+
+    int totalFrames = decoder.getFrameCount();
+    // Container nb_frames metadata can be exact-looking but underreported, and
+    // it does not prove that a VFR timestamp index exists. Native AviSynth has
+    // an authoritative clip length; regular media must be drained once before
+    // raw range and frame-rate conversion decisions are made.
+    if (!decoder.isAvsNative()) {
+        QProgressDialog indexingProgress(
+            "Indexing source frames for raw export...", "Cancel",
+            0, totalFrames > 0 ? totalFrames : 0, parentWidget);
+        indexingProgress.setWindowModality(Qt::WindowModal);
+        indexingProgress.setMinimumDuration(0);
+        const int initialEstimate = totalFrames;
+        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
+            [&indexingProgress, initialEstimate](int current, int reportedTotal) {
+                if (initialEstimate > 0) {
+                    const int maximum = std::max(initialEstimate, reportedTotal);
+                    indexingProgress.setRange(0, maximum);
+                    indexingProgress.setValue(std::min(current, maximum));
+                } else {
+                    indexingProgress.setRange(0, 0);
+                    indexingProgress.setLabelText(
+                        QString("Indexing source frames... %1 decoded").arg(current));
+                }
+                QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+                return !indexingProgress.wasCanceled();
+            });
+        const bool indexingCancelled = indexingProgress.wasCanceled();
+        indexingProgress.close();
+        if (scan.cancelled || indexingCancelled) return false;
+        if (!scan.errorMessage.isEmpty()) {
+            reportError(scan.errorMessage);
+            return false;
+        }
+        totalFrames = decoder.getFrameCount();
+    }
+    if (totalFrames <= 0) {
+        reportError(QStringLiteral("The source has no decodable video frames."));
+        return false;
+    }
+
+    const bool explicitFrameRange = options.endFrame >= options.startFrame
+                                 && options.endFrame >= 0;
+    if (explicitFrameRange
+        && (options.startFrame < 0 || options.startFrame >= totalFrames)) {
+        reportError(QString("The selection starts at frame %1, but the source contains only %2 frame(s).")
+                        .arg(options.startFrame)
+                        .arg(totalFrames));
+        return false;
+    }
+    const int startFrame = explicitFrameRange ? options.startFrame : 0;
+    const int endFrame = explicitFrameRange
+        ? std::min(options.endFrame, totalFrames - 1) : totalFrames - 1;
+    const int selectedSourceFrames = endFrame - startFrame + 1;
+    int step = std::max(1, options.decimateFactor);
+    const double sourceFps = decoder.getFps() > 0.0
+        ? decoder.getFps() : 29.97;
+    double sourceStartSeconds = static_cast<double>(startFrame) / sourceFps;
+    double sourceDurationSeconds = static_cast<double>(selectedSourceFrames) / sourceFps;
+    const double firstTimestamp = decoder.getFrameTimestampSeconds(startFrame);
+    const double lastTimestamp = decoder.getFrameTimestampSeconds(endFrame);
+    const double lastDuration = decoder.getFrameDurationSeconds(endFrame);
+    if (std::isfinite(firstTimestamp)) sourceStartSeconds = firstTimestamp;
+    if (std::isfinite(firstTimestamp) && std::isfinite(lastTimestamp)
+        && std::isfinite(lastDuration)
+        && lastTimestamp + lastDuration > firstTimestamp) {
+        sourceDurationSeconds = lastTimestamp + lastDuration - firstTimestamp;
+    }
+
+    bool timestampsUsable = std::isfinite(firstTimestamp);
+    double previousTimestamp = -std::numeric_limits<double>::infinity();
+    if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
+        for (int frame = startFrame; frame <= endFrame; ++frame) {
+            const double timestamp = decoder.getFrameTimestampSeconds(frame);
+            if (!std::isfinite(timestamp) || timestamp + 1e-9 < previousTimestamp) {
+                timestampsUsable = false;
+                break;
+            }
+            previousTimestamp = timestamp;
+            if (frame == endFrame) break;
+        }
+    }
+
+    int inputFramesToProcess = (selectedSourceFrames + step - 1) / step;
+    double selectionOutputFps = sourceFps / step;
+    if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
+        const long double requestedFrames =
+            static_cast<long double>(sourceDurationSeconds) * options.customFps;
+        if (!std::isfinite(requestedFrames)
+            || requestedFrames > std::numeric_limits<int>::max()) {
+            reportError(QStringLiteral("The requested raw frame-rate conversion is too large."));
+            return false;
+        }
+        inputFramesToProcess = std::max(
+            1, static_cast<int>(std::llround(requestedFrames)));
+        selectionOutputFps = options.customFps;
+        step = 1;
+    }
+
+    const VDFilterTimingInfo timing = VDQtFilterSystem::instance().getTimingInfo();
+    if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0
+        || inputFramesToProcess
+               > std::numeric_limits<int>::max() / timing.outputFramesPerInput) {
+        reportError(QStringLiteral("The temporal filter chain produces an unsupported raw sequence size."));
+        return false;
+    }
+    const int framesToExport = inputFramesToProcess * timing.outputFramesPerInput;
+
+    QImage sampleFrame = decoder.getFrameImage(startFrame);
+    QImage filteredSample = VDQtFilterSystem::instance().processFrame(sampleFrame);
+    if (sampleFrame.isNull() || filteredSample.isNull()) {
+        reportError(QStringLiteral("The first selected frame could not be decoded and filtered."));
+        return false;
+    }
+
+    RawFrameWriter frameWriter;
+    QString writeError;
+    if (!frameWriter.initialize(
+            outputPixelFormat, filteredSample.width(), filteredSample.height(),
+            options.scanlineAlignment, options.swapChromaPlanes,
+            options.bottomUp, options.colorMatrix, options.fullRange,
+            &writeError)) {
+        reportError(writeError);
+        return false;
+    }
+
+    QTemporaryFile stagedOutput(stagedOutputTemplate(options.outputPath));
+    stagedOutput.setAutoRemove(true);
+    if (!stagedOutput.open()) {
+        reportError(QStringLiteral(
+            "A staging file could not be created beside the raw-video destination."));
+        return false;
+    }
+
+    QProgressDialog progress(
+        "Exporting raw video...", "Cancel", 0, framesToExport, parentWidget);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setValue(0);
+    QElapsedTimer timer;
+    timer.start();
+
+    bool cancelled = false;
+    bool failed = false;
+    int completedFrames = 0;
+    for (int inputIndex = 0; inputIndex < inputFramesToProcess; ++inputIndex) {
+        QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+        if (progress.wasCanceled()) {
+            cancelled = true;
+            break;
+        }
+
+        int sourceFrame = startFrame;
+        if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
+            if (timestampsUsable) {
+                const double requestedTimestamp = sourceStartSeconds
+                    + static_cast<double>(inputIndex) / selectionOutputFps;
+                int low = startFrame;
+                int high = endFrame;
+                while (low < high) {
+                    const int middle = low + (high - low + 1) / 2;
+                    const double timestamp = decoder.getFrameTimestampSeconds(middle);
+                    if (std::isfinite(timestamp)
+                        && timestamp <= requestedTimestamp + 1e-9)
+                        low = middle;
+                    else
+                        high = middle - 1;
+                }
+                sourceFrame = low;
+            } else {
+                const double sourceOffset = static_cast<double>(inputIndex)
+                    * sourceFps / selectionOutputFps;
+                sourceFrame = startFrame
+                    + static_cast<int>(std::floor(sourceOffset + 1e-9));
+            }
+        } else {
+            sourceFrame += inputIndex * step;
+        }
+        sourceFrame = std::clamp(sourceFrame, startFrame, endFrame);
+
+        const QImage rawFrame = decoder.getFrameImage(sourceFrame);
+        QList<QImage> filteredFrames;
+        if (rawFrame.isNull()
+            || !VDQtFilterSystem::instance().processFrameSequence(
+                rawFrame, filteredFrames)
+            || filteredFrames.size() != timing.outputFramesPerInput) {
+            writeError = QString("Frame %1 could not be decoded and filtered.")
+                .arg(sourceFrame);
+            failed = true;
+            break;
+        }
+
+        for (const QImage& filteredFrame : filteredFrames) {
+            if (!frameWriter.write(stagedOutput, filteredFrame, &writeError)) {
+                failed = true;
+                break;
+            }
+            ++completedFrames;
+            progress.setValue(completedFrames);
+            const double elapsedSeconds = timer.elapsed() / 1000.0;
+            const double currentFps = elapsedSeconds > 0.0
+                ? completedFrames / elapsedSeconds : 0.0;
+            progress.setLabelText(
+                QString("Exporting raw frame %1 of %2\nSpeed: %3 fps")
+                    .arg(completedFrames)
+                    .arg(framesToExport)
+                    .arg(currentFps, 0, 'f', 1));
+            QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+            if (progress.wasCanceled()
+                || (progressCallback
+                    && !progressCallback(completedFrames, framesToExport))) {
+                cancelled = true;
+                break;
+            }
+        }
+        if (failed || cancelled) break;
+    }
+
+    if (!stagedOutput.flush()) {
+        writeError = stagedOutput.errorString();
+        failed = true;
+    }
+    const QString stagedPath = stagedOutput.fileName();
+    stagedOutput.close();
+    progress.close();
+
+    if (cancelled) return false;
+    if (failed || completedFrames != framesToExport) {
+        reportError(writeError.isEmpty()
+            ? QStringLiteral("Raw video export stopped before all frames were written.")
+            : writeError);
+        return false;
+    }
+    if (!outputIsSafe()) {
+        reportError(QStringLiteral(
+            "The destination became unsafe while the raw video was rendering; no existing file was changed."));
+        return false;
+    }
+    if (!replaceWithStagedFile(stagedPath, options.outputPath)) {
+        reportError(QStringLiteral(
+            "The completed raw video could not be committed to its destination."));
+        return false;
+    }
+    return true;
+}
 
 bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     VDQtVideoDecoder *activeDecoder,
@@ -584,6 +1168,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     QWidget *parentWidget,
                                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback) {
     if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) return false;
+    int videoMode = options.videoMode;
     if (VDQtSourceSafety::pathsReferToSameFile(options.inputPath, options.outputPath)) {
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsafe Output Path",
@@ -599,11 +1184,21 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         return false;
     }
 
+    VDVideoCodecParams selectedVideoParams =
+        VDQtCodecEngine::instance().getVideoParams();
+    if (!options.videoCodecOverride.trimmed().isEmpty()) {
+        selectedVideoParams = VDQtCodecEngine::getDefaultVideoParamsForCodec(
+            options.videoCodecOverride.trimmed());
+        selectedVideoParams.codecId = options.videoCodecOverride.trimmed();
+    }
+    if (!options.videoPixelFormatOverride.trimmed().isEmpty())
+        selectedVideoParams.pixFmt = options.videoPixelFormatOverride.trimmed();
+
     // Pre-flight check: Video encoder availability
-    if (options.videoMode != VideoMode_DirectStreamCopy) {
-        VDVideoCodecParams vParams = VDQtCodecEngine::instance().getVideoParams();
+    if (videoMode != VideoMode_DirectStreamCopy && !options.smartRendering) {
         QString err;
-        if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(vParams.codecId, &err)) {
+        if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(
+                selectedVideoParams.codecId, &err)) {
             if (parentWidget) QMessageBox::critical(parentWidget, "Video Encoder Not Available", err);
             return false;
         }
@@ -661,9 +1256,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             return false;
         }
     }
-    const bool sourceHasAudio = decoder.isAvsNative()
-        ? audioPlayer && audioPlayer->hasAudio()
-        : sourceAudioProbe.hasAudio;
+    const bool sourceHasAudio = options.includeAudio
+        && (decoder.isAvsNative()
+            ? audioPlayer && audioPlayer->hasAudio()
+            : sourceAudioProbe.hasAudio);
 
     if (sourceHasAudio && options.audioMode != AudioMode_DirectStreamCopy
         && (!audioPlayer || !audioPlayer->hasAudio())) {
@@ -693,8 +1289,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     const bool explicitFrameRange = options.endFrame >= 0
                                  && options.endFrame >= options.startFrame;
     const bool needsDecodedIndex = !decoder.isAvsNative()
-        && (options.videoMode != VideoMode_DirectStreamCopy || explicitFrameRange);
-    if ((options.videoMode != VideoMode_DirectStreamCopy && !decoder.isFrameCountExact())
+        && (videoMode != VideoMode_DirectStreamCopy || explicitFrameRange);
+    if ((videoMode != VideoMode_DirectStreamCopy && !decoder.isFrameCountExact())
         || needsDecodedIndex) {
         QProgressDialog indexingProgress(
             "Indexing source frames for an exact export range...", "Cancel",
@@ -726,7 +1322,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         totalFrames = decoder.getFrameCount();
         indexedForExport = true;
     }
-    if (options.videoMode == VideoMode_DirectStreamCopy && totalFrames <= 0) {
+    if (videoMode == VideoMode_DirectStreamCopy && totalFrames <= 0) {
         // A full compressed stream can be copied without knowing its decoded
         // frame count. A synthetic one-frame range keeps the selection math
         // neutral and produces no -ss/-t arguments below.
@@ -762,6 +1358,34 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     double shortestFrameDuration = std::numeric_limits<double>::infinity();
     double longestFrameDuration = 0.0;
     const bool hasFrameSelection = startFrame > 0 || endFrame < totalFrames - 1;
+    if (options.smartRendering && videoMode != VideoMode_DirectStreamCopy) {
+        const bool hasEnabledFilters = std::any_of(
+            VDQtFilterSystem::instance().getActiveChain().cbegin(),
+            VDQtFilterSystem::instance().getActiveChain().cend(),
+            [](const VDFilterInstance& filter) { return filter.enabled; });
+        const bool cleanTiming = options.customFps <= 0.0
+            && !options.convertFpsPreserveDuration
+            && options.decimateFactor <= 1
+            && options.preserveEmptyFrames;
+        const bool cleanAudio = options.audioMode == AudioMode_DirectStreamCopy;
+        const bool startsAtRandomAccessPoint = decoder.isKeyFrame(startFrame);
+        const bool endsAtRandomAccessPoint = endFrame == totalFrames - 1
+            || decoder.isKeyFrame(endFrame + 1);
+        if (!decoder.isAvsNative() && !hasEnabledFilters && cleanTiming
+            && cleanAudio && startsAtRandomAccessPoint && endsAtRandomAccessPoint) {
+            videoMode = VideoMode_DirectStreamCopy;
+        }
+    }
+    if (options.smartRendering && videoMode != VideoMode_DirectStreamCopy) {
+        QString error;
+        if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(
+                selectedVideoParams.codecId, &error)) {
+            if (parentWidget)
+                QMessageBox::critical(
+                    parentWidget, "Video Encoder Not Available", error);
+            return false;
+        }
+    }
     if (indexedForExport || hasFrameSelection || options.convertFpsPreserveDuration) {
         const double firstTimestamp = decoder.getFrameTimestampSeconds(startFrame);
         const double lastTimestamp = decoder.getFrameTimestampSeconds(endFrame);
@@ -802,6 +1426,25 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (presentationTimestampsUsable) {
         variableFrameTiming = longestFrameDuration
             > shortestFrameDuration * 1.01 + 1e-6;
+    }
+    if (!options.preserveEmptyFrames && videoMode != VideoMode_DirectStreamCopy
+        && sourceHasAudio && variableFrameTiming) {
+        if (parentWidget) {
+            QMessageBox::critical(
+                parentWidget, "Cannot Collapse Video Gaps With Audio",
+                "Collapsing empty-frame/timestamp gaps would require cutting matching "
+                "sections out of the audio timeline. Disable audio for this export or "
+                "preserve empty frames to keep A/V synchronization exact.");
+        }
+        return false;
+    }
+    if (!options.preserveEmptyFrames && videoMode != VideoMode_DirectStreamCopy) {
+        // Empty/null video chunks and timestamp gaps display the previous
+        // frame for longer. Collapsing them is a deliberate retiming request;
+        // keep the selected start point but use nominal frame cadence.
+        sourceDurationSeconds = static_cast<double>(selectedSourceFrames) / sourceFps;
+        presentationTimestampsUsable = false;
+        variableFrameTiming = false;
     }
     const bool preserveNativeVfr = variableFrameTiming
         && presentationTimestampsUsable
@@ -866,7 +1509,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     // Fast Recompress keeps decoded video in FFmpeg's native pixel formats.
     // Unlike Normal/Full Processing, frames never cross the QImage/RGB boundary
     // and the Qt filter chain is deliberately bypassed.
-    if (options.videoMode == VideoMode_FastRecompress) {
+    if (videoMode == VideoMode_FastRecompress) {
         QProcess videoDecoderProcess;
         QProcess ffmpeg;
         QByteArray diagnostics;
@@ -913,7 +1556,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         if (sourceHasAudio) {
             if (inputStartSeconds > 1e-9)
                 encoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
-            encoderArgs << "-i" << inputPath;
+            appendInputFile(encoderArgs, inputPath);
         }
         encoderArgs << "-map" << "0:v:0";
         if (sourceHasAudio) {
@@ -924,12 +1567,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                             << QString("1:%1").arg(sourceAudioProbe.bestAudioStreamIndex);
         }
 
-        const VDVideoCodecParams videoParams =
-            VDQtCodecEngine::instance().getVideoParams();
         QString videoEncodingError;
         QString fastPixelFormat;
         if (!appendVideoEncoderArguments(
-                encoderArgs, videoParams, decoder.getSourceBitDepth(),
+                encoderArgs, selectedVideoParams, decoder.getSourceBitDepth(),
                 decoder.sourceHasAlpha(), preserveNativeVfr,
                 options.containerType.toLower(), &videoEncodingError,
                 &fastPixelFormat)) {
@@ -966,6 +1607,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
 
         encoderArgs << "-t" << QString::number(outputDurationSeconds, 'f', 9);
+        appendMetadataArguments(encoderArgs, options.metadata);
         appendContainerArguments(encoderArgs, options);
         encoderArgs << processOutputPath;
 
@@ -973,8 +1615,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         decoderArgs << "-nostdin" << "-hide_banner" << "-loglevel" << "error";
         if (inputStartSeconds > 1e-9)
             decoderArgs << "-ss" << QString::number(inputStartSeconds, 'f', 9);
-        decoderArgs << "-i" << inputPath
-                    << "-map" << "0:v:0"
+        appendInputFile(decoderArgs, inputPath);
+        decoderArgs << "-map" << "0:v:0"
                     << "-vf" << videoFilters.join(QLatin1Char(','))
                     << "-an"
                     << "-c:v" << "rawvideo"
@@ -1051,7 +1693,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // 0. Direct Stream Copy Mode (For media files / containers)
-    if (options.videoMode == VideoMode_DirectStreamCopy && decoder.isAvsNative()) {
+    if (videoMode == VideoMode_DirectStreamCopy && decoder.isAvsNative()) {
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsupported Direct Copy Operation",
                                   "AviSynth output consists of decoded frames and cannot be direct-stream-copied. "
@@ -1059,7 +1701,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         }
         return false;
     }
-    if (options.videoMode == VideoMode_DirectStreamCopy && !decoder.isAvsNative()) {
+    if (videoMode == VideoMode_DirectStreamCopy && !decoder.isAvsNative()) {
         if (options.decimateFactor > 1 || options.customFps > 0.0) {
             if (parentWidget) {
                 QMessageBox::critical(parentWidget, "Unsupported Direct Copy Operation",
@@ -1075,7 +1717,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         args << "-y";
 
         if (hasFrameSelection) {
-            if (parentWidget) {
+            if (parentWidget && !options.smartRendering) {
                 const auto answer = QMessageBox::warning(
                     parentWidget,
                     "Keyframe-Aligned Direct Copy",
@@ -1096,10 +1738,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             const double inputStartSeconds = std::max(
                 0.0, sourceAudioProbe.videoStartOffsetSeconds + sourceStartSeconds);
             args << "-ss" << QString::number(inputStartSeconds, 'f', 9);
-            args << "-i" << options.inputPath;
+            appendInputFile(args, options.inputPath);
             args << "-t" << QString::number(sourceDurationSeconds, 'f', 6);
         } else {
-            args << "-i" << options.inputPath;
+            appendInputFile(args, options.inputPath);
         }
 
         args << "-map" << "0:v:0";
@@ -1127,6 +1769,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         else if (container == "mkv" || options.outputPath.endsWith(".mkv", Qt::CaseInsensitive)) args << "-f" << "matroska";
         else if (container.startsWith("avi") || options.outputPath.endsWith(".avi", Qt::CaseInsensitive)) args << "-f" << "avi";
 
+        appendMetadataArguments(args, options.metadata);
         args << processOutputPath;
 
         qDebug() << "[Exporter] Direct Stream Copy ffmpeg args:" << args.join(" ");
@@ -1165,7 +1808,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         return false;
     }
 
-    bool applyFilters = (options.videoMode == VideoMode_FullProcessing);
+    bool applyFilters = (videoMode == VideoMode_FullProcessing);
     int outW = sampleFrame.width();
     int outH = sampleFrame.height();
     int inputFramesToProcess = framesToExport;
@@ -1196,7 +1839,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         : static_cast<double>(framesToExport) / fps;
 
     // Fetch user-configured codec settings
-    VDVideoCodecParams vParams = VDQtCodecEngine::instance().getVideoParams();
+    const VDVideoCodecParams& vParams = selectedVideoParams;
     const VDAudioCodecParams aParams = configuredAudioParams();
 
     // 1. Audio Source Configuration
@@ -1289,7 +1932,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             0.0, sourceAudioProbe.videoStartOffsetSeconds + sourceStartSeconds);
         if (audioInputStart > 1e-9)
             args << "-ss" << QString::number(audioInputStart, 'f', 9);
-        args << "-i" << audioSrcMedia;
+        appendInputFile(args, audioSrcMedia);
     } else if (!tempAudioPath.isEmpty() && QFile::exists(tempAudioPath)) {
         hasAudioInput = true;
         args << "-i" << tempAudioPath;
@@ -1339,6 +1982,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     // 6. Container Format & Output Path
+    appendMetadataArguments(args, options.metadata);
     appendContainerArguments(args, options);
 
     args << processOutputPath;

@@ -48,6 +48,10 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtVideoExporter.cpp
     src/VirtualDub/VDQtSourceSafety.h
     src/VirtualDub/VDQtSourceSafety.cpp
+    src/VirtualDub/VDQtProjectFile.h
+    src/VirtualDub/VDQtProjectFile.cpp
+    src/VirtualDub/VDQtFrameServer.h
+    src/VirtualDub/VDQtFrameServer.cpp
     src/VirtualDub/VDQtVideoDisplay.h
     src/VirtualDub/VDQtVideoDisplay.cpp
     src/VirtualDub/VDQtPositionControl.h
@@ -119,6 +123,10 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtVideoExporter.h
         src/VirtualDub/VDQtSourceSafety.cpp
         src/VirtualDub/VDQtSourceSafety.h
+        src/VirtualDub/VDQtProjectFile.cpp
+        src/VirtualDub/VDQtProjectFile.h
+        src/VirtualDub/VDQtFrameServer.cpp
+        src/VirtualDub/VDQtFrameServer.h
         src/VirtualDub/VDQtDialogs.cpp
         src/VirtualDub/VDQtDialogs.h
         src/VirtualDub/VDQtPositionControl.cpp

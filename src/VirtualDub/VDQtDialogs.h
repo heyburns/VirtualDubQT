@@ -510,6 +510,66 @@ private:
     QComboBox *mChannelsCombo;
 };
 
+struct VDRawVideoExportConfig {
+    QString pixelFormat = QStringLiteral("yuv420p");
+    int scanlineAlignment = 4;
+    bool swapChromaPlanes = true;
+    bool bottomUp = false;
+    QString colorMatrix = QStringLiteral("bt601");
+    bool fullRange = false;
+};
+
+class VDRawVideoExportDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit VDRawVideoExportDialog(
+        const VDRawVideoExportConfig& initialConfig,
+        const QString& defaultDirectory,
+        const QString& defaultBaseName,
+        QWidget *parent = nullptr);
+
+    QString getSelectedFilePath() const;
+    VDRawVideoExportConfig getConfig() const;
+
+private Q_SLOTS:
+    void onBrowseClicked();
+    void onFormatChanged();
+
+private:
+    bool selectedFormatIsPlanarYuv() const;
+    bool selectedFormatIsYuv() const;
+
+    QString mDefaultDirectory;
+    QString mDefaultBaseName;
+    QLineEdit *mFileNameEdit;
+    QComboBox *mPixelFormatCombo;
+    QComboBox *mAlignmentCombo;
+    QComboBox *mPlaneOrderCombo;
+    QComboBox *mOrientationCombo;
+    QComboBox *mColorMatrixCombo;
+    QComboBox *mRangeCombo;
+};
+
+struct VDPreferencesConfig {
+    int frameCacheMiB = 64;
+    int decoderThreads = 0;
+    int playbackTimerIntervalMs = 10;
+};
+
+class VDPreferencesDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit VDPreferencesDialog(
+        const VDPreferencesConfig& initialConfig,
+        QWidget *parent = nullptr);
+    VDPreferencesConfig getConfig() const;
+
+private:
+    QSpinBox *mFrameCacheMiB;
+    QSpinBox *mDecoderThreads;
+    QSpinBox *mPlaybackTimerInterval;
+};
+
 // About Dialog
 class VDAboutDialog : public QDialog {
     Q_OBJECT
@@ -539,6 +599,7 @@ public:
     QString getSelectedFilePath() const;
     QString getSelectedContainerType() const;
     bool isFastStartEnabled() const;
+    bool addToJobQueue() const;
 
 private Q_SLOTS:
     void onBrowseClicked();
@@ -556,6 +617,7 @@ private:
 
     QLabel *mAudioCompressionLabel;
     QLabel *mAudioSampleLayoutLabel;
+    QCheckBox *mQueueCheckBox;
 
 };
 

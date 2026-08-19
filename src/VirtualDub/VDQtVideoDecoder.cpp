@@ -11,6 +11,7 @@
 #include <QMutexLocker>
 #include <QSet>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -20,6 +21,9 @@ extern "C" {
 }
 
 namespace {
+
+std::atomic<int> gFrameCacheBudgetMiB{64};
+std::atomic<int> gDecoderThreadCount{0};
 
 QString avErrorString(int errorCode) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -75,7 +79,8 @@ private:
 bool isScriptDependencyFile(const QString& path) {
     const QString suffix = QFileInfo(path).suffix().toLower();
     return suffix == QStringLiteral("avs") || suffix == QStringLiteral("avsi")
-        || suffix == QStringLiteral("vpy") || suffix == QStringLiteral("py");
+        || suffix == QStringLiteral("vpy") || suffix == QStringLiteral("py")
+        || suffix == QStringLiteral("ffconcat");
 }
 
 QStringList resolveScriptPathLiteral(const QString& literal, const QDir& scriptDirectory) {
@@ -139,6 +144,69 @@ bool looksLikePathLiteral(const QString& literal) {
         R"(\.(?:avs|avsi|vpy|py|avi|mp4|m4v|mkv|mov|webm|nut|ts|m2ts|mpg|mpeg|vob|wav|flac|mp3|aac|m4a|ogg|opus|png|jpe?g|bmp|tiff?|webp)$)"),
         QRegularExpression::CaseInsensitiveOption);
     return extensionRegex.match(value).hasMatch();
+}
+
+void collectConcatDependencies(
+    const QString& manifestPath,
+    VDQtVideoDecoder::ScriptDependencyReport& report) {
+    const QFileInfo manifestInfo(manifestPath);
+    QFile manifest(manifestInfo.absoluteFilePath());
+    if (!manifest.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        report.complete = false;
+        report.unresolvedPathLiterals.append(manifestInfo.absoluteFilePath());
+        report.diagnostics.append(QStringLiteral("Cannot read concat manifest: %1")
+                                      .arg(manifestInfo.absoluteFilePath()));
+        return;
+    }
+    const QString content = QString::fromUtf8(manifest.readAll());
+    static const QRegularExpression fileLine(
+        QStringLiteral(R"(^\s*file\s+(.+?)\s*$)"),
+        QRegularExpression::MultilineOption);
+    QRegularExpressionMatchIterator lines = fileLine.globalMatch(content);
+    int fileCount = 0;
+    while (lines.hasNext()) {
+        ++fileCount;
+        const QString token = lines.next().captured(1);
+        QString decoded;
+        decoded.reserve(token.size());
+        bool escaped = false;
+        QChar quote;
+        for (const QChar character : token) {
+            if (escaped) {
+                decoded += character;
+                escaped = false;
+            } else if (character == QLatin1Char('\\')) {
+                escaped = true;
+            } else if (quote.isNull()
+                       && (character == QLatin1Char('\'')
+                           || character == QLatin1Char('"'))) {
+                quote = character;
+            } else if (!quote.isNull() && character == quote) {
+                quote = QChar();
+            } else {
+                decoded += character;
+            }
+        }
+        if (escaped || !quote.isNull()) {
+            report.complete = false;
+            report.diagnostics.append(QStringLiteral("Malformed file path in concat manifest."));
+            continue;
+        }
+        const QString absolutePath = QFileInfo(decoded).isAbsolute()
+            ? QDir::cleanPath(decoded)
+            : QDir::cleanPath(manifestInfo.dir().absoluteFilePath(decoded));
+        const QFileInfo dependency(absolutePath);
+        if (!dependency.exists() && !dependency.isSymLink()) {
+            report.complete = false;
+            report.unresolvedPathLiterals.append(absolutePath);
+        } else if (!dependency.isDir()) {
+            report.resolvedPaths.append(dependency.absoluteFilePath());
+        }
+    }
+    if (fileCount == 0) {
+        report.complete = false;
+        report.diagnostics.append(QStringLiteral("The concat manifest contains no file entries."));
+    }
 }
 
 void collectScriptDependencies(const QString& scriptPath,
@@ -246,6 +314,29 @@ void collectScriptDependencies(const QString& scriptPath,
 
 } // namespace
 
+qsizetype VDQtVideoDecoder::getFrameCacheBudgetKiB() {
+    return static_cast<qsizetype>(
+        gFrameCacheBudgetMiB.load(std::memory_order_relaxed)) * 1024;
+}
+
+void VDQtVideoDecoder::setFrameCacheBudgetMiB(int budgetMiB) {
+    gFrameCacheBudgetMiB.store(
+        std::clamp(budgetMiB, 16, 1024), std::memory_order_relaxed);
+}
+
+int VDQtVideoDecoder::getDecoderThreadCount() {
+    return gDecoderThreadCount.load(std::memory_order_relaxed);
+}
+
+void VDQtVideoDecoder::setDecoderThreadCount(int threadCount) {
+    gDecoderThreadCount.store(
+        std::clamp(threadCount, 0, 64), std::memory_order_relaxed);
+}
+
+void VDQtVideoDecoder::applyFrameCacheBudget() {
+    mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
+}
+
 VDQtVideoDecoder::VDQtVideoDecoder()
     : mIsOpen(false),
       mWidth(0),
@@ -309,8 +400,12 @@ VDQtVideoDecoder::auditScriptDependencies(const QString& scriptPath) {
         report.diagnostics.append(QStringLiteral("The script file does not exist or has an unsupported extension."));
         return report;
     }
-    QSet<QString> visitedScripts;
-    collectScriptDependencies(scriptPath, visitedScripts, report, 0);
+    if (info.suffix().compare(QStringLiteral("ffconcat"), Qt::CaseInsensitive) == 0) {
+        collectConcatDependencies(scriptPath, report);
+    } else {
+        QSet<QString> visitedScripts;
+        collectScriptDependencies(scriptPath, visitedScripts, report, 0);
+    }
     report.resolvedPaths.removeDuplicates();
     report.unresolvedPathLiterals.removeDuplicates();
     report.diagnostics.removeDuplicates();
@@ -656,7 +751,25 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     };
 
     const QByteArray pathBytes = absolutePath.toUtf8();
-    int error = avformat_open_input(&newFormatContext, pathBytes.constData(), nullptr, nullptr);
+    const bool isConcatManifest = absolutePath.endsWith(
+        QStringLiteral(".ffconcat"), Qt::CaseInsensitive);
+    const bool isVapourSynthScript = absolutePath.endsWith(
+        QStringLiteral(".vpy"), Qt::CaseInsensitive);
+    const AVInputFormat *inputFormat = isConcatManifest
+        ? av_find_input_format("concat")
+        : (isVapourSynthScript ? av_find_input_format("vapoursynth") : nullptr);
+    if (isVapourSynthScript && !inputFormat) {
+        mLastError = QStringLiteral(
+            "This FFmpeg build does not provide the VapourSynth input module. "
+            "Install an FFmpeg build with VapourSynth support to open .vpy scripts.");
+        releaseLocals();
+        return false;
+    }
+    AVDictionary *inputOptions = nullptr;
+    if (isConcatManifest) av_dict_set(&inputOptions, "safe", "0", 0);
+    int error = avformat_open_input(
+        &newFormatContext, pathBytes.constData(), inputFormat, &inputOptions);
+    av_dict_free(&inputOptions);
     if (error < 0) {
         mLastError = avOperationError(QStringLiteral("Could not open %1").arg(absolutePath), error);
         releaseLocals();
@@ -702,7 +815,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         return false;
     }
     newCodecContext->pkt_timebase = videoStream->time_base;
-    newCodecContext->thread_count = 0;
+    newCodecContext->thread_count = getDecoderThreadCount();
     newCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
     // Apply the selected policy before opening the codec. setErrorMode() also
@@ -1118,9 +1231,20 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
         // second time), retaining the decoder and presentation index.
         AVFormatContext *replacementContext = nullptr;
         const QByteArray pathBytes = mFilePath.toUtf8();
+        const bool isConcatManifest = mFilePath.endsWith(
+            QStringLiteral(".ffconcat"), Qt::CaseInsensitive);
+        const bool isVapourSynthScript = mFilePath.endsWith(
+            QStringLiteral(".vpy"), Qt::CaseInsensitive);
+        const AVInputFormat *inputFormat = isConcatManifest
+            ? av_find_input_format("concat")
+            : (isVapourSynthScript ? av_find_input_format("vapoursynth") : nullptr);
+        AVDictionary *inputOptions = nullptr;
+        if (isConcatManifest) av_dict_set(&inputOptions, "safe", "0", 0);
         const int reopenResult = pathBytes.isEmpty()
             ? AVERROR(EINVAL)
-            : avformat_open_input(&replacementContext, pathBytes.constData(), nullptr, nullptr);
+            : avformat_open_input(
+                  &replacementContext, pathBytes.constData(), inputFormat, &inputOptions);
+        av_dict_free(&inputOptions);
         const bool replacementValid = reopenResult >= 0
             && replacementContext
             && mVideoStreamIndex >= 0

@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDir>
 
 // Style sheet snippet for dark polished Qt dialog look matching VirtualDub2 aesthetics
 static const char* kDialogStyle =
@@ -3778,6 +3779,224 @@ void VDAudioCompressionDialog::onSaveClicked() {
 }
 
 // -----------------------------------------------------------------------------
+// Raw video export
+// -----------------------------------------------------------------------------
+VDRawVideoExportDialog::VDRawVideoExportDialog(
+    const VDRawVideoExportConfig& initialConfig,
+    const QString& defaultDirectory,
+    const QString& defaultBaseName,
+    QWidget *parent)
+    : QDialog(parent),
+      mDefaultDirectory(defaultDirectory),
+      mDefaultBaseName(defaultBaseName) {
+    setWindowTitle("Export Raw Video");
+    setStyleSheet(kDialogStyle);
+    resize(620, 360);
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    QFormLayout *form = new QFormLayout();
+
+    QHBoxLayout *fileRow = new QHBoxLayout();
+    mFileNameEdit = new QLineEdit(this);
+    QPushButton *browseButton = new QPushButton("Browse...", this);
+    fileRow->addWidget(mFileNameEdit, 1);
+    fileRow->addWidget(browseButton);
+    form->addRow("File name:", fileRow);
+
+    mPixelFormatCombo = new QComboBox(this);
+    mPixelFormatCombo->addItem("YUV 4:2:0 planar, 8-bit", "yuv420p");
+    mPixelFormatCombo->addItem("YUV 4:2:2 planar, 8-bit", "yuv422p");
+    mPixelFormatCombo->addItem("YUV 4:4:4 planar, 8-bit", "yuv444p");
+    mPixelFormatCombo->addItem("YUV 4:2:0 planar, 10-bit LE", "yuv420p10le");
+    mPixelFormatCombo->addItem("YUV 4:2:2 planar, 10-bit LE", "yuv422p10le");
+    mPixelFormatCombo->addItem("YUV 4:4:4 planar, 10-bit LE", "yuv444p10le");
+    mPixelFormatCombo->addItem("YUYV 4:2:2 packed, 8-bit", "yuyv422");
+    mPixelFormatCombo->addItem("UYVY 4:2:2 packed, 8-bit", "uyvy422");
+    mPixelFormatCombo->addItem("Grayscale, 8-bit", "gray");
+    mPixelFormatCombo->addItem("Grayscale, 16-bit LE", "gray16le");
+    mPixelFormatCombo->addItem("RGB 5:5:5 packed LE", "rgb555le");
+    mPixelFormatCombo->addItem("RGB 5:6:5 packed LE", "rgb565le");
+    mPixelFormatCombo->addItem("RGB24 packed", "rgb24");
+    mPixelFormatCombo->addItem("BGR24 packed", "bgr24");
+    mPixelFormatCombo->addItem("RGBA packed, 8-bit", "rgba");
+    mPixelFormatCombo->addItem("BGRA packed, 8-bit", "bgra");
+    mPixelFormatCombo->addItem("RGB48 packed LE", "rgb48le");
+    mPixelFormatCombo->addItem("RGBA64 packed LE", "rgba64le");
+    int formatIndex = mPixelFormatCombo->findData(initialConfig.pixelFormat.toLower());
+    mPixelFormatCombo->setCurrentIndex(formatIndex >= 0 ? formatIndex : 0);
+    form->addRow("Pixel format:", mPixelFormatCombo);
+
+    mAlignmentCombo = new QComboBox(this);
+    for (int alignment : { 1, 2, 4, 8, 16, 32, 64 })
+        mAlignmentCombo->addItem(QString::number(alignment), alignment);
+    int alignmentIndex = mAlignmentCombo->findData(initialConfig.scanlineAlignment);
+    mAlignmentCombo->setCurrentIndex(alignmentIndex >= 0 ? alignmentIndex : 2);
+    form->addRow("Scanline alignment (bytes):", mAlignmentCombo);
+
+    mPlaneOrderCombo = new QComboBox(this);
+    mPlaneOrderCombo->addItem("Y, U, V", false);
+    mPlaneOrderCombo->addItem("Y, V, U", true);
+    mPlaneOrderCombo->setCurrentIndex(initialConfig.swapChromaPlanes ? 1 : 0);
+    form->addRow("Planar chroma order:", mPlaneOrderCombo);
+
+    mOrientationCombo = new QComboBox(this);
+    mOrientationCombo->addItem("Top-down", false);
+    mOrientationCombo->addItem("Bottom-up", true);
+    mOrientationCombo->setCurrentIndex(initialConfig.bottomUp ? 1 : 0);
+    form->addRow("Vertical orientation:", mOrientationCombo);
+
+    mColorMatrixCombo = new QComboBox(this);
+    mColorMatrixCombo->addItem("BT.601", "bt601");
+    mColorMatrixCombo->addItem("BT.709", "bt709");
+    int matrixIndex = mColorMatrixCombo->findData(initialConfig.colorMatrix.toLower());
+    mColorMatrixCombo->setCurrentIndex(matrixIndex >= 0 ? matrixIndex : 0);
+    form->addRow("YUV matrix:", mColorMatrixCombo);
+
+    mRangeCombo = new QComboBox(this);
+    mRangeCombo->addItem("Limited (studio)", false);
+    mRangeCombo->addItem("Full", true);
+    mRangeCombo->setCurrentIndex(initialConfig.fullRange ? 1 : 0);
+    form->addRow("YUV range:", mRangeCombo);
+
+    layout->addLayout(form);
+
+    QLabel *note = new QLabel(
+        "Raw output contains video samples only; it has no container header, frame-rate metadata, or audio. "
+        "The current selection, frame-rate conversion, decimation, and enabled video filters are applied.",
+        this);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(browseButton, &QPushButton::clicked,
+            this, &VDRawVideoExportDialog::onBrowseClicked);
+    connect(mPixelFormatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &VDRawVideoExportDialog::onFormatChanged);
+    layout->addWidget(buttons);
+
+    const QString baseName = mDefaultBaseName.isEmpty()
+        ? QStringLiteral("output") : mDefaultBaseName;
+    const QString extension = selectedFormatIsYuv()
+        ? QStringLiteral("yuv")
+        : (mPixelFormatCombo->currentData().toString().contains(QStringLiteral("rgb"))
+               || mPixelFormatCombo->currentData().toString() == QStringLiteral("rgba")
+               || mPixelFormatCombo->currentData().toString() == QStringLiteral("bgra")
+               ? QStringLiteral("rgb") : QStringLiteral("bin"));
+    mFileNameEdit->setText(baseName + QLatin1Char('.') + extension);
+    onFormatChanged();
+}
+
+bool VDRawVideoExportDialog::selectedFormatIsPlanarYuv() const {
+    const QString format = mPixelFormatCombo->currentData().toString();
+    return format.startsWith(QStringLiteral("yuv"))
+        && format.contains(QLatin1Char('p'));
+}
+
+bool VDRawVideoExportDialog::selectedFormatIsYuv() const {
+    const QString format = mPixelFormatCombo->currentData().toString();
+    return format.startsWith(QStringLiteral("yuv"))
+        || format == QStringLiteral("yuyv422")
+        || format == QStringLiteral("uyvy422");
+}
+
+void VDRawVideoExportDialog::onFormatChanged() {
+    mPlaneOrderCombo->setEnabled(selectedFormatIsPlanarYuv());
+    mColorMatrixCombo->setEnabled(selectedFormatIsYuv());
+    mRangeCombo->setEnabled(selectedFormatIsYuv());
+}
+
+void VDRawVideoExportDialog::onBrowseClicked() {
+    QString initialPath = mFileNameEdit->text().trimmed();
+    if (!mDefaultDirectory.isEmpty() && !QFileInfo(initialPath).isAbsolute())
+        initialPath = QDir(mDefaultDirectory).filePath(initialPath);
+    const QString filter = selectedFormatIsYuv()
+        ? QStringLiteral("Raw YUV (*.yuv);;Raw video (*.bin);;All files (*)")
+        : QStringLiteral("Raw RGB (*.rgb);;Raw video (*.bin);;All files (*)");
+    const QString selectedPath = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Export Raw Video"), initialPath, filter);
+    if (!selectedPath.isEmpty()) mFileNameEdit->setText(selectedPath);
+}
+
+QString VDRawVideoExportDialog::getSelectedFilePath() const {
+    QString path = mFileNameEdit->text().trimmed();
+    if (path.isEmpty()) return QString();
+    if (!mDefaultDirectory.isEmpty() && !QFileInfo(path).isAbsolute())
+        path = QDir(mDefaultDirectory).filePath(path);
+    return path;
+}
+
+VDRawVideoExportConfig VDRawVideoExportDialog::getConfig() const {
+    VDRawVideoExportConfig config;
+    config.pixelFormat = mPixelFormatCombo->currentData().toString();
+    config.scanlineAlignment = mAlignmentCombo->currentData().toInt();
+    config.swapChromaPlanes = mPlaneOrderCombo->currentData().toBool();
+    config.bottomUp = mOrientationCombo->currentData().toBool();
+    config.colorMatrix = mColorMatrixCombo->currentData().toString();
+    config.fullRange = mRangeCombo->currentData().toBool();
+    return config;
+}
+
+VDPreferencesDialog::VDPreferencesDialog(
+    const VDPreferencesConfig& initialConfig,
+    QWidget *parent)
+    : QDialog(parent) {
+    setWindowTitle("Preferences");
+    setStyleSheet(kDialogStyle);
+    resize(480, 250);
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    QGroupBox *performanceGroup = new QGroupBox("Playback and decoding", this);
+    QFormLayout *form = new QFormLayout(performanceGroup);
+
+    mFrameCacheMiB = new QSpinBox(this);
+    mFrameCacheMiB->setRange(16, 1024);
+    mFrameCacheMiB->setSuffix(" MiB");
+    mFrameCacheMiB->setValue(std::clamp(initialConfig.frameCacheMiB, 16, 1024));
+    form->addRow("Decoded frame cache:", mFrameCacheMiB);
+
+    mDecoderThreads = new QSpinBox(this);
+    mDecoderThreads->setRange(0, 64);
+    mDecoderThreads->setSpecialValueText("Automatic");
+    mDecoderThreads->setValue(std::clamp(initialConfig.decoderThreads, 0, 64));
+    mDecoderThreads->setToolTip(
+        "Applied when the next source is opened. Automatic lets FFmpeg choose.");
+    form->addRow("FFmpeg decoder threads:", mDecoderThreads);
+
+    mPlaybackTimerInterval = new QSpinBox(this);
+    mPlaybackTimerInterval->setRange(2, 50);
+    mPlaybackTimerInterval->setSuffix(" ms");
+    mPlaybackTimerInterval->setValue(
+        std::clamp(initialConfig.playbackTimerIntervalMs, 2, 50));
+    mPlaybackTimerInterval->setToolTip(
+        "How often the UI checks the audio clock and presents the newest video frame.");
+    form->addRow("Playback clock interval:", mPlaybackTimerInterval);
+    layout->addWidget(performanceGroup);
+
+    QLabel *note = new QLabel(
+        "Preferences are session-only and reset when VirtualDubQT exits. "
+        "Decoder thread changes take effect on the next opened source.", this);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
+}
+
+VDPreferencesConfig VDPreferencesDialog::getConfig() const {
+    VDPreferencesConfig config;
+    config.frameCacheMiB = mFrameCacheMiB->value();
+    config.decoderThreads = mDecoderThreads->value();
+    config.playbackTimerIntervalMs = mPlaybackTimerInterval->value();
+    return config;
+}
+
+// -----------------------------------------------------------------------------
 // VDAboutDialog
 // -----------------------------------------------------------------------------
 VDAboutDialog::VDAboutDialog(QWidget *parent)
@@ -3968,6 +4187,10 @@ VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, const QString
 
     mainLayout->addLayout(infoRow);
 
+    mQueueCheckBox = new QCheckBox(
+        "Add to job queue instead of exporting now", this);
+    mainLayout->addWidget(mQueueCheckBox);
+
     // Buttons
     QHBoxLayout *bottomRow = new QHBoxLayout();
 
@@ -4038,4 +4261,8 @@ QString VDSaveVideoDialog::getSelectedContainerType() const {
 bool VDSaveVideoDialog::isFastStartEnabled() const {
     QString typeKey = mFileTypeCombo->currentData().toString();
     return (typeKey == "mov_faststart" || typeKey == "mp4_faststart");
+}
+
+bool VDSaveVideoDialog::addToJobQueue() const {
+    return mQueueCheckBox && mQueueCheckBox->isChecked();
 }

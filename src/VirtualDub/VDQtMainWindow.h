@@ -10,6 +10,7 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QElapsedTimer>
+#include <QTemporaryDir>
 
 #include "VDQtVideoDisplay.h"
 #include "VDQtFrameDecodeWorker.h"
@@ -18,6 +19,8 @@
 #include "VDQtVideoDecoder.h"
 #include "VDQtAudioPlayer.h"
 #include "VDQtVideoExporter.h"
+#include "VDQtProjectFile.h"
+#include "VDQtFrameServer.h"
 #include <QTimer>
 #include <QThread>
 
@@ -39,13 +42,26 @@ private Q_SLOTS:
     // Menu Handlers
     void onFileOpen();
     void onFileReopen();
+    void onFileAppendSegment();
     void onFileClose();
     void onFileInformation();
+    void onFileSetTextInformation();
+    void onFileLoadProject();
+    void onFileSaveProject();
+    void onFileSaveProjectAs();
     void onFileSaveAVI();
     void onFileSaveAudio();
     void onFileRunAnalysisPass();
+    void onFileExportRawVideo();
     void onFileSaveImageSequence();
+    void onFileExportAnimatedGIF();
+    void onFileLoadProcessingSettings();
+    void onFileSaveProcessingSettings();
     void onFileRunScript();
+    void onFileJobControl();
+    void onFileBatchWizard();
+    void onFileStartFrameServer();
+    void onFileStopFrameServer();
     void onOpenRecentFile();
     void onFileQuit();
 
@@ -77,6 +93,8 @@ private Q_SLOTS:
     void onAudioModeDirectStream();
     void onAudioModeFullProcessing();
     void onAudioCompression();
+
+    void onOptionsPreferences();
 
     void onHelpAbout();
 
@@ -110,6 +128,15 @@ private:
     void syncInteractiveFilterChain();
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
+    bool loadProjectFile(const QString& path);
+    VDQtProcessingState captureProcessingState() const;
+    void applyProcessingState(const VDQtProcessingState& state);
+    VDQtVideoExporter::ExportOptions currentExportOptions(
+        const QString& outputPath,
+        const QString& containerType,
+        bool fastStart,
+        bool fullSourceRange = false) const;
+    QString primarySessionSourcePath() const;
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
 
@@ -145,6 +172,8 @@ private:
     QAction *actVideoFastRecompress;
     QAction *actVideoNormalRecompress;
     QAction *actVideoFullProcessing;
+    QAction *actVideoSmartRendering;
+    QAction *actVideoPreserveEmptyFrames;
     QAction *actVideoCompression;
     QAction *actVideoFilters;
 
@@ -155,7 +184,25 @@ private:
     VDFrameRateConfig mFrameRateConfig;
     VDDecompressionFormatConfig mDecompressionFormatConfig;
     VDDecoderErrorModeConfig mDecoderErrorModeConfig;
+    VDRawVideoExportConfig mRawVideoExportConfig;
+    VDPreferencesConfig mPreferencesConfig;
+    QMap<QString, QString> mTextMetadata;
+    QString mCurrentProjectPath;
+    QTemporaryDir mTimelineTempDirectory;
+    QStringList mTimelineSources;
+    struct QueuedVideoJob {
+        enum Status { Pending, Running, Complete, Failed, Cancelled };
+        QStringList sourcePaths;
+        VDQtVideoExporter::ExportOptions options;
+        VDQtProcessingState processing;
+        Status status = Pending;
+        QString error;
+    };
+    QList<QueuedVideoJob> mVideoJobs;
+    VDQtFrameServer *mFrameServer = nullptr;
     int mVideoMode = VideoMode_FullProcessing;
+    bool mSmartRendering = false;
+    bool mPreserveEmptyFrames = true;
     int mAudioMode = AudioMode_DirectStreamCopy;
     bool mIsExporting = false;
 };

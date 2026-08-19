@@ -4,10 +4,12 @@
 
 #include "VDQtFilterSystem.h"
 #include "VDQtFrameDecodeWorker.h"
+#include "VDQtFrameServer.h"
 #include "VDQtAudioPlayer.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtCodecSettings.h"
 #include "VDQtPositionControl.h"
+#include "VDQtProjectFile.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoExporter.h"
 #include "VDQtSourceSafety.h"
@@ -16,6 +18,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -84,6 +87,150 @@ int main(int argc, char **argv) {
     QApplication application(argc, argv);
 
     {
+        VDQtProcessingState state;
+        state.videoMode = VideoMode_FastRecompress;
+        state.audioMode = AudioMode_FullProcessing;
+        state.smartRendering = true;
+        state.preserveEmptyFrames = false;
+        state.frameRate.sourceMode = 1;
+        state.frameRate.customSourceFps = 24000.0 / 1001.0;
+        state.frameRate.convMode = 3;
+        state.frameRate.decimateN = 5;
+        state.decompression.formatName = QStringLiteral("RGB24");
+        state.decompression.colorSpace = 2;
+        state.decompression.componentRange = 1;
+        state.decoderErrorMode.errorMode = 1;
+        state.rawVideo.pixelFormat = QStringLiteral("yuv422p10le");
+        state.rawVideo.scanlineAlignment = 16;
+        state.rawVideo.swapChromaPlanes = false;
+        state.rawVideo.bottomUp = true;
+        state.rawVideo.colorMatrix = QStringLiteral("bt709");
+        state.rawVideo.fullRange = true;
+        state.videoCodec = VDQtCodecEngine::getDefaultVideoParamsForCodec(
+            QStringLiteral("ffv1"));
+        state.audioCodec.codecId = QStringLiteral("flac");
+        state.audioCodec.sampleRate = 96000;
+        state.audioCodec.channels = 6;
+        VDFilterInstance filter;
+        filter.id = QStringLiteral("roundtrip-filter");
+        filter.name = QStringLiteral("Resize / Rescale");
+        filter.type = VDFilterType::Resize;
+        filter.enabled = true;
+        filter.params.insert(QStringLiteral("width"), 1280.0);
+        filter.params.insert(QStringLiteral("height"), 720.0);
+        state.filters.append(filter);
+        state.textMetadata.insert(QStringLiteral("title"), QStringLiteral("Round trip"));
+
+        const QString settingsPath = settingsDirectory.filePath(
+            QStringLiteral("processing.vdqsettings"));
+        QString stateError;
+        if (!require(VDQtProjectFile::saveProcessingSettings(
+                         settingsPath, state, &stateError),
+                     "save processing settings snapshot")) {
+            std::cerr << stateError.toStdString() << '\n';
+            return 1;
+        }
+        VDQtProcessingState loaded;
+        if (!require(VDQtProjectFile::loadProcessingSettings(
+                         settingsPath, &loaded, &stateError),
+                     "load processing settings snapshot")
+            || !require(loaded.videoMode == VideoMode_FastRecompress
+                        && loaded.audioMode == AudioMode_FullProcessing
+                        && loaded.smartRendering
+                        && !loaded.preserveEmptyFrames
+                        && loaded.frameRate.decimateN == 5
+                        && std::abs(loaded.frameRate.customSourceFps
+                                    - 24000.0 / 1001.0) < 1e-9
+                        && loaded.rawVideo.pixelFormat == QStringLiteral("yuv422p10le")
+                        && loaded.rawVideo.scanlineAlignment == 16
+                        && loaded.videoCodec.codecId == QStringLiteral("ffv1")
+                        && loaded.audioCodec.codecId == QStringLiteral("flac")
+                        && loaded.filters.size() == 1
+                        && loaded.filters.first().params.value(QStringLiteral("width")) == 1280.0
+                        && loaded.textMetadata.value(QStringLiteral("title"))
+                               == QStringLiteral("Round trip"),
+                        "processing snapshot preserves every session subsystem"))
+            return 1;
+
+        VDQtProjectState project;
+        project.sourcePath = settingsDirectory.filePath(QStringLiteral("media/source.mkv"));
+        project.sourcePaths = {
+            project.sourcePath,
+            settingsDirectory.filePath(QStringLiteral("media/source_2.mkv"))
+        };
+        project.position = 42;
+        project.hasSelection = true;
+        project.selectionStart = 10;
+        project.selectionEnd = 50;
+        project.processing = state;
+        const QString projectPath = settingsDirectory.filePath(
+            QStringLiteral("roundtrip.vdqproject"));
+        if (!require(VDQtProjectFile::saveProject(projectPath, project, &stateError),
+                     "save project snapshot"))
+            return 1;
+        VDQtProjectState loadedProject;
+        if (!require(VDQtProjectFile::loadProject(
+                         projectPath, &loadedProject, &stateError),
+                     "load project snapshot")
+            || !require(loadedProject.sourcePath == QDir::cleanPath(project.sourcePath)
+                        && loadedProject.sourcePaths.size() == 2
+                        && loadedProject.sourcePaths.at(1)
+                               == QDir::cleanPath(project.sourcePaths.at(1))
+                        && loadedProject.position == 42
+                        && loadedProject.hasSelection
+                        && loadedProject.selectionStart == 10
+                        && loadedProject.selectionEnd == 50
+                        && loadedProject.processing.filters.size() == 1,
+                        "project snapshot preserves relative source and timeline state"))
+            return 1;
+
+        VDQtJobState queuedJob;
+        queuedJob.sourcePaths = project.sourcePaths;
+        queuedJob.options.inputPath = project.sourcePaths.first();
+        queuedJob.options.outputPath =
+            settingsDirectory.filePath(QStringLiteral("exports/output.mkv"));
+        queuedJob.options.startFrame = 10;
+        queuedJob.options.endFrame = 49;
+        queuedJob.options.videoMode = VideoMode_FastRecompress;
+        queuedJob.options.audioMode = AudioMode_FullProcessing;
+        queuedJob.options.smartRendering = true;
+        queuedJob.options.preserveEmptyFrames = false;
+        queuedJob.options.containerType = QStringLiteral("mkv");
+        queuedJob.processing = state;
+        const QString jobPath = settingsDirectory.filePath(
+            QStringLiteral("queue.vdqjobs"));
+        if (!require(VDQtProjectFile::saveJobQueue(
+                         jobPath, { queuedJob }, &stateError),
+                     "save executable job script"))
+            return 1;
+        QList<VDQtJobState> loadedJobs;
+        if (!require(VDQtProjectFile::loadJobQueue(
+                         jobPath, &loadedJobs, &stateError),
+                     "load executable job script")
+            || !require(loadedJobs.size() == 1
+                        && loadedJobs.first().sourcePaths.size() == 2
+                        && loadedJobs.first().options.startFrame == 10
+                        && loadedJobs.first().options.endFrame == 49
+                        && loadedJobs.first().options.smartRendering
+                        && !loadedJobs.first().options.preserveEmptyFrames
+                        && loadedJobs.first().processing.filters.size() == 1,
+                        "job script round-trips sources, export range, and processing"))
+            return 1;
+
+        const QString malformedPath = settingsDirectory.filePath(
+            QStringLiteral("malformed.vdqsettings"));
+        if (!require(writeFile(
+                         malformedPath,
+                         QByteArray("{\"kind\":\"VirtualDubQTProcessingSettings\","
+                                    "\"version\":1,\"processing\":{\"videoMode\":99}}")),
+                     "write malformed processing snapshot")
+            || !require(!VDQtProjectFile::loadProcessingSettings(
+                            malformedPath, &loaded, &stateError),
+                        "reject invalid processing snapshot before applying state"))
+            return 1;
+    }
+
+    {
         VDQtPositionControlWidget positionControl;
         int dispatchCount = 0;
         int dispatchedPosition = -1;
@@ -104,6 +251,15 @@ int main(int argc, char **argv) {
                      "programmatic playhead movement dispatches exactly once"))
             return 1;
     }
+
+    VDQtVideoDecoder::setFrameCacheBudgetMiB(32);
+    VDQtVideoDecoder::setDecoderThreadCount(4);
+    if (!require(VDQtVideoDecoder::getFrameCacheBudgetKiB() == 32 * 1024
+                 && VDQtVideoDecoder::getDecoderThreadCount() == 4,
+                 "session preferences control decoder cache and thread defaults"))
+        return 1;
+    VDQtVideoDecoder::setFrameCacheBudgetMiB(64);
+    VDQtVideoDecoder::setDecoderThreadCount(0);
 
     QImage source(8, 8, QImage::Format_RGB888);
     source.fill(QColor(16, 32, 64));
@@ -903,6 +1059,428 @@ int main(int argc, char **argv) {
     }
 
     {
+        const QString fixturePath =
+            settingsDirectory.filePath(QStringLiteral("raw_export_source.mkv"));
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("testsrc=size=5x4:rate=3:duration=1"),
+                           QStringLiteral("-vf"), QStringLiteral("format=yuv444p"),
+                           QStringLiteral("-c:v"), QStringLiteral("ffv1"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv444p"),
+                           QStringLiteral("-an"), QStringLiteral("-y"), fixturePath },
+                         &ffmpegError),
+                     "create raw-video export fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(fixturePath), "open raw-video export fixture"))
+            return 1;
+
+        VDQtVideoExporter exporter;
+        VDQtVideoExporter::RawExportOptions options;
+        options.inputPath = fixturePath;
+        options.startFrame = 1;
+        options.endFrame = 1;
+        options.pixelFormat = QStringLiteral("rgb24");
+        options.scanlineAlignment = 8;
+        options.bottomUp = true;
+
+        VDQtFilterSystem::instance().clearFilters();
+        VDQtFilterSystem::instance().addFilter(VDFilterType::InvertColor);
+        const QString rgbOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_selected_filtered.rgb"));
+        options.outputPath = rgbOutput;
+        if (!require(exporter.exportRawVideo(options, &decoder),
+                     "export selected filtered bottom-up aligned RGB frame"))
+            return 1;
+
+        const QImage expectedImage = VDQtFilterSystem::instance()
+            .processFrame(decoder.getFrameImage(1))
+            .convertToFormat(QImage::Format_RGB888);
+        QByteArray expectedRgb;
+        for (int row = expectedImage.height() - 1; row >= 0; --row) {
+            expectedRgb.append(
+                reinterpret_cast<const char *>(expectedImage.constScanLine(row)),
+                expectedImage.width() * 3);
+            expectedRgb.append('\0');
+        }
+        QFile rgbFile(rgbOutput);
+        if (!require(rgbFile.open(QIODevice::ReadOnly), "read raw RGB output"))
+            return 1;
+        const QByteArray actualRgb = rgbFile.readAll();
+        if (!require(actualRgb == expectedRgb,
+                     "raw RGB bytes honor selection, filters, alignment, and bottom-up orientation"))
+            return 1;
+
+        VDQtFilterSystem::instance().clearFilters();
+        options.pixelFormat = QStringLiteral("yuv444p");
+        options.scanlineAlignment = 8;
+        options.bottomUp = false;
+        options.swapChromaPlanes = false;
+        const QString yuvOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_yuv_order.yuv"));
+        options.outputPath = yuvOutput;
+        if (!require(exporter.exportRawVideo(options, &decoder),
+                     "export aligned YUV raw frame"))
+            return 1;
+        options.swapChromaPlanes = true;
+        const QString yvuOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_yvu_order.yuv"));
+        options.outputPath = yvuOutput;
+        if (!require(exporter.exportRawVideo(options, &decoder),
+                     "export swapped-chroma raw frame"))
+            return 1;
+
+        QFile yuvFile(yuvOutput);
+        QFile yvuFile(yvuOutput);
+        if (!require(yuvFile.open(QIODevice::ReadOnly)
+                     && yvuFile.open(QIODevice::ReadOnly),
+                     "read planar raw outputs"))
+            return 1;
+        const QByteArray yuvBytes = yuvFile.readAll();
+        const QByteArray yvuBytes = yvuFile.readAll();
+        constexpr int alignedPlaneBytes = 8 * 4;
+        if (!require(yuvBytes.size() == alignedPlaneBytes * 3
+                     && yvuBytes.size() == alignedPlaneBytes * 3
+                     && yuvBytes.mid(0, alignedPlaneBytes)
+                            == yvuBytes.mid(0, alignedPlaneBytes)
+                     && yuvBytes.mid(alignedPlaneBytes, alignedPlaneBytes)
+                            == yvuBytes.mid(alignedPlaneBytes * 2, alignedPlaneBytes)
+                     && yuvBytes.mid(alignedPlaneBytes * 2, alignedPlaneBytes)
+                            == yvuBytes.mid(alignedPlaneBytes, alignedPlaneBytes),
+                     "raw planar export pads scanlines and swaps complete chroma planes"))
+            return 1;
+
+        options.pixelFormat = QStringLiteral("rgb24");
+        options.scanlineAlignment = 1;
+        options.swapChromaPlanes = false;
+        options.startFrame = 0;
+        options.endFrame = 2;
+        options.convertFpsPreserveDuration = true;
+        options.customFps = 6.0;
+        const QString convertedOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_converted_6fps.rgb"));
+        options.outputPath = convertedOutput;
+        if (!require(exporter.exportRawVideo(options, &decoder),
+                     "export raw frame-rate converted sequence")
+            || !require(QFileInfo(convertedOutput).size() == 5 * 4 * 3 * 6,
+                        "raw frame-rate conversion emits the duration-preserving frame count"))
+            return 1;
+
+        options.convertFpsPreserveDuration = false;
+        options.customFps = 0.0;
+        options.decimateFactor = 2;
+        const QString decimatedOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_decimated.rgb"));
+        options.outputPath = decimatedOutput;
+        if (!require(exporter.exportRawVideo(options, &decoder),
+                     "export decimated raw sequence")
+            || !require(QFileInfo(decimatedOutput).size() == 5 * 4 * 3 * 2,
+                        "raw decimation emits the expected two frames"))
+            return 1;
+
+        options.decimateFactor = 1;
+        const QString cancelledOutput =
+            settingsDirectory.filePath(QStringLiteral("raw_cancelled.rgb"));
+        const QByteArray sentinel("existing raw destination");
+        if (!require(writeFile(cancelledOutput, sentinel),
+                     "create raw cancellation destination sentinel"))
+            return 1;
+        options.outputPath = cancelledOutput;
+        if (!require(!exporter.exportRawVideo(
+                         options, &decoder, nullptr, nullptr,
+                         [](int completed, int) { return completed < 1; }),
+                     "cancel raw export through progress callback"))
+            return 1;
+        QFile cancelledFile(cancelledOutput);
+        if (!require(cancelledFile.open(QIODevice::ReadOnly)
+                     && cancelledFile.readAll() == sentinel,
+                     "cancelled raw export preserves an existing destination"))
+            return 1;
+
+        QFile sourceBefore(fixturePath);
+        if (!require(sourceBefore.open(QIODevice::ReadOnly),
+                     "read source before raw alias rejection"))
+            return 1;
+        const QByteArray sourceContents = sourceBefore.readAll();
+        sourceBefore.close();
+        options.outputPath = fixturePath;
+        if (!require(!exporter.exportRawVideo(options, &decoder),
+                     "reject raw output that aliases the loaded source"))
+            return 1;
+        QFile sourceAfter(fixturePath);
+        if (!require(sourceAfter.open(QIODevice::ReadOnly)
+                     && sourceAfter.readAll() == sourceContents,
+                     "raw source-alias rejection leaves the source byte-exact"))
+            return 1;
+
+        VDQtVideoExporter::ExportOptions gifOptions;
+        gifOptions.inputPath = fixturePath;
+        gifOptions.outputPath =
+            settingsDirectory.filePath(QStringLiteral("selected_animation.gif"));
+        gifOptions.startFrame = 0;
+        gifOptions.endFrame = 1;
+        gifOptions.videoMode = VideoMode_FullProcessing;
+        gifOptions.includeAudio = false;
+        gifOptions.videoCodecOverride = QStringLiteral("gif");
+        gifOptions.videoPixelFormatOverride = QStringLiteral("rgb8");
+        gifOptions.containerType = QStringLiteral("gif");
+        if (!require(exporter.exportVideo(gifOptions, &decoder),
+                     "export selected animated GIF"))
+            return 1;
+        QByteArray gifProbe;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=codec_name,nb_read_frames"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                           gifOptions.outputPath },
+                         &ffmpegError, &gifProbe),
+                     "probe animated GIF output")
+            || !require(gifProbe.contains("codec_name=gif")
+                        && gifProbe.contains("nb_read_frames=2"),
+                        "animated GIF honors the exact selected frame count")) {
+            std::cerr << gifProbe.constData() << '\n';
+            return 1;
+        }
+
+        VDQtVideoExporter::ExportOptions metadataOptions;
+        metadataOptions.inputPath = fixturePath;
+        metadataOptions.outputPath =
+            settingsDirectory.filePath(QStringLiteral("metadata_output.mkv"));
+        metadataOptions.startFrame = 0;
+        metadataOptions.endFrame = 0;
+        metadataOptions.videoMode = VideoMode_FullProcessing;
+        metadataOptions.includeAudio = false;
+        metadataOptions.videoCodecOverride = QStringLiteral("ffv1");
+        metadataOptions.videoPixelFormatOverride = QStringLiteral("yuv444p");
+        metadataOptions.containerType = QStringLiteral("mkv");
+        metadataOptions.metadata.insert(
+            QStringLiteral("title"), QStringLiteral("Metadata round trip"));
+        if (!require(exporter.exportVideo(metadataOptions, &decoder),
+                     "export container text metadata"))
+            return 1;
+        QByteArray metadataProbe;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-show_entries"),
+                           QStringLiteral("format_tags=title"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"),
+                           metadataOptions.outputPath },
+                         &ffmpegError, &metadataProbe),
+                     "probe exported text metadata")
+            || !require(metadataProbe.trimmed() == QByteArray("Metadata round trip"),
+                        "video export preserves configured text metadata")) {
+            std::cerr << metadataProbe.constData() << '\n';
+            return 1;
+        }
+    }
+
+    {
+        const QString firstSegment =
+            settingsDirectory.filePath(QStringLiteral("append_first.mkv"));
+        const QString secondSegment =
+            settingsDirectory.filePath(QStringLiteral("append_second.mkv"));
+        QByteArray ffmpegError;
+        const QStringList commonArguments = {
+            QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi")
+        };
+        QStringList firstArguments = commonArguments;
+        firstArguments
+            << QStringLiteral("-i") << QStringLiteral("color=red:size=64x48:rate=5:duration=0.4")
+            << QStringLiteral("-f") << QStringLiteral("lavfi")
+            << QStringLiteral("-i") << QStringLiteral("sine=frequency=440:sample_rate=48000:duration=0.4")
+            << QStringLiteral("-c:v") << QStringLiteral("ffv1")
+            << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
+            << QStringLiteral("-c:a") << QStringLiteral("pcm_s16le")
+            << QStringLiteral("-shortest") << QStringLiteral("-y") << firstSegment;
+        QStringList secondArguments = commonArguments;
+        secondArguments
+            << QStringLiteral("-i") << QStringLiteral("color=blue:size=64x48:rate=5:duration=0.4")
+            << QStringLiteral("-f") << QStringLiteral("lavfi")
+            << QStringLiteral("-i") << QStringLiteral("sine=frequency=880:sample_rate=48000:duration=0.4")
+            << QStringLiteral("-c:v") << QStringLiteral("ffv1")
+            << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
+            << QStringLiteral("-c:a") << QStringLiteral("pcm_s16le")
+            << QStringLiteral("-shortest") << QStringLiteral("-y") << secondSegment;
+        if (!require(runProcess(QStringLiteral("ffmpeg"), firstArguments, &ffmpegError)
+                     && runProcess(QStringLiteral("ffmpeg"), secondArguments, &ffmpegError),
+                     "create concat-compatible append fixtures")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        const QString manifest =
+            settingsDirectory.filePath(QStringLiteral("append_timeline.ffconcat"));
+        const QByteArray manifestContents =
+            QByteArray("ffconcat version 1.0\nfile ")
+            + firstSegment.toUtf8() + QByteArray("\nfile ")
+            + secondSegment.toUtf8() + QByteArray("\n");
+        if (!require(writeFile(manifest, manifestContents),
+                     "write appended timeline manifest"))
+            return 1;
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(manifest),
+                     "open appended timeline through concat demuxer"))
+            return 1;
+        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream();
+        if (!require(scan.errorMessage.isEmpty() && !scan.cancelled
+                     && decoder.isFrameCountExact() && decoder.getFrameCount() == 4,
+                     "appended timeline exposes all segment frames"))
+            return 1;
+        const QImage firstFrame = decoder.getFrameImage(0);
+        const QImage lastFrame = decoder.getFrameImage(3);
+        if (!require(!firstFrame.isNull() && !lastFrame.isNull()
+                     && firstFrame.pixelColor(10, 10).red()
+                            > firstFrame.pixelColor(10, 10).blue()
+                     && lastFrame.pixelColor(10, 10).blue()
+                            > lastFrame.pixelColor(10, 10).red(),
+                     "appended timeline preserves segment order"))
+            return 1;
+
+        const VDQtOutputSafetyReport aliasReport =
+            VDQtSourceSafety::evaluateOutputPath(firstSegment, { manifest }, manifest);
+        if (!require(!aliasReport.isSafe()
+                     && aliasReport.issue == VDQtOutputSafetyIssue::AliasesLoadedSource,
+                     "concat dependency audit protects every appended source"))
+            return 1;
+
+        VDQtVideoExporter exporter;
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = manifest;
+        options.outputPath =
+            settingsDirectory.filePath(QStringLiteral("append_direct_copy.mkv"));
+        options.videoMode = VideoMode_DirectStreamCopy;
+        options.audioMode = AudioMode_DirectStreamCopy;
+        options.containerType = QStringLiteral("mkv");
+        if (!require(exporter.exportVideo(options, &decoder),
+                     "direct-copy appended video and audio timeline"))
+            return 1;
+
+        QByteArray videoFrames;
+        QByteArray audioStreams;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"), QStringLiteral("-select_streams"),
+                           QStringLiteral("v:0"), QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=nb_read_frames"), QStringLiteral("-of"),
+                           QStringLiteral("default=nw=1:nk=1"), options.outputPath },
+                         &ffmpegError, &videoFrames)
+                     && runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("a"),
+                           QStringLiteral("-show_entries"), QStringLiteral("stream=index"),
+                           QStringLiteral("-of"), QStringLiteral("csv=p=0"), options.outputPath },
+                         &ffmpegError, &audioStreams),
+                     "probe appended direct-copy output")
+            || !require(videoFrames.trimmed() == QByteArray("4")
+                        && !audioStreams.trimmed().isEmpty(),
+                        "appended output retains every frame and its audio stream")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        VDQtFilterSystem::instance().clearFilters();
+        VDQtVideoDecoder smartDecoder;
+        if (!require(smartDecoder.openFile(firstSegment),
+                     "open smart-render fixture"))
+            return 1;
+        VDQtVideoExporter::ExportOptions smartOptions;
+        smartOptions.inputPath = firstSegment;
+        smartOptions.outputPath =
+            settingsDirectory.filePath(QStringLiteral("smart_copy.mkv"));
+        smartOptions.videoMode = VideoMode_FullProcessing;
+        smartOptions.audioMode = AudioMode_DirectStreamCopy;
+        smartOptions.smartRendering = true;
+        smartOptions.containerType = QStringLiteral("mkv");
+        if (!require(exporter.exportVideo(smartOptions, &smartDecoder),
+                     "smart-render a clean random-access range"))
+            return 1;
+        QByteArray smartCodec;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                           QStringLiteral("-show_entries"), QStringLiteral("stream=codec_name"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1:nk=1"),
+                           smartOptions.outputPath },
+                         &ffmpegError, &smartCodec),
+                     "probe smart-render codec")
+            || !require(smartCodec.trimmed() == QByteArray("ffv1"),
+                        "smart rendering copies a clean GOP-aligned stream"))
+            return 1;
+
+        const QString servedPipe =
+            settingsDirectory.filePath(QStringLiteral("filtered_frames.nutpipe"));
+        const QString servedOutput =
+            settingsDirectory.filePath(QStringLiteral("filtered_frames.mkv"));
+        VDQtFrameServer frameServer;
+        VDQtFrameServer::Config serverConfig;
+        serverConfig.sourcePath = firstSegment;
+        serverConfig.pipePath = servedPipe;
+        serverConfig.startFrame = 0;
+        serverConfig.endFrame = 1;
+        VDFilterInstance invert;
+        invert.id = QStringLiteral("frame-server-invert");
+        invert.name = QStringLiteral("Invert Color");
+        invert.type = VDFilterType::InvertColor;
+        invert.enabled = true;
+        serverConfig.filters.append(invert);
+        QString serverError;
+        if (!require(frameServer.start(serverConfig, &serverError),
+                     "start filtered NUT FIFO frame server")) {
+            std::cerr << serverError.toStdString() << '\n';
+            return 1;
+        }
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                           QStringLiteral("error"), QStringLiteral("-i"), servedPipe,
+                           QStringLiteral("-c:v"), QStringLiteral("ffv1"),
+                           QStringLiteral("-y"), servedOutput },
+                         &ffmpegError),
+                     "consume frame-server FIFO into a media file")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        QElapsedTimer serverWait;
+        serverWait.start();
+        while (frameServer.isRunning() && serverWait.elapsed() < 5000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!require(!frameServer.isRunning() && !QFileInfo::exists(servedPipe),
+                     "frame server completes and removes its FIFO"))
+            return 1;
+        QByteArray servedFrames;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"), QStringLiteral("-select_streams"),
+                           QStringLiteral("v:0"), QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=nb_read_frames"), QStringLiteral("-of"),
+                           QStringLiteral("default=nw=1:nk=1"), servedOutput },
+                         &ffmpegError, &servedFrames),
+                     "probe consumed frame-server stream")
+            || !require(servedFrames.trimmed() == QByteArray("2"),
+                        "frame server honors its exact selected range"))
+            return 1;
+    }
+
+    {
         const QString fixturePath = settingsDirectory.filePath(QStringLiteral("ten_bit_ffv1.mkv"));
         QByteArray ffmpegError;
         if (!require(runProcess(
@@ -932,6 +1510,21 @@ int main(int argc, char **argv) {
             return 1;
 
         VDQtFilterSystem::instance().clearFilters();
+        VDQtVideoExporter exporter;
+        VDQtVideoExporter::RawExportOptions rawOptions;
+        rawOptions.inputPath = fixturePath;
+        rawOptions.outputPath =
+            settingsDirectory.filePath(QStringLiteral("ten_bit_raw.yuv"));
+        rawOptions.pixelFormat = QStringLiteral("yuv420p10le");
+        rawOptions.scanlineAlignment = 16;
+        rawOptions.swapChromaPlanes = false;
+        if (!require(exporter.exportRawVideo(rawOptions, &decoder),
+                     "export 10-bit planar raw video")
+            || !require(QFileInfo(rawOptions.outputPath).size()
+                            == (64 * 48 + 2 * 32 * 24) * 2,
+                        "10-bit planar raw export uses two bytes per component"))
+            return 1;
+
         VDQtFilterSystem::instance().addFilter(VDFilterType::Grayscale);
         VDQtCodecEngine::instance().setVideoParams(
             VDQtCodecEngine::getDefaultVideoParamsForCodec(
@@ -944,7 +1537,6 @@ int main(int argc, char **argv) {
         options.videoMode = VideoMode_FullProcessing;
         options.audioMode = AudioMode_DirectStreamCopy;
         options.containerType = QStringLiteral("mkv");
-        VDQtVideoExporter exporter;
         if (!require(exporter.exportVideo(options, &decoder),
                      "export filtered 10-bit video"))
             return 1;
@@ -1275,6 +1867,31 @@ int main(int argc, char **argv) {
             std::cerr << "duration=" << durationOutput.constData() << '\n';
             return 1;
         }
+
+        options.outputPath = settingsDirectory.filePath(
+            QStringLiteral("collapsed_empty_frames.mp4"));
+        options.preserveEmptyFrames = false;
+        if (!require(exporter.exportVideo(options, &decoder),
+                     "collapse null-frame/timestamp gaps on request"))
+            return 1;
+        QByteArray collapsedProbe;
+        if (!require(runProcess(
+                         QStringLiteral("ffprobe"),
+                         { QStringLiteral("-v"), QStringLiteral("error"),
+                           QStringLiteral("-count_frames"), QStringLiteral("-select_streams"),
+                           QStringLiteral("v:0"), QStringLiteral("-show_entries"),
+                           QStringLiteral("stream=nb_read_frames:format=duration"),
+                           QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                           options.outputPath },
+                         &ffmpegError, &collapsedProbe),
+                     "probe collapsed empty-frame timeline")
+            || !require(collapsedProbe.contains("nb_read_frames=3")
+                        && collapsedProbe.contains("duration=0.300"),
+                        "empty-frame toggle collapses dwell gaps to nominal cadence")) {
+            std::cerr << collapsedProbe.constData() << '\n';
+            return 1;
+        }
+        options.preserveEmptyFrames = true;
 
         const struct {
             const char *extension;

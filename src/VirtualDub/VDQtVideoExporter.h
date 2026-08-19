@@ -42,6 +42,30 @@ public:
         int audioMode = AudioMode_DirectStreamCopy;
         QString containerType; // e.g. "mov_faststart", "mp4_faststart", "webm", "mkv"
         bool fastStart = false;
+        bool includeAudio = true;
+        QString videoCodecOverride;
+        QString videoPixelFormatOverride;
+        QMap<QString, QString> metadata;
+        // Conservatively copies a clean GOP-aligned range and otherwise falls
+        // back to the selected recompression mode for frame-exact output.
+        bool smartRendering = false;
+        bool preserveEmptyFrames = true;
+    };
+
+    struct RawExportOptions {
+        QString inputPath;
+        QString outputPath;
+        int startFrame = 0;
+        int endFrame = -1;
+        double customFps = 0.0;
+        bool convertFpsPreserveDuration = false;
+        int decimateFactor = 1;
+        QString pixelFormat = QStringLiteral("yuv420p");
+        int scanlineAlignment = 4;
+        bool swapChromaPlanes = true;
+        bool bottomUp = false;
+        QString colorMatrix = QStringLiteral("bt601");
+        bool fullRange = false;
     };
 
     bool exportVideo(const ExportOptions& options,
@@ -49,6 +73,13 @@ public:
                      VDQtAudioPlayer *audioPlayer = nullptr,
                      QWidget *parentWidget = nullptr,
                      std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback = nullptr);
+
+    bool exportRawVideo(
+        const RawExportOptions& options,
+        VDQtVideoDecoder *activeDecoder = nullptr,
+        VDQtAudioPlayer *audioPlayer = nullptr,
+        QWidget *parentWidget = nullptr,
+        std::function<bool(int completedFrames, int totalFrames)> progressCallback = nullptr);
 };
 
 #endif // VDQTVIDEOEXPORTER_H

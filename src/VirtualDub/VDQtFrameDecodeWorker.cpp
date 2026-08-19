@@ -39,6 +39,11 @@ void VDQtFrameDecodeWorker::setErrorMode(int errorMode) {
     mDecoder.setErrorMode(errorMode);
 }
 
+void VDQtFrameDecodeWorker::applyFrameCacheBudget() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    mDecoder.applyFrameCacheBudget();
+}
+
 void VDQtFrameDecodeWorker::setFilterChain(const QList<VDFilterInstance>& chain) {
     Q_ASSERT(QThread::currentThread() == thread());
     mFilters.replaceActiveChainTransient(chain);

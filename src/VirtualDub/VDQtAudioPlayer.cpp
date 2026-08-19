@@ -324,12 +324,18 @@ public:
             inputFormat = av_find_input_format("avisynth");
         } else if (filePath.endsWith(".vpy", Qt::CaseInsensitive)) {
             inputFormat = av_find_input_format("vapoursynth");
+        } else if (filePath.endsWith(".ffconcat", Qt::CaseInsensitive)) {
+            inputFormat = av_find_input_format("concat");
         }
 
+        AVDictionary *inputOptions = nullptr;
+        if (filePath.endsWith(".ffconcat", Qt::CaseInsensitive))
+            av_dict_set(&inputOptions, "safe", "0", 0);
         int result = avformat_open_input(&mFormatContext,
                                          encodedPath.constData(),
                                          inputFormat,
-                                         nullptr);
+                                         &inputOptions);
+        av_dict_free(&inputOptions);
         if (result < 0) return fail("Could not open audio source", result);
 
         result = avformat_find_stream_info(mFormatContext, nullptr);
@@ -2270,13 +2276,19 @@ bool VDQtAudioPlayer::openFile(const QString &filePath)
             mHasAudio = false;
             return true;
         }
+    } else if (filePath.endsWith(".ffconcat", Qt::CaseInsensitive)) {
+        inputFormat = av_find_input_format("concat");
     }
 
     const QByteArray encodedPath = QFile::encodeName(filePath);
+    AVDictionary *inputOptions = nullptr;
+    if (filePath.endsWith(".ffconcat", Qt::CaseInsensitive))
+        av_dict_set(&inputOptions, "safe", "0", 0);
     int result = avformat_open_input(&mFormatCtx,
                                      encodedPath.constData(),
                                      inputFormat,
-                                     nullptr);
+                                     &inputOptions);
+    av_dict_free(&inputOptions);
     if (result < 0) {
         qWarning() << "[VDQtAudioPlayer] Could not open audio source:"
                    << avErrorString(result);

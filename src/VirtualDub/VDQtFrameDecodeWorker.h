@@ -26,6 +26,7 @@ public:
     QString lastError() const { return mDecoder.getLastError(); }
     void setDecompressionConfig(const QString& formatName, int colorSpace, int componentRange);
     void setErrorMode(int errorMode);
+    void applyFrameCacheBudget();
     void setFilterChain(const QList<VDFilterInstance>& chain);
 
     void requestFrame(int frameIndex,
