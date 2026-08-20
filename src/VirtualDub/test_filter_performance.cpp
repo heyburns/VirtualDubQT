@@ -1,11 +1,12 @@
 #include "VDQtFilterSystem.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QElapsedTimer>
 #include <QImage>
 
 #include <algorithm>
 #include <iostream>
+#include <set>
 
 namespace {
 
@@ -30,7 +31,52 @@ QImage makeGradient(int width, int height) {
 } // namespace
 
 int main(int argc, char **argv) {
-    QCoreApplication application(argc, argv);
+    QGuiApplication application(argc, argv);
+
+    // Every advertised built-in must be constructible and produce a valid
+    // image with its defaults. This catches catalog entries that are UI-only
+    // placeholders or switch cases that were omitted as the catalog grows.
+    VDQtFilterSystem catalogSystem;
+    const auto catalog = catalogSystem.getAvailableFilters();
+    std::set<int> builtInTypes;
+    const QImage catalogSource = makeGradient(96, 64);
+    for (const auto& info : catalog) {
+        if (!info.pluginId.isEmpty()) continue;
+        builtInTypes.insert(static_cast<int>(info.type));
+        VDQtFilterSystem single;
+        single.addFilter(info.type);
+        if (!require(single.getActiveChain().size() == 1,
+                     "catalog filter is constructible"))
+            return 1;
+        VDFilterFrameContext context;
+        context.frameNumber = 0;
+        context.timestampSeconds = 1.25;
+        context.frameRate = 24.0;
+        QList<QImage> frames;
+        if (!require(single.processFrameSequence(catalogSource, frames, context)
+                         && !frames.isEmpty()
+                         && std::all_of(frames.cbegin(), frames.cend(),
+                            [](const QImage& frame) { return !frame.isNull(); }),
+                     "catalog filter has a working processing path"))
+            return 1;
+    }
+    if (!require(static_cast<int>(builtInTypes.size())
+                     == static_cast<int>(VDFilterType::Count) - 1,
+                 "every built-in filter type is advertised exactly once"))
+        return 1;
+
+    VDQtFilterSystem temporal;
+    temporal.addFilter(VDFilterType::MotionBlur);
+    VDFilterFrameContext firstContext{0, 0.0, 25.0};
+    VDFilterFrameContext secondContext{1, 0.04, 25.0};
+    const QImage firstTemporal = temporal.processFrame(catalogSource, firstContext);
+    QImage solid(catalogSource.size(), QImage::Format_RGB888);
+    solid.fill(Qt::white);
+    const QImage secondTemporal = temporal.processFrame(solid, secondContext);
+    if (!require(firstTemporal != secondTemporal && secondTemporal != solid,
+                 "temporal filters retain sequential frame state"))
+        return 1;
+
     const QImage source = makeGradient(1920, 1080);
 
     VDQtFilterSystem filters;

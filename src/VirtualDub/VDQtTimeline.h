@@ -10,10 +10,14 @@
 struct VDQtTimelineSegment {
     qint64 sourceStartFrame = 0;
     qint64 frameCount = 0;
+    // Masked ranges retain their timeline duration but display the last frame
+    // from the preceding unmasked range, matching VirtualDub's FrameSubset.
+    bool masked = false;
 
     bool operator==(const VDQtTimelineSegment& other) const {
         return sourceStartFrame == other.sourceStartFrame
-            && frameCount == other.frameCount;
+            && frameCount == other.frameCount
+            && masked == other.masked;
     }
 };
 
@@ -37,6 +41,7 @@ public:
                          bool clearHistory = true);
 
     qint64 mapOutputToSource(qint64 outputFrame) const;
+    bool isOutputFrameMasked(qint64 outputFrame) const;
     qint64 mapSourceToOutput(qint64 sourceFrame,
                              qint64 outputHint = 0,
                              bool searchForward = true) const;

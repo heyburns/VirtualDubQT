@@ -23,6 +23,7 @@
 #include "VDQtJobQueue.h"
 #include "VDQtFrameServer.h"
 #include "VDQtTimeline.h"
+#include "VDQtScriptEngine.h"
 #include <QTimer>
 #include <QThread>
 
@@ -35,6 +36,16 @@ public:
     virtual ~VDQtMainWindow();
 
     bool openVideoFile(const QString& filePath);
+    bool runAutomationScript(const QString& scriptPath,
+                             QString *errorMessage = nullptr);
+    bool runAutomationText(const QString& scriptText,
+                           const QString& baseDirectory,
+                           QString *errorMessage = nullptr);
+    void setAutomationUnattended(bool unattended) {
+        mAutomationUnattended = unattended;
+    }
+    bool automationExitRequested() const { return mAutomationExitRequested; }
+    int automationExitCode() const { return mAutomationExitCode; }
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
@@ -56,14 +67,19 @@ private Q_SLOTS:
     void onFileSaveProject();
     void onFileSaveProjectAs();
     void onFileSaveAVI();
+    void onFileSaveSegmentedAVI();
     void onFileSaveAudio();
     void onFileRunAnalysisPass();
     void onFileExportRawVideo();
     void onFileSaveImageSequence();
     void onFileExportAnimatedGIF();
+    void onFileExportAnimatedPNG();
+    void onFileExportFilmstrip();
+    void onFileExportViaEncoderSet();
     void onFileLoadProcessingSettings();
     void onFileSaveProcessingSettings();
     void onFileRunScript();
+    void onFileScriptEditor();
     void onFileJobControl();
     void onFileBatchWizard();
     void onFileStartFrameServer();
@@ -84,11 +100,18 @@ private Q_SLOTS:
     void onEditResetTimeline();
     void onEditPreviousSceneChange();
     void onEditNextSceneChange();
+    void onEditToggleMarker();
+    void onEditPreviousMarker();
+    void onEditNextMarker();
+    void onEditClearMarkers();
+    void onEditZoomToSelection();
+    void onEditClearTimelineZoom();
 
     void onViewDualView();
     void onViewInputOnly();
     void onViewOutputOnly();
     void onViewLogWindow();
+    void onViewAudioWaveform();
 
     void onVideoModeDirectStream();
     void onVideoModeFastRecompress();
@@ -116,6 +139,10 @@ private Q_SLOTS:
 
     void onToolsBackendCatalog();
     void onToolsSystemInformation();
+    void onToolsHistogram();
+    void onToolsPerformanceProfiler();
+    void onToolsMediaInspector();
+    void onToolsHexViewer();
     void onCaptureVideo();
 
     void onHelpAbout();
@@ -126,9 +153,10 @@ private Q_SLOTS:
     void onDecodedFrameReady(int frameIndex,
                              quint64 generation,
                              const QImage& inputImage,
-                             const QImage& outputImage,
+                             const QList<QImage>& outputImages,
                              bool keyFrame,
                              double timestampSeconds,
+                             double durationSeconds,
                              int frameCount,
                              int frameCountStatus,
                              quint64 seekCount,
@@ -155,6 +183,19 @@ private:
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
     bool loadProjectFile(const QString& path);
+    bool appendVideoSegments(const QStringList& additions,
+                             QString *errorMessage);
+    bool exportSegmentedVideo(const QString& outputPath,
+                              int sizeLimitMb,
+                              int frameLimit,
+                              int digitCount,
+                              int segmentCount,
+                              QString *errorMessage);
+    bool exportViaEncoderSet(const QString& outputPath,
+                             const QString& setName,
+                             QString *errorMessage);
+    bool startFrameServerAtPath(const QString& pipePath,
+                                QString *errorMessage);
     bool materializeRawVideo(const QString& sourcePath,
                              const QString& pixelFormat,
                              int width,
@@ -164,6 +205,8 @@ private:
                              QString *outputPath,
                              QString *errorMessage);
     VDQtProcessingState captureProcessingState() const;
+    VDQtProjectState captureProjectState() const;
+    void saveRecoverySnapshot();
     void applyProcessingState(const VDQtProcessingState& state);
     VDQtVideoExporter::ExportOptions currentExportOptions(
         const QString& outputPath,
@@ -173,6 +216,7 @@ private:
     QString primarySessionSourcePath() const;
     void updateEditActions();
     void updateTimelineView(qint64 preferredPosition, bool clearSelection);
+    void refreshTimelineMarkers();
     bool selectedTimelineRange(qint64 *startFrame, qint64 *endFrameExclusive,
                                const QString& operationLabel);
     int sourceFrameForTimelineFrame(qint64 timelineFrame) const;
@@ -184,6 +228,19 @@ private:
     bool executeImageSequenceJob(VDQtJobState& job,
                                  VDQtVideoDecoder& decoder,
                                  QString *errorMessage);
+    bool executeAutomationProgram(const VDQtScriptProgram& program,
+                                  QString *errorMessage);
+    bool exportAutomationVideo(const QString& outputPath,
+                               QString *errorMessage,
+                               int animationLoopCount = 0,
+                               bool animationAlpha = true,
+                               bool animationGrayscale = false);
+    bool exportAutomationAudio(const QString& outputPath,
+                               bool raw, QString *errorMessage);
+    bool exportAutomationRawVideo(const QString& outputPath,
+                                  const QList<QVariant>& arguments,
+                                  QString *errorMessage);
+    void exportAnimatedImage(bool animatedPng);
 
     QSplitter *mVideoSplitter;
     VDVideoDisplayWidget *mInputDisplay;
@@ -199,9 +256,18 @@ private:
     VDQtFrameDecodeWorker *mFrameDecodeWorker = nullptr;
     quint64 mFrameRequestGeneration = 0;
     QTimer *mPlaybackTimer;
+    QTimer *mRecoveryTimer = nullptr;
+    QString mRecoveryPath;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;
     bool mPlaybackPreview = false;
+    int mPlaybackClockFrame = 0;
+    int mPlaybackOutputPhase = 0;
+    double mPlaybackClockFrameStartSeconds = 0.0;
+    double mPlaybackFrameDurationSeconds = 1.0 / 29.97;
+    double mPlaybackAudioOriginSeconds = -1.0;
+    QList<QImage> mDecodedPreviewFrames;
+    int mDecodedPreviewTimelineFrame = -1;
 
     QMenu *mFileMenu;
     QAction *actFileOpen;
@@ -253,6 +319,7 @@ private:
     qint64 mRawInputByteOffset = 0;
     VDQtTimeline mTimeline;
     QList<VDQtTimelineSegment> mTimelineClipboard;
+    QList<qint64> mTimelineMarkers;
     int mRequestedTimelineFrame = 0;
     bool mFrameRequestPending = false;
     int mQueuedPlaybackFrame = -1;
@@ -272,6 +339,11 @@ private:
     int mAudioStreamIndex = -1;
     bool mAudioDisabled = false;
     bool mIsExporting = false;
+    bool mAutomationUnattended = false;
+    bool mAutomationExitRequested = false;
+    int mAutomationExitCode = 0;
+    QString mAutomationContainerType;
+    QString mAutomationAudioFormat;
 };
 
 #endif // VDQTMAINWINDOW_H

@@ -45,6 +45,10 @@ struct VDQtProjectState {
     bool hasSelection = false;
     qint64 selectionStart = 0;
     qint64 selectionEnd = 0;
+    bool zoomEnabled = false;
+    qint64 zoomStart = 0;
+    qint64 zoomEnd = 0;
+    QList<qint64> markers;
     qint64 sourceFrameCount = 0;
     QList<VDQtTimelineSegment> timelineSegments;
     VDQtProcessingState processing;

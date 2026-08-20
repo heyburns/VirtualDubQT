@@ -1,15 +1,19 @@
 #include "VDQtFilterSystem.h"
+#include "VDQtPluginHost.h"
 #include <QTransform>
 #include <QUuid>
 #include <QRgba64>
 #include <QFuture>
 #include <QPainter>
+#include <QFont>
+#include <QPolygonF>
 #include <QThread>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <utility>
+#include <QDebug>
 
 namespace {
 
@@ -105,13 +109,27 @@ VDQtFilterSystem::VDQtFilterSystem() = default;
 VDQtFilterSystem::~VDQtFilterSystem() = default;
 
 void VDQtFilterSystem::clearFilters() {
+    for (const VDFilterInstance& filter : std::as_const(mActiveChain))
+        VDQtPluginHost::instance().forgetInstance(filter.id);
     mActiveChain.clear();
     mSixAxisLutCache.clear();
+    mAssetCache.clear();
+    mTemporalStates.clear();
 }
 
 void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) {
+    VDQtPluginHost::instance().forgetAllInstances();
     mActiveChain = chain;
     mSixAxisLutCache.clear();
+    mAssetCache.clear();
+    mTemporalStates.clear();
+}
+
+void VDQtFilterSystem::replaceActiveChainTransient(
+    const QList<VDFilterInstance>& chain) {
+    mActiveChain = chain;
+    mSixAxisLutCache.clear();
+    mTemporalStates.clear();
 }
 
 VDQtFilterSystem& VDQtFilterSystem::instance() {
@@ -120,7 +138,7 @@ VDQtFilterSystem& VDQtFilterSystem::instance() {
 }
 
 QList<VDQtFilterSystem::FilterInfo> VDQtFilterSystem::getAvailableFilters() const {
-    return {
+    QList<FilterInfo> filters = {
         { VDFilterType::SixAxis, "6-axis color correction", "6-axis hue, saturation, and color balance correction." },
         { VDFilterType::BobDoubler, "bob doubler", "Upsamples an interlaced video to double frame rate." },
         { VDFilterType::Blur, "box blur", "Performs a fast box, triangle, or cubic blur." },
@@ -144,7 +162,61 @@ QList<VDQtFilterSystem::FilterInfo> VDQtFilterSystem::getAvailableFilters() cons
         ,{ VDFilterType::Crop, "crop", "Crop pixels from the frame edges." }
         ,{ VDFilterType::ChromaShift, "chroma shift", "Correct horizontal or vertical chroma displacement." }
         ,{ VDFilterType::Pixelate, "pixelate", "Replace blocks with their average color." }
+        ,{ VDFilterType::Fill, "fill", "Fill the whole frame or a selected rectangle with a color." }
+        ,{ VDFilterType::Canvas, "canvas", "Place the source frame on a larger or smaller canvas." }
+        ,{ VDFilterType::Curves, "curves", "Adjust black point, white point, and tonal curve." }
+        ,{ VDFilterType::ChromaSmoother, "chroma smoother", "Reduce color noise while retaining luma detail." }
+        ,{ VDFilterType::DrawText, "draw text", "Draw configured text over the video." }
+        ,{ VDFilterType::DrawTime, "draw time", "Draw the current frame time over the video." }
+        ,{ VDFilterType::FieldDelay, "field delay", "Delay one interlaced field by one frame." }
+        ,{ VDFilterType::GammaCorrect, "gamma correct", "Convert between gamma-encoded and linear-light RGB." }
+        ,{ VDFilterType::Interlace, "interlace", "Weave fields from consecutive frames." }
+        ,{ VDFilterType::Interpolate, "interpolate", "Blend consecutive frames." }
+        ,{ VDFilterType::InverseTelecine, "inverse telecine", "Reduce combing in telecined material." }
+        ,{ VDFilterType::MotionBlur, "motion blur", "Blend adjacent frames to soften motion." }
+        ,{ VDFilterType::NullTransform, "null transform", "Pass video through unchanged." }
+        ,{ VDFilterType::Perspective, "perspective", "Apply a four-corner perspective transform." }
+        ,{ VDFilterType::Reduce2, "2:1 reduction", "Reduce both dimensions by two." }
+        ,{ VDFilterType::Reduce2HQ, "2:1 reduction (high quality)", "Reduce both dimensions by two with smooth resampling." }
+        ,{ VDFilterType::Rotate2, "rotate2", "Rotate by an arbitrary angle." }
+        ,{ VDFilterType::TemporalSmoother, "temporal smoother", "Reduce frame-to-frame noise without blurring strong motion." }
+        ,{ VDFilterType::Television, "TV", "Simulate analog television luma/chroma bandwidth." }
+        ,{ VDFilterType::WarpResize, "warp resize", "Resize with an edge-preserving smooth transform." }
+        ,{ VDFilterType::WarpSharp, "warp sharp", "Tighten edges with a strong unsharp transform." }
+        ,{ VDFilterType::Logo, "logo", "Overlay an image with adjustable position and opacity." }
+        ,{ VDFilterType::ConvertFormat, "convert format", "Convert between the RGB storage formats supported by the native pipeline." }
     };
+    for (const VDQtPluginFilterInfo& plugin
+         : VDQtPluginHost::instance().videoFilters()) {
+        FilterInfo info;
+        info.type = VDFilterType::Plugin;
+        info.name = plugin.name;
+        info.description = plugin.description;
+        if (!plugin.author.isEmpty())
+            info.description += QStringLiteral("\nAuthor: %1").arg(plugin.author);
+        info.description += QStringLiteral("\nNative module: %1")
+            .arg(plugin.modulePath);
+        info.pluginId = plugin.id;
+        filters.append(info);
+    }
+    return filters;
+}
+
+bool VDQtFilterSystem::addPluginFilter(const QString& pluginId) {
+    const auto plugins = VDQtPluginHost::instance().videoFilters();
+    const auto found = std::find_if(
+        plugins.cbegin(), plugins.cend(), [&](const VDQtPluginFilterInfo& info) {
+            return info.id == pluginId;
+        });
+    if (found == plugins.cend()) return false;
+    VDFilterInstance instance;
+    instance.id = QUuid::createUuid().toString();
+    instance.name = found->name;
+    instance.type = VDFilterType::Plugin;
+    instance.enabled = true;
+    instance.pluginId = found->id;
+    mActiveChain.append(instance);
+    return true;
 }
 
 void VDQtFilterSystem::addFilter(VDFilterType type) {
@@ -278,6 +350,119 @@ void VDQtFilterSystem::addFilter(VDFilterType type) {
         inst.name = "pixelate";
         inst.params["blockSize"] = 8.0;
         break;
+    case VDFilterType::Fill:
+        inst.name = "fill";
+        inst.params["red"] = 0; inst.params["green"] = 0;
+        inst.params["blue"] = 0; inst.params["alpha"] = 1.0;
+        inst.params["x"] = 0; inst.params["y"] = 0;
+        inst.params["width"] = 0; inst.params["height"] = 0;
+        break;
+    case VDFilterType::Canvas:
+        inst.name = "canvas";
+        // Zero means "use the current frame dimension".  A newly added
+        // canvas filter must be a no-op until the user chooses a size.
+        inst.params["width"] = 0; inst.params["height"] = 0;
+        inst.params["x"] = 0; inst.params["y"] = 0;
+        inst.params["red"] = 0; inst.params["green"] = 0; inst.params["blue"] = 0;
+        break;
+    case VDFilterType::Curves:
+        inst.name = "curves";
+        inst.params["black"] = 0; inst.params["white"] = 255;
+        inst.params["gamma"] = 1.0;
+        break;
+    case VDFilterType::ChromaSmoother:
+        inst.name = "chroma smoother";
+        inst.params["radius"] = 1;
+        break;
+    case VDFilterType::DrawText:
+        inst.name = "draw text";
+        inst.stringParams["text"] = QStringLiteral("Text");
+        inst.params["x"] = 16; inst.params["y"] = 32;
+        inst.params["size"] = 24; inst.params["red"] = 255;
+        inst.params["green"] = 255; inst.params["blue"] = 255;
+        inst.params["outline"] = 1;
+        break;
+    case VDFilterType::DrawTime:
+        inst.name = "draw time";
+        inst.params["x"] = 16; inst.params["y"] = 32;
+        inst.params["size"] = 24;
+        break;
+    case VDFilterType::FieldDelay:
+        inst.name = "field delay";
+        inst.params["field"] = 1;
+        break;
+    case VDFilterType::GammaCorrect:
+        inst.name = "gamma correct";
+        inst.params["toLinear"] = 1;
+        break;
+    case VDFilterType::Interlace:
+        inst.name = "interlace";
+        inst.params["fieldOrder"] = 0;
+        break;
+    case VDFilterType::Interpolate:
+        inst.name = "interpolate";
+        inst.params["amount"] = 0.5;
+        break;
+    case VDFilterType::InverseTelecine:
+        inst.name = "inverse telecine";
+        inst.params["threshold"] = 12;
+        break;
+    case VDFilterType::MotionBlur:
+        inst.name = "motion blur";
+        inst.params["amount"] = 0.5;
+        break;
+    case VDFilterType::NullTransform:
+        inst.name = "null transform";
+        break;
+    case VDFilterType::Perspective:
+        inst.name = "perspective";
+        inst.params["topLeftX"] = 0; inst.params["topLeftY"] = 0;
+        inst.params["topRightX"] = 1; inst.params["topRightY"] = 0;
+        inst.params["bottomRightX"] = 1; inst.params["bottomRightY"] = 1;
+        inst.params["bottomLeftX"] = 0; inst.params["bottomLeftY"] = 1;
+        break;
+    case VDFilterType::Reduce2:
+        inst.name = "2:1 reduction";
+        break;
+    case VDFilterType::Reduce2HQ:
+        inst.name = "2:1 reduction (high quality)";
+        break;
+    case VDFilterType::Rotate2:
+        inst.name = "rotate2";
+        inst.params["angle"] = 0;
+        inst.params["expand"] = 1;
+        break;
+    case VDFilterType::TemporalSmoother:
+        inst.name = "temporal smoother";
+        inst.params["strength"] = 4;
+        inst.params["threshold"] = 12;
+        break;
+    case VDFilterType::Television:
+        inst.name = "TV";
+        inst.params["chromaBlur"] = 2;
+        inst.params["scanline"] = 0.08;
+        break;
+    case VDFilterType::WarpResize:
+        inst.name = "warp resize";
+        inst.params["width"] = 0; inst.params["height"] = 0;
+        break;
+    case VDFilterType::WarpSharp:
+        inst.name = "warp sharp";
+        inst.params["depth"] = 8;
+        inst.params["threshold"] = 16;
+        break;
+    case VDFilterType::Logo:
+        inst.name = "logo";
+        inst.stringParams["path"] = QString();
+        inst.params["x"] = 0; inst.params["y"] = 0;
+        inst.params["opacity"] = 1.0;
+        break;
+    case VDFilterType::ConvertFormat:
+        inst.name = "convert format";
+        inst.params["format"] = 0;
+        break;
+    case VDFilterType::Plugin:
+        return;
     case VDFilterType::Count:
         return;
     }
@@ -287,6 +472,7 @@ void VDQtFilterSystem::addFilter(VDFilterType type) {
 
 void VDQtFilterSystem::removeFilter(int index) {
     if (index >= 0 && index < mActiveChain.size()) {
+        VDQtPluginHost::instance().forgetInstance(mActiveChain.at(index).id);
         mActiveChain.removeAt(index);
     }
 }
@@ -306,6 +492,7 @@ void VDQtFilterSystem::moveFilterDown(int index) {
 void VDQtFilterSystem::setFilterEnabled(int index, bool enabled) {
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain[index].enabled = enabled;
+        mTemporalStates.clear();
     }
 }
 
@@ -313,14 +500,34 @@ void VDQtFilterSystem::updateFilterParams(int index, const QMap<QString, double>
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain[index].params = params;
         mSixAxisLutCache.clear();
+        mTemporalStates.clear();
     }
+}
+
+void VDQtFilterSystem::updateFilterStringParams(
+    int index, const QMap<QString, QString>& stringParams) {
+    if (index >= 0 && index < mActiveChain.size()) {
+        mActiveChain[index].stringParams = stringParams;
+        mAssetCache.clear();
+        mTemporalStates.clear();
+    }
+}
+
+void VDQtFilterSystem::resetRuntimeState() {
+    mTemporalStates.clear();
+    VDQtPluginHost::instance().forgetAllInstances();
 }
 
 QImage VDQtFilterSystem::processFrame(const QImage& inputFrame) {
     // The historical API can return only one image. Use the first field phase
     // so preview remains deterministic; rate-aware pipelines must call
     // processFrameSequence() and consume every returned frame.
-    return processFrameForPhase(inputFrame, 0);
+    return processFrameForPhase(inputFrame, 0, {});
+}
+
+QImage VDQtFilterSystem::processFrame(
+    const QImage& inputFrame, const VDFilterFrameContext& context) {
+    return processFrameForPhase(inputFrame, 0, context);
 }
 
 VDFilterTimingInfo VDQtFilterSystem::getTimingInfo() const {
@@ -337,6 +544,12 @@ VDFilterTimingInfo VDQtFilterSystem::getTimingInfo() const {
 }
 
 bool VDQtFilterSystem::processFrameSequence(const QImage& inputFrame, QList<QImage>& outputFrames) {
+    return processFrameSequence(inputFrame, outputFrames, {});
+}
+
+bool VDQtFilterSystem::processFrameSequence(
+    const QImage& inputFrame, QList<QImage>& outputFrames,
+    const VDFilterFrameContext& context) {
     outputFrames.clear();
 
     const VDFilterTimingInfo timing = getTimingInfo();
@@ -345,15 +558,18 @@ bool VDQtFilterSystem::processFrameSequence(const QImage& inputFrame, QList<QIma
 
     outputFrames.reserve(timing.outputFramesPerInput);
     for (int phase = 0; phase < timing.outputFramesPerInput; ++phase)
-        outputFrames.append(processFrameForPhase(inputFrame, static_cast<quint64>(phase)));
+        outputFrames.append(processFrameForPhase(
+            inputFrame, static_cast<quint64>(phase), context));
 
     return true;
 }
 
-QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask) {
+QImage VDQtFilterSystem::processFrameForPhase(
+    const QImage& inputFrame, quint64 bobPhaseMask,
+    const VDFilterFrameContext& context) {
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
 
-    const bool highPrecision = inputFrame.depth() > 32;
+    bool highPrecision = inputFrame.depth() > 32;
 
     QImage result = highPrecision
         ? inputFrame.convertToFormat(QImage::Format_RGBA64)
@@ -368,10 +584,508 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
     for (const auto& filter : mActiveChain) {
         if (!filter.enabled) continue;
 
+        const qint64 rangeEnd = static_cast<qint64>(filter.params.value(
+            QStringLiteral("_sylia.range.end"), -1.0));
+        if (rangeEnd >= 0 && context.frameNumber >= 0) {
+            const qint64 rangeStart = static_cast<qint64>(filter.params.value(
+                QStringLiteral("_sylia.range.start"), 0.0));
+            if (context.frameNumber < rangeStart
+                || context.frameNumber >= rangeEnd) {
+                continue;
+            }
+        }
+
+        const int clipLeft = std::max(0, static_cast<int>(filter.params.value(
+            QStringLiteral("_sylia.clip.left"), 0.0)));
+        const int clipTop = std::max(0, static_cast<int>(filter.params.value(
+            QStringLiteral("_sylia.clip.top"), 0.0)));
+        const int clipRight = std::max(0, static_cast<int>(filter.params.value(
+            QStringLiteral("_sylia.clip.right"), 0.0)));
+        const int clipBottom = std::max(0, static_cast<int>(filter.params.value(
+            QStringLiteral("_sylia.clip.bottom"), 0.0)));
+        if (clipLeft || clipTop || clipRight || clipBottom) {
+            const int clippedWidth = result.width() - clipLeft - clipRight;
+            const int clippedHeight = result.height() - clipTop - clipBottom;
+            if (clippedWidth <= 0 || clippedHeight <= 0) return {};
+            result = result.copy(clipLeft, clipTop,
+                                 clippedWidth, clippedHeight);
+        }
+
+        const int opacityPointCount = std::clamp(
+            static_cast<int>(filter.params.value(
+                QStringLiteral("_sylia.opacity.count"), 0.0)), 0, 4096);
+        const QImage opacitySource = opacityPointCount > 0 ? result : QImage();
+
+        // A plug-in or format-conversion filter may change the working image
+        // depth.  Re-evaluate it for every stage so the following filter uses
+        // the actual pixel layout instead of the input frame's layout.
+        highPrecision = result.depth() > 32;
+
         switch (filter.type) {
+        case VDFilterType::Plugin: {
+            QImage pluginResult;
+            QString errorMessage;
+            if (!VDQtPluginHost::instance().processVideoFilter(
+                    filter.pluginId, filter.id, filter.pluginConfiguration,
+                    result, &pluginResult, &errorMessage)) {
+                qWarning().noquote() << QStringLiteral("Plugin filter '%1' failed: %2")
+                    .arg(filter.name, errorMessage);
+                break;
+            }
+            result = pluginResult.convertToFormat(QImage::Format_RGBA8888);
+            break;
+        }
+        case VDFilterType::Fill: {
+            const int x = static_cast<int>(filter.params.value("x", 0));
+            const int y = static_cast<int>(filter.params.value("y", 0));
+            int width = static_cast<int>(filter.params.value("width", 0));
+            int height = static_cast<int>(filter.params.value("height", 0));
+            if (width <= 0) width = result.width() - x;
+            if (height <= 0) height = result.height() - y;
+            QColor color(
+                std::clamp(static_cast<int>(filter.params.value("red", 0)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("green", 0)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("blue", 0)), 0, 255));
+            color.setAlphaF(std::clamp(filter.params.value("alpha", 1.0), 0.0, 1.0));
+            QPainter painter(&result);
+            painter.fillRect(QRect(x, y, width, height), color);
+            break;
+        }
+        case VDFilterType::Canvas: {
+            const int requestedWidth = static_cast<int>(
+                filter.params.value("width", result.width()));
+            const int requestedHeight = static_cast<int>(
+                filter.params.value("height", result.height()));
+            const int width = std::clamp(
+                requestedWidth > 0 ? requestedWidth : result.width(),
+                1, 32768);
+            const int height = std::clamp(
+                requestedHeight > 0 ? requestedHeight : result.height(),
+                1, 32768);
+            QImage canvas(width, height, result.format());
+            canvas.fill(QColor(
+                std::clamp(static_cast<int>(filter.params.value("red", 0)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("green", 0)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("blue", 0)), 0, 255)));
+            QPainter painter(&canvas);
+            painter.drawImage(
+                static_cast<int>(filter.params.value("x", 0)),
+                static_cast<int>(filter.params.value("y", 0)), result);
+            result = canvas;
+            break;
+        }
+        case VDFilterType::Curves: {
+            const double black = std::clamp(
+                filter.params.value("black", 0.0) / 255.0, 0.0, 1.0);
+            const double white = std::clamp(
+                filter.params.value("white", 255.0) / 255.0,
+                black + 1.0 / 65535.0, 1.0);
+            const double gamma = std::clamp(
+                filter.params.value("gamma", 1.0), 0.05, 20.0);
+            transformRgbPixels(result, highPrecision,
+                [black, white, gamma](double& red, double& green, double& blue) {
+                    const auto curve = [=](double value) {
+                        const double normalized = std::clamp(
+                            (value - black) / (white - black), 0.0, 1.0);
+                        return std::pow(normalized, 1.0 / gamma);
+                    };
+                    red = curve(red); green = curve(green); blue = curve(blue);
+                });
+            break;
+        }
+        case VDFilterType::ChromaSmoother: {
+            const int radius = std::clamp(
+                static_cast<int>(filter.params.value("radius", 1)), 1, 8);
+            const QImage source = result;
+            const int width = result.width();
+            const int height = result.height();
+            if (highPrecision) {
+                const uchar *sourceBits = source.constBits();
+                const int sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                const int destinationStride = result.bytesPerLine();
+                parallelFor(height, static_cast<qint64>(width) * height,
+                    [&](int y) {
+                    auto *destination = reinterpret_cast<QRgba64 *>(
+                        destinationBits + static_cast<qint64>(y) * destinationStride);
+                    for (int x = 0; x < width; ++x) {
+                        quint64 red = 0, green = 0, blue = 0, luma = 0;
+                        int count = 0;
+                        for (int offset = -radius; offset <= radius; ++offset) {
+                            const int sampleX = std::clamp(x + offset, 0, width - 1);
+                            const auto *row = reinterpret_cast<const QRgba64 *>(
+                                sourceBits + static_cast<qint64>(y) * sourceStride);
+                            const QRgba64 sample = row[sampleX];
+                            red += sample.red(); green += sample.green(); blue += sample.blue();
+                            luma += (77ULL * sample.red() + 150ULL * sample.green()
+                                     + 29ULL * sample.blue()) >> 8;
+                            ++count;
+                        }
+                        const QRgba64 original = reinterpret_cast<const QRgba64 *>(
+                            sourceBits + static_cast<qint64>(y) * sourceStride)[x];
+                        const qint64 originalLuma =
+                            (77LL * original.red() + 150LL * original.green()
+                             + 29LL * original.blue()) >> 8;
+                        const qint64 averageLuma = static_cast<qint64>(luma / count);
+                        destination[x] = QRgba64::fromRgba64(
+                            static_cast<quint16>(std::clamp<qint64>(
+                                originalLuma + static_cast<qint64>(red / count) - averageLuma, 0, 65535)),
+                            static_cast<quint16>(std::clamp<qint64>(
+                                originalLuma + static_cast<qint64>(green / count) - averageLuma, 0, 65535)),
+                            static_cast<quint16>(std::clamp<qint64>(
+                                originalLuma + static_cast<qint64>(blue / count) - averageLuma, 0, 65535)),
+                            original.alpha());
+                    }
+                });
+                break;
+            }
+            const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
+            const uchar *sourceBits = source.constBits();
+            const int sourceStride = source.bytesPerLine();
+            uchar *destinationBits = result.bits();
+            const int destinationStride = result.bytesPerLine();
+            parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
+                const uchar *sourceRow = sourceBits + static_cast<qint64>(y) * sourceStride;
+                uchar *destination = destinationBits + static_cast<qint64>(y) * destinationStride;
+                for (int x = 0; x < width; ++x) {
+                    int sums[3] = {}; int lumaSum = 0; int count = 0;
+                    for (int offset = -radius; offset <= radius; ++offset) {
+                        const int sampleX = std::clamp(x + offset, 0, width - 1);
+                        const uchar *sample = sourceRow + sampleX * bytesPerPixel;
+                        sums[0] += sample[0]; sums[1] += sample[1]; sums[2] += sample[2];
+                        lumaSum += (77 * sample[0] + 150 * sample[1] + 29 * sample[2]) >> 8;
+                        ++count;
+                    }
+                    const uchar *original = sourceRow + x * bytesPerPixel;
+                    const int originalLuma =
+                        (77 * original[0] + 150 * original[1] + 29 * original[2]) >> 8;
+                    const int averageLuma = lumaSum / count;
+                    for (int channel = 0; channel < 3; ++channel)
+                        destination[x * bytesPerPixel + channel] = static_cast<uchar>(
+                            std::clamp(originalLuma + sums[channel] / count - averageLuma,
+                                       0, 255));
+                }
+            });
+            break;
+        }
+        case VDFilterType::DrawText:
+        case VDFilterType::DrawTime: {
+            QString text = filter.type == VDFilterType::DrawText
+                ? filter.stringParams.value("text", QStringLiteral("Text"))
+                : QStringLiteral("%1  frame %2")
+                    .arg(context.timestampSeconds >= 0.0
+                             ? QString::number(context.timestampSeconds, 'f', 3)
+                             : QStringLiteral("--:--.---"))
+                    .arg(context.frameNumber >= 0
+                             ? QString::number(context.frameNumber)
+                             : QStringLiteral("?"));
+            QPainter painter(&result);
+            painter.setRenderHint(QPainter::TextAntialiasing, true);
+            QFont font = painter.font();
+            font.setPixelSize(std::clamp(
+                static_cast<int>(filter.params.value("size", 24)), 6, 512));
+            painter.setFont(font);
+            const QPoint position(
+                static_cast<int>(filter.params.value("x", 16)),
+                static_cast<int>(filter.params.value("y", 32)));
+            if (filter.params.value("outline", 1) > 0.5) {
+                painter.setPen(Qt::black);
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        if (dx || dy) painter.drawText(position + QPoint(dx, dy), text);
+            }
+            painter.setPen(QColor(
+                std::clamp(static_cast<int>(filter.params.value("red", 255)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("green", 255)), 0, 255),
+                std::clamp(static_cast<int>(filter.params.value("blue", 255)), 0, 255)));
+            painter.drawText(position, text);
+            break;
+        }
+        case VDFilterType::GammaCorrect: {
+            const bool toLinear = filter.params.value("toLinear", 1) > 0.5;
+            transformRgbPixels(result, highPrecision,
+                [toLinear](double& red, double& green, double& blue) {
+                    const auto convert = [toLinear](double value) {
+                        value = std::clamp(value, 0.0, 1.0);
+                        if (toLinear)
+                            return value <= 0.04045 ? value / 12.92
+                                : std::pow((value + 0.055) / 1.055, 2.4);
+                        return value <= 0.0031308 ? value * 12.92
+                            : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055;
+                    };
+                    red = convert(red); green = convert(green); blue = convert(blue);
+                });
+            break;
+        }
+        case VDFilterType::FieldDelay:
+        case VDFilterType::Interlace:
+        case VDFilterType::Interpolate:
+        case VDFilterType::MotionBlur:
+        case VDFilterType::TemporalSmoother: {
+            const QString stateKey = filter.id + QLatin1Char(':')
+                + QString::number(bobPhaseMask);
+            TemporalState& temporal = mTemporalStates[stateKey];
+            const bool sequential = !temporal.previousFrame.isNull()
+                && (context.frameNumber < 0
+                    || temporal.lastFrameNumber + 1 == context.frameNumber);
+            const QImage previous = sequential
+                ? temporal.previousFrame.convertToFormat(result.format()) : QImage();
+            if (!previous.isNull() && previous.size() == result.size()) {
+                if (filter.type == VDFilterType::FieldDelay
+                    || filter.type == VDFilterType::Interlace) {
+                    const int delayedParity = static_cast<int>(filter.params.value(
+                        filter.type == VDFilterType::FieldDelay ? "field" : "fieldOrder", 1)) & 1;
+                    for (int y = delayedParity; y < result.height(); y += 2)
+                        std::memcpy(result.scanLine(y), previous.constScanLine(y),
+                                    static_cast<size_t>(std::min(
+                                        result.bytesPerLine(), previous.bytesPerLine())));
+                } else if (filter.type == VDFilterType::Interpolate
+                           || filter.type == VDFilterType::MotionBlur) {
+                    const double opacity = std::clamp(
+                        filter.params.value("amount", 0.5), 0.0, 1.0);
+                    QPainter painter(&result);
+                    painter.setOpacity(opacity);
+                    painter.drawImage(0, 0, previous);
+                } else {
+                    const int threshold = std::clamp(
+                        static_cast<int>(filter.params.value("threshold", 12)), 0, 255);
+                    const double strength = std::clamp(
+                        filter.params.value("strength", 4.0) / 8.0, 0.0, 1.0);
+                    if (!highPrecision) {
+                        const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
+                        parallelFor(result.height(),
+                                    static_cast<qint64>(result.width()) * result.height(),
+                                    [&](int y) {
+                            uchar *current = result.scanLine(y);
+                            const uchar *prior = previous.constScanLine(y);
+                            for (int x = 0; x < result.width(); ++x) {
+                                int maximumDifference = 0;
+                                for (int channel = 0; channel < 3; ++channel)
+                                    maximumDifference = std::max(maximumDifference,
+                                        std::abs(current[x * bytesPerPixel + channel]
+                                                 - prior[x * bytesPerPixel + channel]));
+                                if (maximumDifference <= threshold) {
+                                    for (int channel = 0; channel < 3; ++channel) {
+                                        const int offset = x * bytesPerPixel + channel;
+                                        current[offset] = static_cast<uchar>(std::lround(
+                                            current[offset] * (1.0 - strength)
+                                            + prior[offset] * strength));
+                                    }
+                                }
+                            }
+                        });
+                    } else {
+                        QPainter painter(&result);
+                        painter.setOpacity(strength * 0.5);
+                        painter.drawImage(0, 0, previous);
+                    }
+                }
+            }
+            temporal.previousFrame = result;
+            temporal.lastFrameNumber = context.frameNumber >= 0
+                ? context.frameNumber : temporal.lastFrameNumber + 1;
+            break;
+        }
+        case VDFilterType::InverseTelecine: {
+            // A single-frame chain cannot change cadence here, but adaptive
+            // vertical interpolation removes the visible combing that would
+            // otherwise survive into preview and recompression.
+            const QImage source = result;
+            const int threshold = std::clamp(
+                static_cast<int>(filter.params.value("threshold", 12)), 0, 255);
+            if (!highPrecision) {
+                const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
+                parallelFor(std::max(0, result.height() - 2),
+                            static_cast<qint64>(result.width()) * result.height(),
+                            [&](int row) {
+                    const int y = row + 1;
+                    uchar *destination = result.scanLine(y);
+                    const uchar *above = source.constScanLine(y - 1);
+                    const uchar *current = source.constScanLine(y);
+                    const uchar *below = source.constScanLine(y + 1);
+                    for (int x = 0; x < result.width(); ++x) {
+                        for (int channel = 0; channel < 3; ++channel) {
+                            const int offset = x * bytesPerPixel + channel;
+                            const int prediction = (above[offset] + below[offset] + 1) >> 1;
+                            if (std::abs(current[offset] - prediction) > threshold)
+                                destination[offset] = static_cast<uchar>(prediction);
+                        }
+                    }
+                });
+            }
+            break;
+        }
+        case VDFilterType::NullTransform:
+            break;
+        case VDFilterType::Perspective: {
+            const qreal width = result.width();
+            const qreal height = result.height();
+            const QPolygonF sourceQuad({QPointF(0, 0), QPointF(width, 0),
+                                        QPointF(width, height), QPointF(0, height)});
+            const QPolygonF destinationQuad({
+                QPointF(filter.params.value("topLeftX", 0) * width,
+                        filter.params.value("topLeftY", 0) * height),
+                QPointF(filter.params.value("topRightX", 1) * width,
+                        filter.params.value("topRightY", 0) * height),
+                QPointF(filter.params.value("bottomRightX", 1) * width,
+                        filter.params.value("bottomRightY", 1) * height),
+                QPointF(filter.params.value("bottomLeftX", 0) * width,
+                        filter.params.value("bottomLeftY", 1) * height)});
+            QTransform transform;
+            if (QTransform::quadToQuad(sourceQuad, destinationQuad, transform)) {
+                QImage transformed(result.size(), result.format());
+                transformed.fill(Qt::black);
+                QPainter painter(&transformed);
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                painter.setTransform(transform);
+                painter.drawImage(0, 0, result);
+                result = transformed;
+            }
+            break;
+        }
+        case VDFilterType::Reduce2:
+        case VDFilterType::Reduce2HQ:
+            result = result.scaled(
+                std::max(1, result.width() / 2),
+                std::max(1, result.height() / 2), Qt::IgnoreAspectRatio,
+                filter.type == VDFilterType::Reduce2
+                    ? Qt::FastTransformation : Qt::SmoothTransformation);
+            break;
+        case VDFilterType::Rotate2: {
+            const QSize originalSize = result.size();
+            QTransform transform;
+            transform.rotate(filter.params.value("angle", 0));
+            result = result.transformed(transform, Qt::SmoothTransformation);
+            if (filter.params.value("expand", 1) <= 0.5
+                && result.size() != originalSize) {
+                QImage cropped(originalSize, result.format());
+                cropped.fill(Qt::black);
+                QPainter painter(&cropped);
+                painter.drawImage((originalSize.width() - result.width()) / 2,
+                                  (originalSize.height() - result.height()) / 2,
+                                  result);
+                result = cropped;
+            }
+            break;
+        }
+        case VDFilterType::Television: {
+            const QImage source = result;
+            const int radius = std::clamp(
+                static_cast<int>(filter.params.value("chromaBlur", 2)), 0, 8);
+            const double scanline = std::clamp(
+                filter.params.value("scanline", 0.08), 0.0, 0.8);
+            if (!highPrecision) {
+                const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
+                parallelFor(result.height(),
+                            static_cast<qint64>(result.width()) * result.height(),
+                            [&](int y) {
+                    uchar *destination = result.scanLine(y);
+                    const uchar *row = source.constScanLine(y);
+                    for (int x = 0; x < result.width(); ++x) {
+                        int red = 0, green = 0, blue = 0, count = 0;
+                        for (int offset = -radius; offset <= radius; ++offset) {
+                            const int sx = std::clamp(x + offset, 0, result.width() - 1);
+                            red += row[sx * bytesPerPixel];
+                            green += row[sx * bytesPerPixel + 1];
+                            blue += row[sx * bytesPerPixel + 2];
+                            ++count;
+                        }
+                        const int luma = (77 * row[x * bytesPerPixel]
+                            + 150 * row[x * bytesPerPixel + 1]
+                            + 29 * row[x * bytesPerPixel + 2]) >> 8;
+                        const int averageLuma = (77 * red + 150 * green + 29 * blue)
+                            / (256 * count);
+                        const double lineScale = (y & 1) ? 1.0 - scanline : 1.0;
+                        destination[x * bytesPerPixel] = static_cast<uchar>(std::clamp(
+                            static_cast<int>((luma + red / count - averageLuma) * lineScale), 0, 255));
+                        destination[x * bytesPerPixel + 1] = static_cast<uchar>(std::clamp(
+                            static_cast<int>((luma + green / count - averageLuma) * lineScale), 0, 255));
+                        destination[x * bytesPerPixel + 2] = static_cast<uchar>(std::clamp(
+                            static_cast<int>((luma + blue / count - averageLuma) * lineScale), 0, 255));
+                    }
+                });
+            }
+            break;
+        }
+        case VDFilterType::WarpResize: {
+            const int requestedWidth = static_cast<int>(
+                filter.params.value("width", result.width()));
+            const int requestedHeight = static_cast<int>(
+                filter.params.value("height", result.height()));
+            const int width = std::clamp(
+                requestedWidth > 0 ? requestedWidth : result.width(), 1, 32768);
+            const int height = std::clamp(
+                requestedHeight > 0 ? requestedHeight : result.height(), 1, 32768);
+            result = result.scaled(width, height, Qt::IgnoreAspectRatio,
+                                   Qt::SmoothTransformation);
+            break;
+        }
+        case VDFilterType::WarpSharp: {
+            const int amount = std::clamp(
+                static_cast<int>(filter.params.value("depth", 8)), 0, 64);
+            if (amount <= 0) break;
+            const QImage source = result;
+            if (!highPrecision) {
+                const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
+                parallelFor(result.height(),
+                            static_cast<qint64>(result.width()) * result.height(),
+                            [&](int y) {
+                    uchar *destination = result.scanLine(y);
+                    const uchar *current = source.constScanLine(y);
+                    const uchar *above = source.constScanLine(std::max(0, y - 1));
+                    const uchar *below = source.constScanLine(std::min(source.height() - 1, y + 1));
+                    for (int x = 0; x < result.width(); ++x) {
+                        const int left = std::max(0, x - 1);
+                        const int right = std::min(result.width() - 1, x + 1);
+                        for (int channel = 0; channel < 3; ++channel) {
+                            const int center = current[x * bytesPerPixel + channel];
+                            const int average = (current[left * bytesPerPixel + channel]
+                                + current[right * bytesPerPixel + channel]
+                                + above[x * bytesPerPixel + channel]
+                                + below[x * bytesPerPixel + channel] + 2) / 4;
+                            destination[x * bytesPerPixel + channel] = static_cast<uchar>(
+                                std::clamp(center + (center - average) * amount / 16, 0, 255));
+                        }
+                    }
+                });
+            }
+            break;
+        }
+        case VDFilterType::Logo: {
+            const QString path = filter.stringParams.value("path");
+            if (path.isEmpty()) break;
+            auto asset = mAssetCache.find(path);
+            if (asset == mAssetCache.end())
+                asset = mAssetCache.insert(path, QImage(path));
+            if (!asset->isNull()) {
+                QPainter painter(&result);
+                painter.setOpacity(std::clamp(
+                    filter.params.value("opacity", 1.0), 0.0, 1.0));
+                painter.drawImage(
+                    static_cast<int>(filter.params.value("x", 0)),
+                    static_cast<int>(filter.params.value("y", 0)), *asset);
+            }
+            break;
+        }
+        case VDFilterType::ConvertFormat: {
+            const int format = static_cast<int>(filter.params.value("format", 0));
+            if (format == 1) result = result.convertToFormat(QImage::Format_RGBA8888);
+            else if (format == 2) result = result.convertToFormat(QImage::Format_RGBA64);
+            else result = result.convertToFormat(QImage::Format_RGB888);
+            break;
+        }
         case VDFilterType::Resize: {
-            int w = static_cast<int>(filter.params.value("width", result.width()));
-            int h = static_cast<int>(filter.params.value("height", result.height()));
+            int w = 0;
+            int h = 0;
+            if (static_cast<int>(filter.params.value("sizeMode", 0)) == 1) {
+                w = static_cast<int>(std::llround(
+                    result.width() * filter.params.value("relW", 100.0) / 100.0));
+                h = static_cast<int>(std::llround(
+                    result.height() * filter.params.value("relH", 100.0) / 100.0));
+            } else {
+                w = static_cast<int>(filter.params.value("width", result.width()));
+                h = static_cast<int>(filter.params.value("height", result.height()));
+            }
             if (w > 0 && h > 0) {
                 const int filterMode = static_cast<int>(
                     filter.params.value("filterMode", 4));
@@ -1568,6 +2282,77 @@ QImage VDQtFilterSystem::processFrameForPhase(const QImage& inputFrame, quint64 
         }
         default:
             break;
+        }
+
+        if (!opacitySource.isNull() && opacitySource.size() == result.size()) {
+            struct OpacityPoint {
+                double x = 0.0;
+                double y = 1.0;
+                bool linear = true;
+            };
+            QList<OpacityPoint> points;
+            points.reserve(opacityPointCount);
+            for (int index = 0; index < opacityPointCount; ++index) {
+                const QString prefix = QStringLiteral("_sylia.opacity.%1.")
+                    .arg(index);
+                points.append({
+                    filter.params.value(prefix + QStringLiteral("x"), 0.0),
+                    std::clamp(filter.params.value(
+                        prefix + QStringLiteral("y"), 1.0), 0.0, 1.0),
+                    filter.params.value(prefix + QStringLiteral("linear"), 1.0)
+                        != 0.0
+                });
+            }
+            std::sort(points.begin(), points.end(),
+                      [](const OpacityPoint& left, const OpacityPoint& right) {
+                          return left.x < right.x;
+                      });
+            const double position = context.frameNumber >= 0
+                ? static_cast<double>(context.frameNumber) : 0.0;
+            double opacity = points.first().y;
+            if (position >= points.last().x) {
+                opacity = points.last().y;
+            } else {
+                for (int index = 1; index < points.size(); ++index) {
+                    if (position > points.at(index).x) continue;
+                    const OpacityPoint& left = points.at(index - 1);
+                    const OpacityPoint& right = points.at(index);
+                    if (right.x > left.x && right.linear) {
+                        const double fraction = std::clamp(
+                            (position - left.x) / (right.x - left.x), 0.0, 1.0);
+                        opacity = left.y + (right.y - left.y) * fraction;
+                    } else {
+                        opacity = left.y;
+                    }
+                    break;
+                }
+            }
+            if (opacity < 1.0) {
+                QImage blended = opacitySource;
+                QPainter painter(&blended);
+                const int opacityLeft = std::max(0, static_cast<int>(
+                    filter.params.value(QStringLiteral(
+                        "_sylia.opacityClip.left"), 0.0)));
+                const int opacityTop = std::max(0, static_cast<int>(
+                    filter.params.value(QStringLiteral(
+                        "_sylia.opacityClip.top"), 0.0)));
+                const int opacityRight = std::max(0, static_cast<int>(
+                    filter.params.value(QStringLiteral(
+                        "_sylia.opacityClip.right"), 0.0)));
+                const int opacityBottom = std::max(0, static_cast<int>(
+                    filter.params.value(QStringLiteral(
+                        "_sylia.opacityClip.bottom"), 0.0)));
+                if (opacityLeft || opacityTop || opacityRight || opacityBottom) {
+                    painter.setClipRect(
+                        opacityLeft, opacityTop,
+                        std::max(0, blended.width() - opacityLeft - opacityRight),
+                        std::max(0, blended.height() - opacityTop - opacityBottom));
+                }
+                painter.setOpacity(std::clamp(opacity, 0.0, 1.0));
+                painter.drawImage(0, 0, result);
+                painter.end();
+                result = blended;
+            }
         }
     }
 

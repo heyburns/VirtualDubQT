@@ -29,6 +29,7 @@ struct VDVideoCodecParams {
     int crf = 23;                       // 0..51
     int targetBitrateKbps = 0;          // e.g. 6000
     int maxBitrateKbps = 0;
+    bool twoPass = false;               // bitrate mode only
     
     // Speed & Tuning
     QString preset = "medium";          // "ultrafast" .. "veryslow"

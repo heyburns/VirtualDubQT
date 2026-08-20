@@ -14,7 +14,7 @@
 
 namespace {
 
-constexpr int kDocumentVersion = 3;
+constexpr int kDocumentVersion = 6;
 constexpr int kOldestSupportedDocumentVersion = 1;
 constexpr qint64 kMaximumDocumentBytes = qint64{4} * 1024 * 1024;
 
@@ -37,6 +37,7 @@ QJsonObject videoCodecToJson(const VDVideoCodecParams& value) {
     object["crf"] = value.crf;
     object["targetBitrateKbps"] = value.targetBitrateKbps;
     object["maxBitrateKbps"] = value.maxBitrateKbps;
+    object["twoPass"] = value.twoPass;
     object["preset"] = value.preset;
     object["tune"] = value.tune;
     object["profile"] = value.profile;
@@ -61,6 +62,7 @@ VDVideoCodecParams videoCodecFromJson(const QJsonObject& object) {
     value.crf = object.value("crf").toInt(value.crf);
     value.targetBitrateKbps = object.value("targetBitrateKbps").toInt(value.targetBitrateKbps);
     value.maxBitrateKbps = object.value("maxBitrateKbps").toInt(value.maxBitrateKbps);
+    value.twoPass = object.value("twoPass").toBool(value.twoPass);
     value.preset = object.value("preset").toString(value.preset);
     value.tune = object.value("tune").toString(value.tune);
     value.profile = object.value("profile").toString(value.profile);
@@ -146,10 +148,20 @@ QJsonObject processingToJson(const VDQtProcessingState& state) {
         filterObject["name"] = filter.name;
         filterObject["type"] = static_cast<int>(filter.type);
         filterObject["enabled"] = filter.enabled;
+        if (filter.type == VDFilterType::Plugin) {
+            filterObject["pluginId"] = filter.pluginId;
+            filterObject["pluginConfiguration"] = QString::fromLatin1(
+                filter.pluginConfiguration.toBase64());
+        }
         QJsonObject parameters;
         for (auto it = filter.params.cbegin(); it != filter.params.cend(); ++it)
             parameters[it.key()] = it.value();
         filterObject["parameters"] = parameters;
+        QJsonObject stringParameters;
+        for (auto it = filter.stringParams.cbegin();
+             it != filter.stringParams.cend(); ++it)
+            stringParameters[it.key()] = it.value();
+        filterObject["stringParameters"] = stringParameters;
         filters.append(filterObject);
     }
     object["filters"] = filters;
@@ -286,8 +298,22 @@ bool parseProcessing(const QJsonObject& object,
         filter.name = filterObject.value("name").toString();
         filter.type = static_cast<VDFilterType>(type);
         filter.enabled = filterObject.value("enabled").toBool(true);
+        filter.pluginId = filterObject.value("pluginId").toString();
+        const QString encodedConfiguration =
+            filterObject.value("pluginConfiguration").toString();
+        if (encodedConfiguration.size() > 1400000) {
+            setError(errorMessage, QStringLiteral("A plugin filter configuration is too large."));
+            return false;
+        }
+        filter.pluginConfiguration = QByteArray::fromBase64(
+            encodedConfiguration.toLatin1());
         const QJsonObject parameters = filterObject.value("parameters").toObject();
-        if (parameters.size() > 128 || filter.name.size() > 256 || filter.id.size() > 256) {
+        const QJsonObject stringParameters =
+            filterObject.value("stringParameters").toObject();
+        if (parameters.size() > 128 || filter.name.size() > 256
+            || filter.id.size() > 256 || filter.pluginId.size() > 256
+            || stringParameters.size() > 64
+            || (filter.type == VDFilterType::Plugin && filter.pluginId.isEmpty())) {
             setError(errorMessage, QStringLiteral("A filter entry is too large."));
             return false;
         }
@@ -299,6 +325,16 @@ bool parseProcessing(const QJsonObject& object,
                 return false;
             }
             filter.params.insert(it.key(), parameter);
+        }
+        for (auto it = stringParameters.constBegin();
+             it != stringParameters.constEnd(); ++it) {
+            if (!it.value().isString() || it.key().size() > 128
+                || it.value().toString().size() > 65536) {
+                setError(errorMessage,
+                         QStringLiteral("A string-valued filter parameter is invalid."));
+                return false;
+            }
+            filter.stringParams.insert(it.key(), it.value().toString());
         }
         result.filters.append(filter);
     }
@@ -486,6 +522,13 @@ bool VDQtProjectFile::saveProject(
     root["hasSelection"] = state.hasSelection;
     root["selectionStart"] = static_cast<double>(state.selectionStart);
     root["selectionEnd"] = static_cast<double>(state.selectionEnd);
+    root["zoomEnabled"] = state.zoomEnabled;
+    root["zoomStart"] = static_cast<double>(state.zoomStart);
+    root["zoomEnd"] = static_cast<double>(state.zoomEnd);
+    QJsonArray markers;
+    for (qint64 marker : state.markers)
+        markers.append(static_cast<double>(marker));
+    root["markers"] = markers;
     root["sourceFrameCount"] = static_cast<double>(state.sourceFrameCount);
     QJsonArray timelineSegments;
     for (const VDQtTimelineSegment& segment : state.timelineSegments) {
@@ -493,6 +536,7 @@ bool VDQtProjectFile::saveProject(
         segmentObject["sourceStartFrame"] =
             static_cast<double>(segment.sourceStartFrame);
         segmentObject["frameCount"] = static_cast<double>(segment.frameCount);
+        segmentObject["masked"] = segment.masked;
         timelineSegments.append(segmentObject);
     }
     root["timelineSegments"] = timelineSegments;
@@ -561,8 +605,27 @@ bool VDQtProjectFile::loadProject(
     result.hasSelection = root.value("hasSelection").toBool(false);
     result.selectionStart = static_cast<qint64>(root.value("selectionStart").toDouble());
     result.selectionEnd = static_cast<qint64>(root.value("selectionEnd").toDouble());
+    const QJsonArray markers = root.value("markers").toArray();
+    if (markers.size() > 100000) {
+        setError(errorMessage,
+                 QStringLiteral("The project contains too many timeline markers."));
+        return false;
+    }
+    for (const QJsonValue& markerValue : markers) {
+        const double serialized = markerValue.toDouble(-1.0);
+        if (!std::isfinite(serialized) || serialized < 0.0
+            || serialized > std::numeric_limits<int>::max()) {
+            setError(errorMessage,
+                     QStringLiteral("The project contains an invalid timeline marker."));
+            return false;
+        }
+        result.markers.append(static_cast<qint64>(serialized));
+    }
     result.sourceFrameCount = static_cast<qint64>(
         root.value("sourceFrameCount").toDouble());
+    result.zoomEnabled = root.value("zoomEnabled").toBool(false);
+    result.zoomStart = static_cast<qint64>(root.value("zoomStart").toDouble());
+    result.zoomEnd = static_cast<qint64>(root.value("zoomEnd").toDouble());
     if (result.position < 0 || result.selectionStart < 0
         || result.selectionEnd < result.selectionStart
         || result.audioStreamIndex < -1
@@ -583,6 +646,8 @@ bool VDQtProjectFile::loadProject(
         || result.sourceFrameCount < 0
         || result.position > std::numeric_limits<int>::max()
         || result.selectionEnd > std::numeric_limits<int>::max()
+        || result.zoomStart < 0 || result.zoomEnd < result.zoomStart
+        || result.zoomEnd > std::numeric_limits<int>::max()
         || result.sourceFrameCount > std::numeric_limits<int>::max()) {
         setError(errorMessage, QStringLiteral("The project contains an invalid timeline position or selection."));
         return false;
@@ -604,6 +669,7 @@ bool VDQtProjectFile::loadProject(
             segmentObject.value("sourceStartFrame").toDouble(-1));
         segment.frameCount = static_cast<qint64>(
             segmentObject.value("frameCount").toDouble(-1));
+        segment.masked = segmentObject.value("masked").toBool(false);
         if (segment.sourceStartFrame < 0 || segment.frameCount <= 0
             || segment.sourceStartFrame > std::numeric_limits<int>::max()
             || segment.frameCount > std::numeric_limits<int>::max()
@@ -619,7 +685,8 @@ bool VDQtProjectFile::loadProject(
     }
     if (!result.timelineSegments.isEmpty()
         && (result.position >= timelineLength
-            || result.selectionEnd > timelineLength)) {
+            || result.selectionEnd > timelineLength
+            || (result.zoomEnabled && result.zoomEnd > timelineLength))) {
         setError(errorMessage,
                  QStringLiteral("The saved position or selection is outside the edited timeline."));
         return false;
@@ -756,6 +823,7 @@ bool VDQtProjectFile::saveJobQueue(
             segmentObject["sourceStartFrame"] =
                 static_cast<double>(segment.sourceStartFrame);
             segmentObject["frameCount"] = static_cast<double>(segment.frameCount);
+            segmentObject["masked"] = segment.masked;
             timelineSegments.append(segmentObject);
         }
         options["timelineSegments"] = timelineSegments;
@@ -943,6 +1011,7 @@ bool VDQtProjectFile::loadJobQueue(
                 segmentObject.value("sourceStartFrame").toDouble(-1));
             segment.frameCount = static_cast<qint64>(
                 segmentObject.value("frameCount").toDouble(-1));
+            segment.masked = segmentObject.value("masked").toBool(false);
             if (!segmentValue.isObject() || segment.sourceStartFrame < 0
                 || segment.frameCount <= 0
                 || segment.sourceStartFrame + segment.frameCount

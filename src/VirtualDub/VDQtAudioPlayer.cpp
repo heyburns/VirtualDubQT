@@ -2555,6 +2555,7 @@ void VDQtAudioPlayer::close()
     mFilePath.clear();
     mAudioStreamIndex = -1;
     mChannelLayoutName.clear();
+    mPlaybackBaseTimeSeconds = 0.0;
     mClip = nullptr;
     mVi = nullptr;
 }
@@ -2599,6 +2600,7 @@ void VDQtAudioPlayer::stop()
     }
     if (mFilteredAudioDevice) mFilteredAudioDevice->resetProcessor();
     mIsPlaying = false;
+    mPlaybackBaseTimeSeconds = 0.0;
 }
 
 void VDQtAudioPlayer::seekToFrame(int frameIndex, double fps)
@@ -2617,6 +2619,7 @@ void VDQtAudioPlayer::seekToTimeSeconds(double timeSeconds)
     }
 
     timeSeconds = std::max(0.0, timeSeconds);
+    mPlaybackBaseTimeSeconds = timeSeconds;
     int64_t sample = static_cast<int64_t>(std::llround(timeSeconds * mSampleRate));
     if (mTotalSamplesExact && mTotalSamples > 0) {
         sample = std::min(sample, mTotalSamples);
@@ -2655,6 +2658,13 @@ double VDQtAudioPlayer::getCurrentAudioTimeSeconds() const
         return static_cast<double>(mFFmpegAudioDevice->currentSample()) / mSampleRate;
     }
     return -1.0;
+}
+
+double VDQtAudioPlayer::getPlaybackTimeSeconds() const
+{
+    if (!mHasAudio || !mAudioSink) return -1.0;
+    return mPlaybackBaseTimeSeconds
+        + std::max<qint64>(0, mAudioSink->processedUSecs()) / 1000000.0;
 }
 
 QString VDQtAudioPlayer::getAudioLayoutString() const

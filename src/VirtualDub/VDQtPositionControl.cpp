@@ -16,6 +16,12 @@ void VDTimelineSlider::setSelection(int start, int end) {
     }
 }
 
+void VDTimelineSlider::setMarkers(const QList<qint64>& markers) {
+    if (mMarkers == markers) return;
+    mMarkers = markers;
+    update();
+}
+
 void VDTimelineSlider::paintEvent(QPaintEvent *) {
     QStylePainter p(this);
     QStyleOptionSlider opt;
@@ -57,6 +63,24 @@ void VDTimelineSlider::paintEvent(QPaintEvent *) {
         p.setPen(QPen(QColor(255, 255, 255), 2));
         p.drawLine(x1, grooveRect.top() - 4, x1, grooveRect.bottom() + 4);
         p.drawLine(x2, grooveRect.top() - 4, x2, grooveRect.bottom() + 4);
+    }
+
+    if (!mMarkers.isEmpty() && maximum() > minimum()) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(QColor(255, 176, 48), 1));
+        p.setBrush(QColor(255, 176, 48));
+        const double range = maximum() - minimum();
+        for (qint64 marker : mMarkers) {
+            if (marker < minimum() || marker > maximum()) continue;
+            const int x = trackLeft + static_cast<int>(std::round(
+                (marker - minimum()) * trackWidth / range));
+            QPolygon triangle;
+            triangle << QPoint(x, grooveRect.top() - 7)
+                     << QPoint(x - 4, grooveRect.top() - 13)
+                     << QPoint(x + 4, grooveRect.top() - 13);
+            p.drawPolygon(triangle);
+            p.drawLine(x, grooveRect.top() - 7, x, grooveRect.bottom() + 5);
+        }
     }
 
     // 3. Draw Handle (Playhead thumb)
@@ -139,8 +163,38 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
 void VDQtPositionControlWidget::SetRange(qint64 lo, qint64 hi, bool updateNow) {
     mRangeLo = lo;
     mRangeHi = hi;
-    mSlider->setRange((int)lo, (int)hi);
+    if (mZoomEnabled) {
+        mZoomStart = std::clamp(mZoomStart, lo, hi);
+        mZoomEnd = std::clamp(mZoomEnd, mZoomStart, hi);
+        if (mZoomStart >= mZoomEnd) mZoomEnabled = false;
+    }
+    mSlider->setRange(
+        static_cast<int>(mZoomEnabled ? mZoomStart : lo),
+        static_cast<int>(mZoomEnabled ? mZoomEnd : hi));
     if (updateNow) UpdateStatusText();
+}
+
+void VDQtPositionControlWidget::SetZoomRange(qint64 start, qint64 end) {
+    start = std::clamp(start, mRangeLo, mRangeHi);
+    end = std::clamp(end, mRangeLo, mRangeHi);
+    if (start >= end) {
+        ClearZoomRange();
+        return;
+    }
+    mZoomEnabled = true;
+    mZoomStart = start;
+    mZoomEnd = end;
+    mSlider->setRange(static_cast<int>(start), static_cast<int>(end));
+    SetPosition(std::clamp(mPosition, start, end));
+}
+
+void VDQtPositionControlWidget::ClearZoomRange() {
+    if (!mZoomEnabled) return;
+    mZoomEnabled = false;
+    mZoomStart = mRangeLo;
+    mZoomEnd = mRangeHi;
+    mSlider->setRange(static_cast<int>(mRangeLo), static_cast<int>(mRangeHi));
+    SetPosition(std::clamp(mPosition, mRangeLo, mRangeHi));
 }
 
 void VDQtPositionControlWidget::SetPosition(qint64 pos) {

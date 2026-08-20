@@ -170,7 +170,11 @@ void VDQtFrameServer::run(Config config) {
         const int sourceFrame = static_cast<int>(
             timeline.mapOutputToSource(config.startFrame));
         const QImage first = decoder.getFrameImage(sourceFrame);
-        if (first.isNull() || !filters.processFrameSequence(first, firstImages)
+        VDFilterFrameContext context;
+        context.frameNumber = config.startFrame;
+        context.timestampSeconds = decoder.getFrameTimestampSeconds(sourceFrame);
+        context.frameRate = sourceFps;
+        if (first.isNull() || !filters.processFrameSequence(first, firstImages, context)
             || firstImages.isEmpty() || firstImages.first().isNull()) {
             error = QStringLiteral("Could not prepare the first served frame.");
         }
@@ -228,7 +232,11 @@ void VDQtFrameServer::run(Config config) {
             const int sourceFrame = static_cast<int>(
                 timeline.mapOutputToSource(frameIndex));
             const QImage frame = decoder.getFrameImage(sourceFrame);
-            if (frame.isNull() || !filters.processFrameSequence(frame, images)
+            VDFilterFrameContext context;
+            context.frameNumber = frameIndex;
+            context.timestampSeconds = decoder.getFrameTimestampSeconds(sourceFrame);
+            context.frameRate = sourceFps;
+            if (frame.isNull() || !filters.processFrameSequence(frame, images, context)
                 || images.isEmpty()) {
                 error = QString("Could not decode frame %1.").arg(frameIndex);
                 break;

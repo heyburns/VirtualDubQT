@@ -20,6 +20,26 @@ extern "C" {
 
 namespace {
 
+AVPixelFormat decodedOutputPixelFormat(const QString& forcedFormat,
+                                       int sourceBitDepth,
+                                       bool sourceHasAlpha) {
+    if (forcedFormat.compare(QStringLiteral("RGB24"),
+                             Qt::CaseInsensitive) == 0)
+        return AV_PIX_FMT_RGB24;
+    return sourceBitDepth > 8 ? AV_PIX_FMT_RGBA64LE
+        : sourceHasAlpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
+}
+
+QImage::Format decodedOutputImageFormat(const QString& forcedFormat,
+                                        int sourceBitDepth,
+                                        bool sourceHasAlpha) {
+    if (forcedFormat.compare(QStringLiteral("RGB24"),
+                             Qt::CaseInsensitive) == 0)
+        return QImage::Format_RGB888;
+    return sourceBitDepth > 8 ? QImage::Format_RGBA64
+        : sourceHasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+}
+
 std::atomic<int> gFrameCacheBudgetMiB{64};
 std::atomic<int> gDecoderThreadCount{0};
 
@@ -589,14 +609,26 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
 
     clearCache();
     if (mIsAvsNative) {
+        mOutputPixelFormat = decodedOutputPixelFormat(
+            mForcedFormatName, mSourceBitDepth, mSourceHasAlpha);
+        mOutputImageFormat = decodedOutputImageFormat(
+            mForcedFormatName, mSourceBitDepth, mSourceHasAlpha);
         if (mSwsCtx) sws_freeContext(mSwsCtx);
         mSwsCtx = nullptr;
         mSwsSourceFormat = AV_PIX_FMT_NONE;
         mSwsDestinationFormat = AV_PIX_FMT_NONE;
         mSwsSourceWidth = 0;
         mSwsSourceHeight = 0;
-    } else if (mCodecCtx && mCodecCtx->pix_fmt != AV_PIX_FMT_NONE) {
-        setupSwsContext(mCodecCtx->pix_fmt, mWidth, mHeight, mOutputPixelFormat);
+    } else if (mSwsCtx) {
+        // Leave the old storage descriptor intact so ensureConversionResources()
+        // detects the requested RGB24/automatic transition and reallocates it
+        // atomically on the next decoded frame.
+        sws_freeContext(mSwsCtx);
+        mSwsCtx = nullptr;
+        mSwsSourceFormat = AV_PIX_FMT_NONE;
+        mSwsDestinationFormat = AV_PIX_FMT_NONE;
+        mSwsSourceWidth = 0;
+        mSwsSourceHeight = 0;
     }
 }
 
@@ -676,16 +708,10 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         mSourceBitDepth = std::max(8, avs_bits_per_component(newVideoInfo));
         mSourceHasAlpha = avs_is_yuva(newVideoInfo) || avs_is_planar_rgba(newVideoInfo)
                        || avs_is_rgb32(newVideoInfo) || avs_is_rgb64(newVideoInfo);
-        if (mSourceBitDepth > 8) {
-            mOutputPixelFormat = AV_PIX_FMT_RGBA64LE;
-            mOutputImageFormat = QImage::Format_RGBA64;
-        } else if (mSourceHasAlpha) {
-            mOutputPixelFormat = AV_PIX_FMT_RGBA;
-            mOutputImageFormat = QImage::Format_RGBA8888;
-        } else {
-            mOutputPixelFormat = AV_PIX_FMT_RGB24;
-            mOutputImageFormat = QImage::Format_RGB888;
-        }
+        mOutputPixelFormat = decodedOutputPixelFormat(
+            mForcedFormatName, mSourceBitDepth, mSourceHasAlpha);
+        mOutputImageFormat = decodedOutputImageFormat(
+            mForcedFormatName, mSourceBitDepth, mSourceHasAlpha);
         mCurrentFrameIndex = -1;
         mNextDecodeFrameIndex = 0;
         mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
@@ -838,12 +864,10 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
         }
         sourceHasAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
     }
-    const AVPixelFormat outputPixelFormat = sourceBitDepth > 8
-        ? AV_PIX_FMT_RGBA64LE
-        : sourceHasAlpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
-    const QImage::Format outputImageFormat = sourceBitDepth > 8
-        ? QImage::Format_RGBA64
-        : sourceHasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+    const AVPixelFormat outputPixelFormat = decodedOutputPixelFormat(
+        mForcedFormatName, sourceBitDepth, sourceHasAlpha);
+    const QImage::Format outputImageFormat = decodedOutputImageFormat(
+        mForcedFormatName, sourceBitDepth, sourceHasAlpha);
 
     const int bufferSize = av_image_get_buffer_size(outputPixelFormat, width, height, 1);
     if (bufferSize <= 0) {
@@ -1100,12 +1124,10 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
 
     const int sourceBitDepth = std::max(mSourceBitDepth, detectedBitDepth);
     const bool sourceHasAlpha = mSourceHasAlpha || detectedAlpha;
-    const AVPixelFormat outputPixelFormat = sourceBitDepth > 8
-        ? AV_PIX_FMT_RGBA64LE
-        : sourceHasAlpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24;
-    const QImage::Format outputImageFormat = sourceBitDepth > 8
-        ? QImage::Format_RGBA64
-        : sourceHasAlpha ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+    const AVPixelFormat outputPixelFormat = decodedOutputPixelFormat(
+        mForcedFormatName, sourceBitDepth, sourceHasAlpha);
+    const QImage::Format outputImageFormat = decodedOutputImageFormat(
+        mForcedFormatName, sourceBitDepth, sourceHasAlpha);
     const bool outputFormatMatches = outputPixelFormat == mOutputPixelFormat;
     const bool storageMatches = outputFormatMatches && mFrameRGB && mBuffer
         && sourceWidth == mWidth && sourceHeight == mHeight;

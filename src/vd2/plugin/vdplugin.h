@@ -13,6 +13,22 @@
 
 #include <stddef.h>
 
+// The public plugin headers are also consumed directly by third-party
+// Linux-native modules.  Unlike the rest of the source tree, they cannot rely
+// on vdtypes.h having been included first to provide the Microsoft calling
+// convention spellings.
+#ifndef _WIN32
+	#ifndef __stdcall
+		#define __stdcall
+	#endif
+	#ifndef __cdecl
+		#define __cdecl
+	#endif
+	#ifndef __declspec
+		#define __declspec(x)
+	#endif
+#endif
+
 // Copied from <vd2/system/vdtypes.h>.  Must be in sync.
 #ifndef VD_STANDARD_TYPES_DECLARED
 	#if defined(_MSC_VER)

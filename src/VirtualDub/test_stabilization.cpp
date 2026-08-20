@@ -21,6 +21,7 @@
 #include <vd2/system/binary.h>
 
 #include <QApplication>
+#include <QBuffer>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -129,6 +130,32 @@ int main(int argc, char **argv) {
             std::cerr << filterError.constData() << '\n';
             return 1;
         }
+
+        QByteArray liveInput(4800 * static_cast<int>(sizeof(qint16)),
+                             Qt::Uninitialized);
+        auto *liveSamples = reinterpret_cast<qint16 *>(liveInput.data());
+        for (int sample = 0; sample < 4800; ++sample) {
+            liveSamples[sample] = static_cast<qint16>(std::lround(
+                12000.0 * std::sin(2.0 * std::acos(-1.0)
+                    * 440.0 * sample / 48000.0)));
+        }
+        QBuffer liveSource(&liveInput);
+        liveSource.open(QIODevice::ReadOnly);
+        VDQtAudioFilterDevice liveDevice(&liveSource, 48000, 1);
+        VDAudioFilterInstance stretch = audioFilters.createFilter(
+            VDAudioFilterType::TimeStretch);
+        stretch.params[QStringLiteral("factor")] = 2.0;
+        liveDevice.setFilterChain({stretch});
+        QByteArray liveOutput;
+        for (int iteration = 0;
+             iteration < 100 && !liveDevice.atEnd(); ++iteration) {
+            const QByteArray block = liveDevice.read(4096);
+            if (!block.isEmpty()) liveOutput.append(block);
+        }
+        if (!require(!liveOutput.isEmpty()
+                        && liveOutput.size() < liveInput.size() * 3 / 4,
+                     "live audio filter device performs variable-duration time stretching"))
+            return 1;
         audioFilters.clear();
     }
 
@@ -180,6 +207,20 @@ int main(int argc, char **argv) {
             std::cerr << timelineError.toStdString() << '\n';
             return 1;
         }
+
+        VDQtTimeline maskedTimeline;
+        maskedTimeline.reset(10, true);
+        if (!require(maskedTimeline.replaceSegments(
+                         {{0, 3, false}, {3, 4, true}, {7, 3, false}},
+                         &timelineError),
+                     "timeline accepts VirtualDub masked ranges")
+            || !require(maskedTimeline.isOutputFrameMasked(4)
+                        && !maskedTimeline.isOutputFrameMasked(2)
+                        && maskedTimeline.mapOutputToSource(3) == 2
+                        && maskedTimeline.mapOutputToSource(6) == 2
+                        && maskedTimeline.mapOutputToSource(7) == 7,
+                        "masked ranges hold the preceding unmasked video frame"))
+            return 1;
 
         VDQtTimeline estimated;
         estimated.reset(40, false);
@@ -297,6 +338,7 @@ int main(int argc, char **argv) {
         state.rawVideo.fullRange = true;
         state.videoCodec = VDQtCodecEngine::getDefaultVideoParamsForCodec(
             QStringLiteral("ffv1"));
+        state.videoCodec.twoPass = true;
         state.audioCodec.codecId = QStringLiteral("flac");
         state.audioCodec.sampleRate = 96000;
         state.audioCodec.channels = 6;
@@ -340,6 +382,7 @@ int main(int argc, char **argv) {
                         && loaded.rawVideo.pixelFormat == QStringLiteral("yuv422p10le")
                         && loaded.rawVideo.scanlineAlignment == 16
                         && loaded.videoCodec.codecId == QStringLiteral("ffv1")
+                        && loaded.videoCodec.twoPass
                         && loaded.audioCodec.codecId == QStringLiteral("flac")
                         && loaded.filters.size() == 1
                         && loaded.audioFilters.size() == 1
@@ -365,8 +408,13 @@ int main(int argc, char **argv) {
         project.hasSelection = true;
         project.selectionStart = 10;
         project.selectionEnd = 50;
+        project.zoomEnabled = true;
+        project.zoomStart = 5;
+        project.zoomEnd = 55;
+        project.markers = {3, 42, 88};
         project.sourceFrameCount = 100;
-        project.timelineSegments = {{0, 10}, {20, 30}, {80, 20}};
+        project.timelineSegments = {
+            {0, 10, false}, {20, 30, true}, {80, 20, false}};
         project.processing = state;
         const QString projectPath = settingsDirectory.filePath(
             QStringLiteral("roundtrip.vdqproject"));
@@ -393,6 +441,10 @@ int main(int argc, char **argv) {
                         && loadedProject.timelineSegments == project.timelineSegments
                         && loadedProject.selectionStart == 10
                         && loadedProject.selectionEnd == 50
+                        && loadedProject.zoomEnabled
+                        && loadedProject.zoomStart == 5
+                        && loadedProject.zoomEnd == 55
+                        && loadedProject.markers == project.markers
                         && loadedProject.processing.filters.size() == 1
                         && loadedProject.processing.audioFilters.size() == 1,
                         "project snapshot preserves relative source and timeline state"))
@@ -1378,16 +1430,22 @@ int main(int argc, char **argv) {
         quint64 receivedGeneration = 0;
         int receivedFrame = -1;
         quint64 receivedSeekCount = 0;
+        int receivedOutputPhases = 0;
+        double receivedDuration = 0.0;
         int readyCount = 0;
         QEventLoop workerLoop;
         QObject::connect(
             worker, &VDQtFrameDecodeWorker::frameReady, &workerLoop,
-            [&](int frameIndex, quint64 generation, const QImage&, const QImage&,
-                bool, double, int, int, quint64 seekCount, quint64) {
+            [&](int frameIndex, quint64 generation, const QImage&,
+                const QList<QImage>& outputs, bool, double, double duration,
+                int, int,
+                quint64 seekCount, quint64) {
                 ++readyCount;
                 receivedFrame = frameIndex;
                 receivedGeneration = generation;
                 receivedSeekCount = seekCount;
+                receivedOutputPhases = outputs.size();
+                receivedDuration = duration;
                 workerLoop.quit();
             });
 
@@ -1409,6 +1467,24 @@ int main(int argc, char **argv) {
             return 1;
         if (!require(receivedSeekCount == 0,
                      "dropped presentation frames preserve sequential decoding"))
+            return 1;
+
+        VDQtFilterSystem bobFactory;
+        bobFactory.addFilter(VDFilterType::BobDoubler);
+        QMetaObject::invokeMethod(
+            worker,
+            [worker, chain = bobFactory.getActiveChain()]() {
+                worker->setFilterChain(chain);
+            },
+            Qt::BlockingQueuedConnection);
+        worker->requestFrame(10, 4, true, true);
+        QTimer::singleShot(5000, &workerLoop, &QEventLoop::quit);
+        workerLoop.exec();
+        if (!require(receivedGeneration == 4 && receivedFrame == 10
+                         && receivedOutputPhases == 2
+                         && std::isfinite(receivedDuration)
+                         && receivedDuration > 0.0,
+                     "preview worker returns temporal phases and frame duration"))
             return 1;
 
         QMetaObject::invokeMethod(
@@ -1891,16 +1967,32 @@ int main(int argc, char **argv) {
         VDQtAudioFilterSystem::instance().clear();
 
         VDQtFilterSystem::instance().clearFilters();
+        const QString smartAllKeySource = settingsDirectory.filePath(
+            QStringLiteral("smart_all_keyframes.mkv"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         {QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                          QStringLiteral("error"), QStringLiteral("-f"),
+                          QStringLiteral("lavfi"), QStringLiteral("-i"),
+                          QStringLiteral("testsrc2=size=64x48:rate=5:duration=0.4"),
+                          QStringLiteral("-c:v"), QStringLiteral("mjpeg"),
+                          QStringLiteral("-q:v"), QStringLiteral("3"),
+                          QStringLiteral("-an"), QStringLiteral("-y"),
+                          smartAllKeySource},
+                         &ffmpegError),
+                     "create all-keyframe smart-render fixture"))
+            return 1;
         VDQtVideoDecoder smartDecoder;
-        if (!require(smartDecoder.openFile(firstSegment),
+        if (!require(smartDecoder.openFile(smartAllKeySource),
                      "open smart-render fixture"))
             return 1;
         VDQtVideoExporter::ExportOptions smartOptions;
-        smartOptions.inputPath = firstSegment;
+        smartOptions.inputPath = smartAllKeySource;
         smartOptions.outputPath =
             settingsDirectory.filePath(QStringLiteral("smart_copy.mkv"));
         smartOptions.videoMode = VideoMode_FullProcessing;
         smartOptions.audioMode = AudioMode_DirectStreamCopy;
+        smartOptions.includeAudio = false;
         smartOptions.smartRendering = true;
         smartOptions.containerType = QStringLiteral("mkv");
         if (!require(exporter.exportVideo(smartOptions, &smartDecoder),
@@ -1916,8 +2008,30 @@ int main(int argc, char **argv) {
                            smartOptions.outputPath },
                          &ffmpegError, &smartCodec),
                      "probe smart-render codec")
-            || !require(smartCodec.trimmed() == QByteArray("ffv1"),
+            || !require(smartCodec.trimmed() == QByteArray("mjpeg"),
                         "smart rendering copies a clean GOP-aligned stream"))
+            return 1;
+        smartOptions.outputPath = settingsDirectory.filePath(
+            QStringLiteral("smart_edited_copy.mkv"));
+        smartOptions.timelineSegments = {{1, 1}, {0, 1}};
+        if (!require(exporter.exportVideo(smartOptions, &smartDecoder),
+                     "smart-render key-aligned edited timeline")) {
+            std::cerr << exporter.lastError().toStdString() << '\n';
+            return 1;
+        }
+        QByteArray smartEditedProbe;
+        if (!require(runProcess(
+                QStringLiteral("ffprobe"),
+                {QStringLiteral("-v"), QStringLiteral("error"),
+                 QStringLiteral("-count_frames"), QStringLiteral("-select_streams"),
+                 QStringLiteral("v:0"), QStringLiteral("-show_entries"),
+                 QStringLiteral("stream=codec_name,nb_read_frames"),
+                 QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                 smartOptions.outputPath}, &ffmpegError, &smartEditedProbe),
+                "probe edited smart-render output")
+            || !require(smartEditedProbe.contains("codec_name=mjpeg")
+                        && smartEditedProbe.contains("nb_read_frames=2"),
+                        "edited smart rendering copies key-aligned packet ranges"))
             return 1;
 
         const QString servedPipe =
@@ -2018,6 +2132,14 @@ int main(int argc, char **argv) {
                      && !frame.isNull()
                      && frame.depth() == 64,
                      "10-bit source is retained in a 16-bit-per-channel image"))
+            return 1;
+        VDQtVideoDecoder forcedRgb24Decoder;
+        forcedRgb24Decoder.setDecompressionConfig(
+            QStringLiteral("RGB24"), 0, 0);
+        if (!require(forcedRgb24Decoder.openFile(fixturePath)
+                        && forcedRgb24Decoder.getFrameImage(0).format()
+                               == QImage::Format_RGB888,
+                     "forced RGB24 decompression changes decoder output storage"))
             return 1;
 
         VDQtFilterSystem::instance().clearFilters();
@@ -2756,6 +2878,65 @@ int main(int argc, char **argv) {
                      "fast recompress removes pre-video silence using the common media origin"))
             return 1;
         VDQtCodecEngine::instance().resetToDefaults();
+    }
+
+    {
+        QString codecError;
+        if (VDQtCodecEngine::instance().checkVideoEncoderAvailable(
+                QStringLiteral("libx264"), &codecError)) {
+            const QString sourcePath = settingsDirectory.filePath(
+                QStringLiteral("two_pass_source.mkv"));
+            const QString outputPath = settingsDirectory.filePath(
+                QStringLiteral("two_pass_output.mkv"));
+            QByteArray ffmpegError;
+            if (!require(runProcess(
+                    QStringLiteral("ffmpeg"),
+                    {QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                     QStringLiteral("error"), QStringLiteral("-f"),
+                     QStringLiteral("lavfi"), QStringLiteral("-i"),
+                     QStringLiteral("testsrc2=size=64x48:rate=8:duration=1"),
+                     QStringLiteral("-c:v"), QStringLiteral("ffv1"),
+                     QStringLiteral("-y"), sourcePath}, &ffmpegError),
+                    "create two-pass export source")) {
+                std::cerr << ffmpegError.constData() << '\n';
+                return 1;
+            }
+            VDQtVideoDecoder decoder;
+            if (!require(decoder.openFile(sourcePath),
+                         "open two-pass export source")) return 1;
+            VDVideoCodecParams params =
+                VDQtCodecEngine::getDefaultVideoParamsForCodec(
+                    QStringLiteral("libx264"));
+            params.rateMode = QStringLiteral("bitrate");
+            params.targetBitrateKbps = 200;
+            params.twoPass = true;
+            params.pixFmt = QStringLiteral("yuv420p");
+            VDQtCodecEngine::instance().setVideoParams(params);
+            VDQtVideoExporter::ExportOptions options;
+            options.inputPath = sourcePath;
+            options.outputPath = outputPath;
+            options.videoMode = VideoMode_NormalRecompress;
+            options.includeAudio = false;
+            options.containerType = QStringLiteral("mkv");
+            VDQtVideoExporter exporter;
+            if (!require(exporter.exportVideo(options, &decoder),
+                         "complete x264 two-pass export")
+                || !require(QFileInfo(outputPath).size() > 0,
+                            "two-pass output is non-empty")) return 1;
+            QByteArray probe;
+            if (!require(runProcess(
+                    QStringLiteral("ffprobe"),
+                    {QStringLiteral("-v"), QStringLiteral("error"),
+                     QStringLiteral("-count_frames"), QStringLiteral("-select_streams"),
+                     QStringLiteral("v:0"), QStringLiteral("-show_entries"),
+                     QStringLiteral("stream=nb_read_frames"),
+                     QStringLiteral("-of"), QStringLiteral("default=nw=1"),
+                     outputPath}, &ffmpegError, &probe),
+                    "probe two-pass output")
+                || !require(probe.contains("nb_read_frames=8"),
+                            "two-pass output retains every frame")) return 1;
+            VDQtCodecEngine::instance().resetToDefaults();
+        }
     }
 
     std::cout << "stabilization tests passed\n";

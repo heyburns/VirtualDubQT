@@ -104,6 +104,9 @@ public:
     void seekToTimeSeconds(double timeSeconds);
     void refreshAudioFilters();
     double getCurrentAudioTimeSeconds() const;
+    // Time heard by the output device, unlike getCurrentAudioTimeSeconds(),
+    // which is the decoder's read-ahead cursor.
+    double getPlaybackTimeSeconds() const;
 
     bool isPlaying() const { return mIsPlaying; }
     bool hasAudio() const { return mHasAudio; }
@@ -148,6 +151,7 @@ private:
     VDQtFFmpegAudioDevice *mFFmpegAudioDevice;
     AVSAudioDevice *mAvsAudioDevice;
     VDQtAudioFilterDevice *mFilteredAudioDevice;
+    double mPlaybackBaseTimeSeconds = 0.0;
 
     QString mChannelLayoutName;
 

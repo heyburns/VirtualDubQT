@@ -101,9 +101,16 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         }
 
         QImage inputImage = mDecoder.getFrameImage(frameIndex, preserveSequentialDecode);
-        QImage outputImage;
-        if (!inputImage.isNull() && renderFilteredOutput)
-            outputImage = mFilters.processFrame(inputImage);
+        QList<QImage> outputImages;
+        if (!inputImage.isNull() && renderFilteredOutput) {
+            VDFilterFrameContext context;
+            context.frameNumber = frameIndex;
+            context.timestampSeconds =
+                mDecoder.getFrameTimestampSeconds(frameIndex);
+            context.frameRate = mDecoder.getFps();
+            if (!mFilters.processFrameSequence(inputImage, outputImages, context))
+                outputImages.clear();
+        }
 
         bool currentResult = false;
         {
@@ -118,9 +125,10 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                     frameIndex,
                     generation,
                     inputImage,
-                    outputImage,
+                    outputImages,
                     mDecoder.isKeyFrame(frameIndex),
                     mDecoder.getFrameTimestampSeconds(frameIndex),
+                    mDecoder.getFrameDurationSeconds(frameIndex),
                     mDecoder.getFrameCount(),
                     status,
                     mDecoder.getSeekCount(),

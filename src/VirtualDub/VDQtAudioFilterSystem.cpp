@@ -8,6 +8,16 @@
 #include <cstring>
 #include <limits>
 
+extern "C" {
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/opt.h>
+}
+
 namespace {
 
 qint16 clippedSample(double value) {
@@ -37,6 +47,218 @@ QStringList atempoChain(double factor) {
 }
 
 } // namespace
+
+struct VDQtAudioFilterDevice::VariableRateProcessor {
+    AVFilterGraph *graph = nullptr;
+    AVFilterContext *source = nullptr;
+    AVFilterContext *sink = nullptr;
+    QByteArray pending;
+    qsizetype pendingOffset = 0;
+    qint64 nextPts = 0;
+    int sampleRate = 0;
+    int channels = 0;
+    bool sourceFlushed = false;
+    bool sinkFinished = false;
+
+    ~VariableRateProcessor() {
+        avfilter_graph_free(&graph);
+    }
+
+    qint64 pendingBytes() const {
+        return std::max<qint64>(0, pending.size() - pendingOffset);
+    }
+
+    bool configure(const QList<VDAudioFilterInstance>& chain,
+                   int requestedSampleRate,
+                   int requestedChannels) {
+        avfilter_graph_free(&graph);
+        source = nullptr;
+        sink = nullptr;
+        pending.clear();
+        pendingOffset = 0;
+        nextPts = 0;
+        sourceFlushed = false;
+        sinkFinished = false;
+        sampleRate = std::max(1, requestedSampleRate);
+        channels = std::max(1, requestedChannels);
+
+        VDQtAudioFilterSystem graphSystem;
+        graphSystem.replaceActiveChain(chain);
+        QString description = graphSystem.ffmpegFilterGraph(sampleRate);
+        if (description.isEmpty()) return false;
+
+        AVChannelLayout layout = {};
+        av_channel_layout_default(&layout, channels);
+        char layoutName[128] = {};
+        if (av_channel_layout_describe(
+                &layout, layoutName, sizeof(layoutName)) < 0) {
+            av_channel_layout_uninit(&layout);
+            return false;
+        }
+        description += QString(
+            ",aresample=%1,aformat=sample_fmts=s16:sample_rates=%1:channel_layouts=%2")
+            .arg(sampleRate)
+            .arg(QString::fromUtf8(layoutName));
+
+        graph = avfilter_graph_alloc();
+        if (!graph) {
+            av_channel_layout_uninit(&layout);
+            return false;
+        }
+        const AVFilter *bufferFilter = avfilter_get_by_name("abuffer");
+        const AVFilter *sinkFilter = avfilter_get_by_name("abuffersink");
+        const QByteArray sourceArguments = QString(
+            "time_base=1/%1:sample_rate=%1:sample_fmt=s16:channel_layout=%2")
+            .arg(sampleRate)
+            .arg(QString::fromUtf8(layoutName))
+            .toUtf8();
+        av_channel_layout_uninit(&layout);
+        if (!bufferFilter || !sinkFilter
+            || avfilter_graph_create_filter(
+                   &source, bufferFilter, "in", sourceArguments.constData(),
+                   nullptr, graph) < 0
+            || avfilter_graph_create_filter(
+                   &sink, sinkFilter, "out", nullptr, nullptr, graph) < 0) {
+            avfilter_graph_free(&graph);
+            source = nullptr;
+            sink = nullptr;
+            return false;
+        }
+
+        AVFilterInOut *outputs = avfilter_inout_alloc();
+        AVFilterInOut *inputs = avfilter_inout_alloc();
+        if (!outputs || !inputs) {
+            avfilter_inout_free(&outputs);
+            avfilter_inout_free(&inputs);
+            avfilter_graph_free(&graph);
+            source = nullptr;
+            sink = nullptr;
+            return false;
+        }
+        outputs->name = av_strdup("in");
+        outputs->filter_ctx = source;
+        outputs->pad_idx = 0;
+        outputs->next = nullptr;
+        inputs->name = av_strdup("out");
+        inputs->filter_ctx = sink;
+        inputs->pad_idx = 0;
+        inputs->next = nullptr;
+        const QByteArray utf8Description = description.toUtf8();
+        const int parseResult = avfilter_graph_parse_ptr(
+            graph, utf8Description.constData(), &inputs, &outputs, nullptr);
+        avfilter_inout_free(&outputs);
+        avfilter_inout_free(&inputs);
+        if (parseResult < 0 || avfilter_graph_config(graph, nullptr) < 0) {
+            avfilter_graph_free(&graph);
+            source = nullptr;
+            sink = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    void drainSink() {
+        if (!sink || sinkFinished) return;
+        AVFrame *frame = av_frame_alloc();
+        if (!frame) return;
+        for (;;) {
+            av_frame_unref(frame);
+            const int result = av_buffersink_get_frame(sink, frame);
+            if (result == AVERROR(EAGAIN)) break;
+            if (result == AVERROR_EOF) {
+                sinkFinished = true;
+                break;
+            }
+            if (result < 0) {
+                sinkFinished = true;
+                break;
+            }
+            const int outputChannels = frame->ch_layout.nb_channels > 0
+                ? frame->ch_layout.nb_channels : channels;
+            const qint64 byteCount = static_cast<qint64>(frame->nb_samples)
+                * outputChannels * sizeof(qint16);
+            if (frame->format == AV_SAMPLE_FMT_S16 && frame->data[0]
+                && byteCount > 0
+                && byteCount <= std::numeric_limits<int>::max()) {
+                pending.append(
+                    reinterpret_cast<const char *>(frame->data[0]),
+                    static_cast<int>(byteCount));
+            }
+        }
+        av_frame_free(&frame);
+    }
+
+    bool feed(QIODevice *input, qint64 preferredBytes) {
+        if (!source || !input || sourceFlushed) return false;
+        const qint64 frameBytes = channels * sizeof(qint16);
+        qint64 requestBytes = std::max<qint64>(
+            preferredBytes, frameBytes * 4096);
+        requestBytes -= requestBytes % frameBytes;
+        requestBytes = std::min<qint64>(requestBytes, 1024 * 1024);
+        QByteArray block(static_cast<int>(requestBytes), Qt::Uninitialized);
+        qint64 bytesRead = input->read(block.data(), requestBytes);
+        if (bytesRead <= 0) {
+            if (input->atEnd()) {
+                const int flushResult = av_buffersrc_add_frame_flags(
+                    source, nullptr, 0);
+                sourceFlushed = true;
+                if (flushResult < 0) sinkFinished = true;
+                drainSink();
+            }
+            return false;
+        }
+        bytesRead -= bytesRead % frameBytes;
+        if (bytesRead <= 0) return false;
+
+        AVFrame *frame = av_frame_alloc();
+        if (!frame) return false;
+        frame->format = AV_SAMPLE_FMT_S16;
+        frame->sample_rate = sampleRate;
+        av_channel_layout_default(&frame->ch_layout, channels);
+        frame->nb_samples = static_cast<int>(bytesRead / frameBytes);
+        frame->pts = nextPts;
+        nextPts += frame->nb_samples;
+        bool accepted = false;
+        if (av_frame_get_buffer(frame, 0) >= 0) {
+            std::memcpy(frame->data[0], block.constData(),
+                        static_cast<size_t>(bytesRead));
+            accepted = av_buffersrc_add_frame_flags(
+                source, frame, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0;
+        }
+        av_frame_free(&frame);
+        if (accepted) drainSink();
+        return accepted;
+    }
+
+    qint64 read(QIODevice *input, char *data, qint64 maximumLength) {
+        if (!data || maximumLength <= 0 || !graph) return 0;
+        const qint64 frameBytes = channels * sizeof(qint16);
+        maximumLength -= maximumLength % frameBytes;
+        if (maximumLength <= 0) return 0;
+        drainSink();
+        for (int attempt = 0;
+             pendingBytes() == 0 && !sinkFinished && attempt < 64;
+             ++attempt) {
+            if (!feed(input, maximumLength)) {
+                drainSink();
+                if (!sourceFlushed) break;
+            }
+        }
+        const qint64 copied = std::min(maximumLength, pendingBytes());
+        if (copied <= 0) return 0;
+        std::memcpy(data, pending.constData() + pendingOffset,
+                    static_cast<size_t>(copied));
+        pendingOffset += copied;
+        if (pendingOffset >= pending.size()) {
+            pending.clear();
+            pendingOffset = 0;
+        } else if (pendingOffset > 256 * 1024) {
+            pending.remove(0, pendingOffset);
+            pendingOffset = 0;
+        }
+        return copied;
+    }
+};
 
 void VDQtAudioFilterProcessor::configure(
     const QList<VDAudioFilterInstance>& chain,
@@ -201,26 +423,57 @@ VDQtAudioFilterDevice::VDQtAudioFilterDevice(
     open(QIODevice::ReadOnly);
 }
 
+VDQtAudioFilterDevice::~VDQtAudioFilterDevice() = default;
+
 void VDQtAudioFilterDevice::setFilterChain(
     const QList<VDAudioFilterInstance>& chain) {
+    mChain = chain;
     mProcessor.configure(chain, mSampleRate, mChannels);
+    const bool needsVariableRateProcessor = std::any_of(
+        chain.cbegin(), chain.cend(), [](const VDAudioFilterInstance& filter) {
+            return filter.enabled
+                && (filter.type == VDAudioFilterType::Resample
+                    || filter.type == VDAudioFilterType::PitchShift
+                    || filter.type == VDAudioFilterType::TimeStretch);
+        });
+    if (needsVariableRateProcessor) {
+        auto processor = std::make_unique<VariableRateProcessor>();
+        if (processor->configure(chain, mSampleRate, mChannels)) {
+            mVariableProcessor = std::move(processor);
+        } else {
+            qWarning("[Audio filters] Could not initialize the live FFmpeg filter graph.");
+            mVariableProcessor.reset();
+        }
+    } else {
+        mVariableProcessor.reset();
+    }
 }
 
 void VDQtAudioFilterDevice::resetProcessor() {
     mProcessor.reset();
+    if (mVariableProcessor)
+        mVariableProcessor->configure(mChain, mSampleRate, mChannels);
 }
 
 bool VDQtAudioFilterDevice::atEnd() const {
-    return !mSource || mSource->atEnd();
+    if (!mSource) return true;
+    if (mVariableProcessor) {
+        return mVariableProcessor->sinkFinished
+            && mVariableProcessor->pendingBytes() == 0;
+    }
+    return mSource->atEnd();
 }
 
 qint64 VDQtAudioFilterDevice::bytesAvailable() const {
-    return (mSource ? mSource->bytesAvailable() : 0)
+    return (mVariableProcessor ? mVariableProcessor->pendingBytes() : 0)
+        + (mSource ? mSource->bytesAvailable() : 0)
         + QIODevice::bytesAvailable();
 }
 
 qint64 VDQtAudioFilterDevice::readData(char *data, qint64 maximumLength) {
     if (!mSource || !data || maximumLength <= 0) return 0;
+    if (mVariableProcessor)
+        return mVariableProcessor->read(mSource, data, maximumLength);
     const qint64 frameBytes = std::max<qint64>(1, mChannels * sizeof(qint16));
     maximumLength -= maximumLength % frameBytes;
     const qint64 read = mSource->read(data, maximumLength);

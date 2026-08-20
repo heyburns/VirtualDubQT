@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "generatedScriptCommands": [
+    "video.SetInputFormat(i:7)",
+    "video.SetInputMatrix(i:2,i:1)",
+    "video.SetOutputFormat(i:57)",
+    "video.SetOutputMatrix(i:2,i:2)",
+    "video.filters.BeginUpdate()",
+    "video.filters.Clear()",
+    "video.filters.Add(s:invert)",
+    "video.filters.instance[0].SetClipping(i:1,i:0,i:0,i:0)",
+    "video.filters.instance[0].SetRangeFrames(i:3,i:12)",
+    "video.filters.instance[0].AddOpacityCurve()",
+    "video.filters.instance[0].OpacityCurve.AddPoint(i:3,d:0.25,i:1)",
+    "video.filters.instance[0].OpacityCurve.AddPoint(i:12,d:1,i:1)",
+    "video.filters.EndUpdate()",
+    "audio.filters.Clear()",
+    "audio.filters.Add(s:input)",
+    "audio.filters.Add(s:gain)",
+    "audio.filters.instance[1].SetDouble(i:0,d:0.5)",
+    "audio.filters.Add(s:output)",
+    "audio.filters.Connect(i:0,i:0,i:1,i:0)",
+    "audio.filters.Connect(i:1,i:0,i:2,i:0)",
+    "subset.Clear()",
+    "subset.AddRange(i:2,i:3)",
+    "subset.AddMaskedRange(i:6,i:2)",
+    "video.SetRangeFrames(i:1,i:6)",
+    "project.AddTextInfo(s:INAM,s:Parity clip)"
+  ],
+  "timeline": {
+    "mapping": [2, 3, 4, 4, 4, 9, 10],
+    "masked": [false, false, false, true, true, false, false],
+    "sourceToOutputForward": 5
+  },
+  "filters": {
+    "invertRgba": [
+      [245, 235, 225, 255],
+      [55, 105, 155, 128]
+    ],
+    "outsideRangeRgba": [
+      [10, 20, 30, 255],
+      [200, 150, 100, 128]
+    ],
+    "clippedInsideRangeRgba": [[55, 105, 155, 128]],
+    "halfOpacityRgba": [
+      [127, 127, 127, 255],
+      [142, 132, 122, 160]
+    ],
+    "clippedWidth": 1
+  },
+  "audioGainSamples": [2000, -2000, 32767, -32768]
+}

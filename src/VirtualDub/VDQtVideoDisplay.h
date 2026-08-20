@@ -52,6 +52,7 @@ public:
     void setFrameImage(const QImage& img);
     void setLabelText(const QString& text);
     void clearDisplay();
+    const QImage& frameImage() const { return mFrameImage; }
 
     void setZoomLevel(double zoom); // -1.0 for Auto Size
     double zoomLevel() const { return mZoomLevel; }

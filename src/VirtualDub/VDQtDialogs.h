@@ -298,6 +298,7 @@ public:
     explicit VDVideoFilterAddDialog(QWidget *parent = nullptr);
     QString getSelectedFilterName() const;
     VDFilterType getSelectedFilterType() const;
+    QString getSelectedPluginId() const;
 
 private:
     QListWidget *mFilterList;

@@ -7,6 +7,7 @@
 #include <QMap>
 #include <QString>
 #include <QVector>
+#include <memory>
 
 enum class VDAudioFilterType {
     Gain = 0,
@@ -64,6 +65,7 @@ public:
                           int sampleRate,
                           int channels,
                           QObject *parent = nullptr);
+    ~VDQtAudioFilterDevice() override;
 
     void setFilterChain(const QList<VDAudioFilterInstance>& chain);
     void resetProcessor();
@@ -76,10 +78,13 @@ protected:
     qint64 writeData(const char *, qint64) override { return -1; }
 
 private:
+    struct VariableRateProcessor;
     QIODevice *mSource = nullptr;
     int mSampleRate = 0;
     int mChannels = 0;
+    QList<VDAudioFilterInstance> mChain;
     VDQtAudioFilterProcessor mProcessor;
+    std::unique_ptr<VariableRateProcessor> mVariableProcessor;
 };
 
 class VDQtAudioFilterSystem {

@@ -198,6 +198,7 @@ bool appendVideoEncoderArguments(QStringList& args,
         args << "-quality" << QString::number(params.cineformQuality);
         outputPixelFormat = QStringLiteral("yuv422p10le");
     } else if (codecId == QStringLiteral("libx264")
+               || codecId == QStringLiteral("libx264_10bit")
                || codecId == QStringLiteral("libx265")) {
         if (params.rateMode == QStringLiteral("crf"))
             args << "-crf" << QString::number(params.crf);
@@ -209,8 +210,15 @@ bool appendVideoEncoderArguments(QStringList& args,
     } else if (codecId == QStringLiteral("libvpx")
                || codecId == QStringLiteral("libvpx-vp9")
                || codecId == QStringLiteral("libsvtav1")) {
-        args << "-crf" << QString::number(params.crf)
-             << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
+        if (params.rateMode == QStringLiteral("bitrate"))
+            args << "-b:v" << QString("%1k").arg(
+                std::max(1, params.targetBitrateKbps));
+        else
+            args << "-crf" << QString::number(params.crf)
+                 << "-b:v" << "0";
+    } else if (params.rateMode == QStringLiteral("bitrate")
+               && params.targetBitrateKbps > 0) {
+        args << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
     }
 
     if (params.keyframeInterval > 0 && params.keyframeInterval <= 10000)
@@ -241,7 +249,10 @@ bool appendVideoEncoderArguments(QStringList& args,
             }
             outputHasAlpha = (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
         }
-        const bool deliberatePaletteReduction = codecId == QStringLiteral("gif");
+        const bool deliberatePaletteReduction = codecId == QStringLiteral("gif")
+            || (codecId == QStringLiteral("apng")
+                && (outputPixelFormat == QStringLiteral("rgb24")
+                    || outputPixelFormat == QStringLiteral("gray")));
         if (!descriptor
             || (!deliberatePaletteReduction
                 && ((sourceBitDepth > 8 && outputBitDepth < sourceBitDepth)
@@ -291,7 +302,12 @@ void appendContainerArguments(QStringList& args,
         args << "-f" << "avi";
     } else if (container == QStringLiteral("gif")
                || options.outputPath.endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive)) {
-        args << "-loop" << "0" << "-f" << "gif";
+        args << "-loop" << QString::number(std::max(0, options.animationLoopCount))
+             << "-f" << "gif";
+    } else if (container == QStringLiteral("apng")
+               || options.outputPath.endsWith(QStringLiteral(".apng"), Qt::CaseInsensitive)) {
+        args << "-plays" << QString::number(std::max(0, options.animationLoopCount))
+             << "-f" << "apng";
     }
 }
 
@@ -1065,8 +1081,15 @@ bool VDQtVideoExporter::exportRawVideo(
     }
     const int framesToExport = inputFramesToProcess * timing.outputFramesPerInput;
 
+    VDQtFilterSystem::instance().resetRuntimeState();
     QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
-    QImage filteredSample = VDQtFilterSystem::instance().processFrame(sampleFrame);
+    VDFilterFrameContext sampleContext;
+    sampleContext.frameNumber = startFrame;
+    sampleContext.timestampSeconds =
+        decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
+    sampleContext.frameRate = sourceFps;
+    QImage filteredSample = VDQtFilterSystem::instance().processFrame(
+        sampleFrame, sampleContext);
     if (sampleFrame.isNull() || filteredSample.isNull()) {
         reportError(QStringLiteral("The first selected frame could not be decoded and filtered."));
         return false;
@@ -1140,9 +1163,14 @@ bool VDQtVideoExporter::exportRawVideo(
 
         const QImage rawFrame = decoder.getFrameImage(sourceFrame);
         QList<QImage> filteredFrames;
+        VDFilterFrameContext filterContext;
+        filterContext.frameNumber = inputIndex;
+        filterContext.timestampSeconds =
+            decoder.getFrameTimestampSeconds(sourceFrame);
+        filterContext.frameRate = sourceFps;
         if (rawFrame.isNull()
             || !VDQtFilterSystem::instance().processFrameSequence(
-                rawFrame, filteredFrames)
+                rawFrame, filteredFrames, filterContext)
             || filteredFrames.size() != timing.outputFramesPerInput) {
             writeError = QString("Frame %1 could not be decoded and filtered.")
                 .arg(sourceFrame);
@@ -1231,7 +1259,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     // interval. Route them through the frame-accurate render path. Audio is
     // likewise decoded at edit boundaries so removed ranges cannot leak back
     // into a nominal "direct copy" output.
-    if (editedTimeline) {
+    if (editedTimeline && !options.smartRendering) {
         if (videoMode == VideoMode_DirectStreamCopy
             || videoMode == VideoMode_FastRecompress)
             videoMode = VideoMode_NormalRecompress;
@@ -1264,6 +1292,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
     if (!options.videoPixelFormatOverride.trimmed().isEmpty())
         selectedVideoParams.pixFmt = options.videoPixelFormatOverride.trimmed();
+    // Two-pass analysis must see the exact same frame stream twice. The normal
+    // render path records one lossless intermediate and runs both encoder
+    // passes from it; the streaming Fast Recompress pipe cannot be replayed.
+    if (selectedVideoParams.twoPass
+        && videoMode == VideoMode_FastRecompress)
+        videoMode = VideoMode_NormalRecompress;
 
     // Pre-flight check: Video encoder availability
     if (videoMode != VideoMode_DirectStreamCopy && !options.smartRendering) {
@@ -1347,7 +1381,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     // Full processing follows Audio > Source, which may point at a non-default
     // embedded stream or a completely separate media file. Direct copy has no
     // decoded graph and therefore follows the native source stream.
-    const bool sourceHasAudio = audioMode == AudioMode_DirectStreamCopy
+    bool sourceHasAudio = audioMode == AudioMode_DirectStreamCopy
         ? nativeSourceHasAudio : selectedProcessedAudio;
     const QString selectedProcessedAudioPath = audioPlayer
         ? audioPlayer->getSourcePath() : QString();
@@ -1497,7 +1531,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     double shortestFrameDuration = std::numeric_limits<double>::infinity();
     double longestFrameDuration = 0.0;
     const bool hasFrameSelection = startFrame > 0 || endFrame < timelineFrames - 1;
-    if (options.smartRendering && videoMode != VideoMode_DirectStreamCopy) {
+    bool smartEditedDirectCopy = false;
+    QList<VDQtTimelineSegment> smartCopySegments;
+    if (options.smartRendering
+        && (videoMode != VideoMode_DirectStreamCopy || editedTimeline)) {
         const bool hasEnabledFilters = std::any_of(
             VDQtFilterSystem::instance().getActiveChain().cbegin(),
             VDQtFilterSystem::instance().getActiveChain().cend(),
@@ -1507,14 +1544,61 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             && options.decimateFactor <= 1
             && options.preserveEmptyFrames;
         const bool cleanAudio = audioMode == AudioMode_DirectStreamCopy;
-        const bool startsAtRandomAccessPoint =
-            decoder.isKeyFrame(sourceFrameAt(startFrame));
-        const bool endsAtRandomAccessPoint = endFrame == timelineFrames - 1
-            || decoder.isKeyFrame(sourceFrameAt(endFrame + 1));
-        if (!editedTimeline && !decoder.isAvsNative()
-            && !hasEnabledFilters && cleanTiming
-            && cleanAudio && startsAtRandomAccessPoint && endsAtRandomAccessPoint) {
+        const bool hasMaskedSegments = std::any_of(
+            renderTimeline.segments().cbegin(),
+            renderTimeline.segments().cend(),
+            [](const VDQtTimelineSegment& segment) { return segment.masked; });
+        bool boundariesAreRandomAccessPoints = true;
+        if (editedTimeline) {
+            QString rangeError;
+            smartCopySegments = renderTimeline.copyRange(
+                startFrame, static_cast<qint64>(endFrame) + 1,
+                &rangeError);
+            boundariesAreRandomAccessPoints = !smartCopySegments.isEmpty();
+            for (const VDQtTimelineSegment& segment : smartCopySegments) {
+                const qint64 sourceEnd = segment.sourceStartFrame
+                    + segment.frameCount;
+                if (!decoder.isKeyFrame(
+                        static_cast<int>(segment.sourceStartFrame))
+                    || (sourceEnd < totalFrames
+                        && !decoder.isKeyFrame(static_cast<int>(sourceEnd)))) {
+                    boundariesAreRandomAccessPoints = false;
+                    break;
+                }
+            }
+        } else {
+            boundariesAreRandomAccessPoints =
+                decoder.isKeyFrame(sourceFrameAt(startFrame))
+                && (endFrame == timelineFrames - 1
+                    || decoder.isKeyFrame(sourceFrameAt(endFrame + 1)));
+        }
+        const bool canCopy = !decoder.isAvsNative()
+            && !hasEnabledFilters && !hasMaskedSegments
+            && cleanTiming && cleanAudio
+            && boundariesAreRandomAccessPoints
+            && (!editedTimeline
+                || !options.inputPath.endsWith(
+                    QStringLiteral(".ffconcat"), Qt::CaseInsensitive));
+        if (canCopy) {
             videoMode = VideoMode_DirectStreamCopy;
+            smartEditedDirectCopy = editedTimeline;
+        } else if (editedTimeline) {
+            if (videoMode == VideoMode_DirectStreamCopy
+                || videoMode == VideoMode_FastRecompress)
+                videoMode = VideoMode_NormalRecompress;
+            if (audioMode == AudioMode_DirectStreamCopy)
+                audioMode = AudioMode_FullProcessing;
+            sourceHasAudio = selectedProcessedAudio;
+            if (options.includeAudio && nativeSourceHasAudio
+                && !selectedProcessedAudio) {
+                mLastError = QStringLiteral(
+                    "The edited audio stream could not be opened for smart-render fallback.");
+                if (parentWidget)
+                    QMessageBox::critical(parentWidget,
+                                          "Audio Decoder Not Available",
+                                          mLastError);
+                return false;
+            }
         }
     }
     if (options.smartRendering && videoMode != VideoMode_DirectStreamCopy) {
@@ -1524,6 +1608,17 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             if (parentWidget)
                 QMessageBox::critical(
                     parentWidget, "Video Encoder Not Available", error);
+            return false;
+        }
+    }
+    if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
+        QString error;
+        if (!VDQtCodecEngine::instance().checkAudioEncoderAvailable(
+                configuredAudioParams().codecId, &error)) {
+            mLastError = error;
+            if (parentWidget)
+                QMessageBox::critical(parentWidget,
+                                      "Audio Encoder Not Available", error);
             return false;
         }
     }
@@ -1661,6 +1756,49 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         fps = sourceFps / step;
     }
     if (!std::isfinite(fps) || fps <= 0.0) fps = 29.97;
+
+    QTemporaryDir smartRenderDirectory;
+    QString directCopyInputPath = options.inputPath;
+    if (smartEditedDirectCopy) {
+        if (!smartRenderDirectory.isValid()) {
+            mLastError = QStringLiteral(
+                "A temporary directory could not be created for smart rendering.");
+            return false;
+        }
+        const QString manifestPath = smartRenderDirectory.filePath(
+            QStringLiteral("smart-render.ffconcat"));
+        QSaveFile manifest(manifestPath);
+        QByteArray contents("ffconcat version 1.0\n");
+        QString escapedPath = QFileInfo(options.inputPath).absoluteFilePath();
+        escapedPath.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+        for (const VDQtTimelineSegment& segment : smartCopySegments) {
+            const int firstSource = static_cast<int>(segment.sourceStartFrame);
+            const int lastSource = static_cast<int>(
+                segment.sourceStartFrame + segment.frameCount - 1);
+            double inPoint = decoder.getFrameTimestampSeconds(firstSource);
+            double outPoint = decoder.getFrameTimestampSeconds(lastSource);
+            double lastDuration = decoder.getFrameDurationSeconds(lastSource);
+            if (!std::isfinite(inPoint)) inPoint = firstSource / sourceFps;
+            if (!std::isfinite(outPoint)) outPoint = lastSource / sourceFps;
+            if (!std::isfinite(lastDuration) || lastDuration <= 0.0)
+                lastDuration = 1.0 / sourceFps;
+            inPoint += sourceAudioProbe.videoStartOffsetSeconds;
+            outPoint += sourceAudioProbe.videoStartOffsetSeconds + lastDuration;
+            contents += "file '" + escapedPath.toUtf8() + "'\n";
+            contents += "inpoint " + QByteArray::number(
+                std::max(0.0, inPoint), 'f', 9) + "\n";
+            contents += "outpoint " + QByteArray::number(
+                std::max(inPoint + 1.0 / sourceFps, outPoint), 'f', 9) + "\n";
+        }
+        if (!manifest.open(QIODevice::WriteOnly)
+            || manifest.write(contents) != contents.size()
+            || !manifest.commit()) {
+            mLastError = QStringLiteral(
+                "The smart-render packet manifest could not be written.");
+            return false;
+        }
+        directCopyInputPath = manifestPath;
+    }
 
     QTemporaryFile stagedOutput(stagedOutputTemplate(options.outputPath));
     stagedOutput.setAutoRemove(true);
@@ -1959,7 +2097,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             return false;
         }
 
-        if (hasFrameSelection) {
+        if (hasFrameSelection && !smartEditedDirectCopy) {
             if (parentWidget && !options.smartRendering) {
                 const auto answer = QMessageBox::warning(
                     parentWidget,
@@ -1981,10 +2119,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             const double inputStartSeconds = std::max(
                 0.0, sourceAudioProbe.videoStartOffsetSeconds + sourceStartSeconds);
             args << "-ss" << QString::number(inputStartSeconds, 'f', 9);
-            appendInputFile(args, options.inputPath);
+            appendInputFile(args, directCopyInputPath);
             args << "-t" << QString::number(sourceDurationSeconds, 'f', 6);
         } else {
-            appendInputFile(args, options.inputPath);
+            appendInputFile(args, directCopyInputPath);
         }
         if (separateProcessedAudioInput)
             appendInputFile(args, selectedProcessedAudioPath);
@@ -2084,7 +2222,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     double sourceSelectionOutputFps = fps;
     int filterFramesPerInput = 1;
     if (applyFilters) {
-        QImage filteredSample = VDQtFilterSystem::instance().processFrame(sampleFrame);
+        VDQtFilterSystem::instance().resetRuntimeState();
+        VDFilterFrameContext sampleContext;
+        sampleContext.frameNumber = startFrame;
+        sampleContext.timestampSeconds =
+            decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
+        sampleContext.frameRate = sourceFps;
+        QImage filteredSample = VDQtFilterSystem::instance().processFrame(
+            sampleFrame, sampleContext);
         if (filteredSample.isNull()) {
             if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", "The filter chain rejected the first frame.");
             return false;
@@ -2110,6 +2255,22 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     // Fetch user-configured codec settings
     const VDVideoCodecParams& vParams = selectedVideoParams;
     const VDAudioCodecParams aParams = configuredAudioParams();
+    const QString twoPassCodec = vParams.codecId == QStringLiteral("libx264_10bit")
+        ? QStringLiteral("libx264") : vParams.codecId;
+    const bool twoPassRequested = vParams.twoPass;
+    const bool twoPassSupported = twoPassCodec == QStringLiteral("libx264")
+        || twoPassCodec == QStringLiteral("libx265")
+        || twoPassCodec == QStringLiteral("libvpx")
+        || twoPassCodec == QStringLiteral("libvpx-vp9");
+    if (twoPassRequested
+        && (vParams.rateMode != QStringLiteral("bitrate")
+            || !twoPassSupported)) {
+        mLastError = QStringLiteral(
+            "Two-pass encoding requires bitrate mode and an x264, x265, VP8, or VP9 encoder.");
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Two-Pass Encoding Error", mLastError);
+        return false;
+    }
 
     // 1. Audio Source Configuration
     QString audioSrcMedia;
@@ -2295,69 +2456,119 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     bool hasAudioInput = false;
+    double audioInputStart = 0.0;
     if (isDirectCopyMediaAudio) {
         hasAudioInput = true;
         // This is a second input whose time origin is the container, while the
         // editor timeline is normalized to the first video timestamp. Seek by
         // both offsets so leading pre-video audio is not muxed at video t=0.
-        const double audioInputStart = std::max(
+        audioInputStart = std::max(
             0.0, sourceAudioProbe.videoStartOffsetSeconds + sourceStartSeconds);
-        if (audioInputStart > 1e-9)
+        if (!twoPassRequested && audioInputStart > 1e-9)
             args << "-ss" << QString::number(audioInputStart, 'f', 9);
-        appendInputFile(args, audioSrcMedia);
+        if (!twoPassRequested) appendInputFile(args, audioSrcMedia);
     } else if (!tempAudioPath.isEmpty() && QFile::exists(tempAudioPath)) {
         hasAudioInput = true;
-        args << "-i" << tempAudioPath;
+        if (!twoPassRequested) args << "-i" << tempAudioPath;
     }
 
-    // 3. Stream mappings
-    args << "-map" << "0:v:0";
-    if (hasAudioInput) {
-        if (isDirectCopyMediaAudio)
-            args << "-map" << QString("1:%1").arg(sourceAudioProbe.bestAudioStreamIndex);
-        else
-            args << "-map" << "1:a:0";
-    }
-
-    // 4. Video Codec & Options
     const QString container = options.containerType.toLower();
     QString videoEncodingError;
-    if (!appendVideoEncoderArguments(
-            args, vParams, decoder.getSourceBitDepth(), decoder.sourceHasAlpha(),
-            preserveNativeVfr, container, &videoEncodingError)) {
-        if (parentWidget)
-            QMessageBox::critical(parentWidget, "Video Precision Error", videoEncodingError);
-        return false;
-    }
-    if (preserveNativeVfr) {
-        args << "-fps_mode" << "vfr"
-             << "-enc_time_base:v" << "1:1000000"
-             << "-avoid_negative_ts" << "disabled";
-    }
-
-    // 5. Audio Codec & Options
-    if (hasAudioInput) {
-        if (audioMode == AudioMode_DirectStreamCopy) {
-            // Native AviSynth audio is staged in a WAV that already carries
-            // its true PCM integer/float depth. Stream-copy that codec too;
-            // forcing pcm_s16le here silently quantized 24/32-bit and float
-            // clips. Incompatible destination containers now fail visibly.
-            args << "-c:a" << "copy";
-        } else {
-            args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(aParams);
+    QString twoPassIntermediatePath;
+    QString twoPassLogPath;
+    QStringList firstPassArgs;
+    QStringList secondPassArgs;
+    const auto appendFinalEncoding = [&](QStringList& target,
+                                         bool includeEncodedAudio) -> bool {
+        target << "-map" << "0:v:0";
+        if (includeEncodedAudio && hasAudioInput) {
+            target << "-map"
+                   << (isDirectCopyMediaAudio
+                           ? QString("1:%1").arg(
+                                 sourceAudioProbe.bestAudioStreamIndex)
+                           : QStringLiteral("1:a:0"));
         }
+        if (!appendVideoEncoderArguments(
+                target, vParams, decoder.getSourceBitDepth(),
+                decoder.sourceHasAlpha(), preserveNativeVfr, container,
+                &videoEncodingError))
+            return false;
+        if (preserveNativeVfr)
+            target << "-fps_mode" << "vfr"
+                   << "-enc_time_base:v" << "1:1000000"
+                   << "-avoid_negative_ts" << "disabled";
+        if (includeEncodedAudio && hasAudioInput) {
+            if (audioMode == AudioMode_DirectStreamCopy)
+                target << "-c:a" << "copy";
+            else
+                target << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(aParams);
+            target << "-t" << QString::number(outputDurationSeconds, 'f', 9);
+        }
+        return true;
+    };
 
-        // Bound the mux to the generated video duration. Using -shortest here
-        // would let a slightly shorter audio stream truncate valid video frames.
-        const double muxDuration = outputDurationSeconds;
-        args << "-t" << QString::number(muxDuration, 'f', 9);
+    if (twoPassRequested) {
+        if (!temporaryDirectory.isValid()) {
+            mLastError = QStringLiteral(
+                "A temporary directory could not be created for two-pass encoding.");
+            return false;
+        }
+        twoPassIntermediatePath = temporaryDirectory.filePath(
+            QStringLiteral("video-intermediate.nut"));
+        twoPassLogPath = temporaryDirectory.filePath(
+            QStringLiteral("video-passlog"));
+        args << "-map" << "0:v:0"
+             << "-an" << "-c:v" << "rawvideo"
+             << "-pix_fmt" << rawInputPixelFormat
+             << "-f" << "nut" << twoPassIntermediatePath;
+
+        const auto beginPassArguments = [&]() {
+            QStringList pass{QStringLiteral("-y"), QStringLiteral("-i"),
+                             twoPassIntermediatePath};
+            return pass;
+        };
+        firstPassArgs = beginPassArguments();
+        if (!appendFinalEncoding(firstPassArgs, false)) {
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Video Precision Error",
+                                      videoEncodingError);
+            return false;
+        }
+        firstPassArgs << "-pass" << "1"
+                      << "-passlogfile" << twoPassLogPath
+                      << "-an" << "-f" << "null" << "/dev/null";
+
+        secondPassArgs = beginPassArguments();
+        if (hasAudioInput) {
+            if (isDirectCopyMediaAudio && audioInputStart > 1e-9)
+                secondPassArgs << "-ss"
+                               << QString::number(audioInputStart, 'f', 9);
+            appendInputFile(secondPassArgs,
+                            isDirectCopyMediaAudio ? audioSrcMedia
+                                                   : tempAudioPath);
+        }
+        if (!appendFinalEncoding(secondPassArgs, true)) {
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Video Precision Error",
+                                      videoEncodingError);
+            return false;
+        }
+        secondPassArgs << "-pass" << "2"
+                       << "-passlogfile" << twoPassLogPath;
+        appendMetadataArguments(secondPassArgs, options.metadata);
+        appendContainerArguments(secondPassArgs, options);
+        secondPassArgs << processOutputPath;
+    } else {
+        if (!appendFinalEncoding(args, true)) {
+            if (parentWidget)
+                QMessageBox::critical(parentWidget, "Video Precision Error",
+                                      videoEncodingError);
+            return false;
+        }
+        appendMetadataArguments(args, options.metadata);
+        appendContainerArguments(args, options);
+        args << processOutputPath;
     }
-
-    // 6. Container Format & Output Path
-    appendMetadataArguments(args, options.metadata);
-    appendContainerArguments(args, options);
-
-    args << processOutputPath;
 
     qDebug() << "[Exporter] Launching ffmpeg with args:" << args.join(" ");
 
@@ -2452,7 +2663,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
         QList<QImage> filteredFrames;
         if (applyFilters) {
-            if (!VDQtFilterSystem::instance().processFrameSequence(rawFrame, filteredFrames)
+            VDFilterFrameContext filterContext;
+            filterContext.frameNumber = timelineFrame;
+            filterContext.timestampSeconds =
+                decoder.getFrameTimestampSeconds(f);
+            filterContext.frameRate = sourceFps;
+            if (!VDQtFilterSystem::instance().processFrameSequence(
+                    rawFrame, filteredFrames, filterContext)
                 || filteredFrames.size() != filterFramesPerInput) {
                 appendBounded(diagnostics, QString("The temporal filter chain failed at source frame %1.\n").arg(f).toUtf8());
                 writeFailed = true;
@@ -2560,10 +2777,33 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
     if (!cancelled && !writeFailed) {
         ffmpeg.closeWriteChannel();
-        progress.setLabelText("Finalizing video stream and container metadata...");
+        progress.setLabelText(twoPassRequested
+            ? QStringLiteral("Finalizing the lossless two-pass source...")
+            : QStringLiteral("Finalizing video stream and container metadata..."));
         progress.setValue(96);
         QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
         processOk = waitForProcess(ffmpeg, progress, diagnostics, cancelled);
+    }
+
+    if (twoPassRequested && processOk && !cancelled && !writeFailed) {
+        processOk = validOutputFile(twoPassIntermediatePath);
+        QProcess passProcess;
+        if (processOk) {
+            progress.setLabelText(QStringLiteral(
+                "Two-pass encoding: analyzing video (pass 1 of 2)..."));
+            progress.setValue(97);
+            passProcess.start(QStringLiteral("ffmpeg"), firstPassArgs);
+            processOk = passProcess.waitForStarted(3000)
+                && waitForProcess(passProcess, progress, diagnostics, cancelled);
+        }
+        if (processOk && !cancelled) {
+            progress.setLabelText(QStringLiteral(
+                "Two-pass encoding: creating final output (pass 2 of 2)..."));
+            progress.setValue(98);
+            passProcess.start(QStringLiteral("ffmpeg"), secondPassArgs);
+            processOk = passProcess.waitForStarted(3000)
+                && waitForProcess(passProcess, progress, diagnostics, cancelled);
+        }
     }
 
     progress.setValue(100);

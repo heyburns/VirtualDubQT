@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QTimer>
+#include <QList>
 #include <algorithm>
 
 enum VDQtTransportAction {
@@ -29,6 +30,7 @@ class VDTimelineSlider : public QSlider {
 public:
     explicit VDTimelineSlider(Qt::Orientation orientation, QWidget *parent = nullptr);
     void setSelection(int start, int end);
+    void setMarkers(const QList<qint64>& markers);
 
 protected:
     void paintEvent(QPaintEvent *ev) override;
@@ -36,6 +38,7 @@ protected:
 private:
     int mSelStart = 0;
     int mSelEnd = 0;
+    QList<qint64> mMarkers;
 };
 
 class VDQtPositionControlWidget : public QWidget {
@@ -72,6 +75,12 @@ public:
     }
     void SetSelection(qint64 start, qint64 end, bool updateNow = true);
     void SetFrameRate(double frameRate) { mFrameRate = frameRate; UpdateStatusText(); }
+    void SetMarkers(const QList<qint64>& markers) { mSlider->setMarkers(markers); }
+    void SetZoomRange(qint64 start, qint64 end);
+    void ClearZoomRange();
+    bool HasZoomRange() const { return mZoomEnabled; }
+    qint64 GetZoomStart() const { return mZoomStart; }
+    qint64 GetZoomEnd() const { return mZoomEnd; }
 
 Q_SIGNALS:
     void positionChanged(int frame);
@@ -99,6 +108,9 @@ private:
     QTimer mScrubTimer;
     int mPendingScrubPos = -1;
     bool mCurrentFrameIsKey = false;
+    bool mZoomEnabled = false;
+    qint64 mZoomStart = 0;
+    qint64 mZoomEnd = 0;
 
     QPushButton *btnStart;
     QPushButton *btnPrevKey;

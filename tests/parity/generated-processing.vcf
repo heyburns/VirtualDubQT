@@ -1,0 +1,27 @@
+// Representative processing script in the form emitted by VirtualDub2 Job.cpp.
+VirtualDub.video.SetMode(3);
+VirtualDub.video.SetInputFormat(7);
+VirtualDub.video.SetInputMatrix(2, 1);
+VirtualDub.video.SetOutputFormat(57);
+VirtualDub.video.SetOutputMatrix(2, 2);
+VirtualDub.video.filters.BeginUpdate();
+VirtualDub.video.filters.Clear();
+declare width = 320 * 2;
+declare resize = VirtualDub.video.filters.Add("resize");
+VirtualDub.video.filters.instance[resize].Config(width, 360, "bicubic");
+VirtualDub.video.filters.instance[0].SetClipping(1, 2, 3, 4);
+VirtualDub.video.filters.instance[0].SetRangeFrames(3, 12);
+declare curve = VirtualDub.video.filters.instance[0].AddOpacityCurve();
+curve.AddPoint(3.0, 0.25, 1);
+curve.AddPoint(12.0, 1.0, 1);
+VirtualDub.video.filters.EndUpdate();
+VirtualDub.audio.filters.Clear();
+VirtualDub.audio.filters.Add("input");
+VirtualDub.audio.filters.Add("gain");
+VirtualDub.audio.filters.instance[1].SetDouble(0, 0.5);
+VirtualDub.audio.filters.Add("output");
+VirtualDub.audio.filters.Connect(0, 0, 1, 0);
+VirtualDub.audio.filters.Connect(1, 0, 2, 0);
+VirtualDub.audio.EnableFilterGraph(1);
+VirtualDub.SetPreferencesInt("frame cache", 64);
+VirtualDub.Exit(0);

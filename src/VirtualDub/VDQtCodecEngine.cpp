@@ -1,6 +1,11 @@
 #include "VDQtCodecEngine.h"
 #include "VDQtCodecSettings.h"
 #include <algorithm>
+#include <QSet>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
 
 VDQtCodecEngine::VDQtCodecEngine() {
     resetToDefaults();
@@ -15,7 +20,7 @@ VDQtCodecEngine& VDQtCodecEngine::instance() {
 }
 
 QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
-    return {
+    const QList<VDVideoCodecInfo> preferred = {
         {QStringLiteral("rawvideo"), QStringLiteral("Uncompressed RGB/YCbCr"),
          QStringLiteral("Uncompressed native frames."), false, false, false, false, false, true},
         {QStringLiteral("prores_ks"), QStringLiteral("Apple ProRes"),
@@ -41,10 +46,49 @@ QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
         {QStringLiteral("cfhd"), QStringLiteral("GoPro CineForm"),
          QStringLiteral("Wavelet CineForm intermediate codec."), false, false, false, false, false, false}
     };
+    QList<VDVideoCodecInfo> result;
+    QSet<QString> included;
+    for (const VDVideoCodecInfo& info : preferred) {
+        QString probeId = info.id;
+        if (probeId == QStringLiteral("libx264_10bit")) probeId = QStringLiteral("libx264");
+        else if (probeId == QStringLiteral("libx265_lossless")) probeId = QStringLiteral("libx265");
+        if (probeId == QStringLiteral("rawvideo")
+            || avcodec_find_encoder_by_name(probeId.toUtf8().constData())) {
+            result.append(info);
+            included.insert(info.id);
+            included.insert(probeId);
+        }
+    }
+
+    QList<VDVideoCodecInfo> discovered;
+    void *iterator = nullptr;
+    const AVCodec *codec = nullptr;
+    while ((codec = av_codec_iterate(&iterator))) {
+        if (!av_codec_is_encoder(codec) || codec->type != AVMEDIA_TYPE_VIDEO
+            || !codec->name) continue;
+        const QString id = QString::fromUtf8(codec->name);
+        if (included.contains(id)) continue;
+        const AVCodecDescriptor *descriptor = avcodec_descriptor_get(codec->id);
+        const bool lossless = descriptor
+            && (descriptor->props & AV_CODEC_PROP_LOSSLESS);
+        const QString longName = codec->long_name
+            ? QString::fromUtf8(codec->long_name) : id;
+        const bool controls = id.startsWith(QStringLiteral("lib"));
+        discovered.append({id, longName,
+            QStringLiteral("Installed FFmpeg video encoder (%1).").arg(id),
+            controls, !lossless, controls, controls, controls, lossless});
+        included.insert(id);
+    }
+    std::sort(discovered.begin(), discovered.end(),
+        [](const VDVideoCodecInfo& left, const VDVideoCodecInfo& right) {
+            return left.name.compare(right.name, Qt::CaseInsensitive) < 0;
+        });
+    result.append(discovered);
+    return result;
 }
 
 QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
-    return {
+    const QList<VDAudioCodecInfo> preferred = {
         {QStringLiteral("pcm_s16le"), QStringLiteral("PCM 16-bit"),
          QStringLiteral("Uncompressed signed 16-bit PCM."), false, false, true},
         {QStringLiteral("pcm_s24le"), QStringLiteral("PCM 24-bit"),
@@ -62,6 +106,38 @@ QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
         {QStringLiteral("flac"), QStringLiteral("FLAC"),
          QStringLiteral("Lossless FLAC audio encoder."), false, false, true}
     };
+    QList<VDAudioCodecInfo> result;
+    QSet<QString> included;
+    for (const VDAudioCodecInfo& info : preferred) {
+        if (avcodec_find_encoder_by_name(info.id.toUtf8().constData())) {
+            result.append(info);
+            included.insert(info.id);
+        }
+    }
+    QList<VDAudioCodecInfo> discovered;
+    void *iterator = nullptr;
+    const AVCodec *codec = nullptr;
+    while ((codec = av_codec_iterate(&iterator))) {
+        if (!av_codec_is_encoder(codec) || codec->type != AVMEDIA_TYPE_AUDIO
+            || !codec->name) continue;
+        const QString id = QString::fromUtf8(codec->name);
+        if (included.contains(id)) continue;
+        const AVCodecDescriptor *descriptor = avcodec_descriptor_get(codec->id);
+        const bool lossless = descriptor
+            && (descriptor->props & AV_CODEC_PROP_LOSSLESS);
+        const QString longName = codec->long_name
+            ? QString::fromUtf8(codec->long_name) : id;
+        discovered.append({id, longName,
+            QStringLiteral("Installed FFmpeg audio encoder (%1).").arg(id),
+            !lossless, !lossless, lossless});
+        included.insert(id);
+    }
+    std::sort(discovered.begin(), discovered.end(),
+        [](const VDAudioCodecInfo& left, const VDAudioCodecInfo& right) {
+            return left.name.compare(right.name, Qt::CaseInsensitive) < 0;
+        });
+    result.append(discovered);
+    return result;
 }
 
 VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &codecId) {
@@ -175,10 +251,6 @@ void VDQtCodecEngine::resetToDefaults() {
     mAudioParams.sampleRate = 0;
     mAudioParams.channels = 0;
     mAudioParams.bitDepth = 16;
-}
-
-extern "C" {
-#include <libavcodec/avcodec.h>
 }
 
 VDAudioCodecParams VDQtCodecEngine::audioParamsFromConfig(

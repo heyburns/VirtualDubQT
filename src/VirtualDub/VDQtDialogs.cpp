@@ -31,12 +31,14 @@ static const char* kDialogStyle =
 namespace {
 
 bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
-    if (!filter || filter->params.isEmpty()) return true;
+    if (!filter || (filter->params.isEmpty() && filter->stringParams.isEmpty()))
+        return true;
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Filter: %1").arg(filter->name));
     dialog.setStyleSheet(kDialogStyle);
     auto *form = new QFormLayout(&dialog);
     QMap<QString, QDoubleSpinBox *> controls;
+    QMap<QString, QLineEdit *> textControls;
     for (auto it = filter->params.cbegin(); it != filter->params.cend(); ++it) {
         auto *control = new QDoubleSpinBox(&dialog);
         control->setDecimals(3);
@@ -81,6 +83,13 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
         form->addRow(key, control);
         controls.insert(key, control);
     }
+    for (auto it = filter->stringParams.cbegin();
+         it != filter->stringParams.cend(); ++it) {
+        auto *control = new QLineEdit(it.value(), &dialog);
+        control->setMaxLength(65536);
+        form->addRow(it.key(), control);
+        textControls.insert(it.key(), control);
+    }
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     QObject::connect(buttons, &QDialogButtonBox::accepted,
@@ -91,6 +100,8 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
     if (dialog.exec() != QDialog::Accepted) return false;
     for (auto it = controls.cbegin(); it != controls.cend(); ++it)
         filter->params[it.key()] = it.value()->value();
+    for (auto it = textControls.cbegin(); it != textControls.cend(); ++it)
+        filter->stringParams[it.key()] = it.value()->text();
     return true;
 }
 
@@ -283,7 +294,16 @@ void VDVideoFiltersDialog::onAddClicked() {
     VDVideoFilterAddDialog addDlg(this);
     if (addDlg.exec() == QDialog::Accepted) {
         VDFilterType type = addDlg.getSelectedFilterType();
-        if (type == VDFilterType::SixAxis) {
+        if (type == VDFilterType::Plugin) {
+            if (!VDQtFilterSystem::instance().addPluginFilter(
+                    addDlg.getSelectedPluginId())) {
+                QMessageBox::critical(
+                    this, QStringLiteral("Plugin Filter"),
+                    QStringLiteral("The selected native plugin is no longer available."));
+                return;
+            }
+            refreshFilterTable();
+        } else if (type == VDFilterType::SixAxis) {
             QMap<QString, double> defParams;
             defParams["intensity"] = 1.0;
             defParams["red_green"] = 0.0;
@@ -378,6 +398,8 @@ void VDVideoFiltersDialog::onAddClicked() {
                 }
                 VDQtFilterSystem::instance().updateFilterParams(
                     lastIndex, added.params);
+                VDQtFilterSystem::instance().updateFilterStringParams(
+                    lastIndex, added.stringParams);
             }
             refreshFilterTable();
         }
@@ -419,7 +441,14 @@ void VDVideoFiltersDialog::onConfigureClicked() {
 
     auto filter = chain[row];
 
-    if (filter.type == VDFilterType::SixAxis) {
+    if (filter.type == VDFilterType::Plugin) {
+        QMessageBox::information(
+            this, QStringLiteral("Native Plugin Filter"),
+            QStringLiteral(
+                "This Linux-native VDX filter is active. Its original configuration "
+                "window uses the Win32 dialog API and cannot be displayed by the native "
+                "Qt host. Serialized settings loaded from a processing file are retained."));
+    } else if (filter.type == VDFilterType::SixAxis) {
         VD6AxisFilterDialog sixDlg(filter.params, mSourceFrame, this);
         if (sixDlg.exec() == QDialog::Accepted) {
             VDQtFilterSystem::instance().updateFilterParams(row, sixDlg.getParams());
@@ -464,6 +493,8 @@ void VDVideoFiltersDialog::onConfigureClicked() {
     } else {
         if (configureGenericVideoFilter(&filter, this)) {
             VDQtFilterSystem::instance().updateFilterParams(row, filter.params);
+            VDQtFilterSystem::instance().updateFilterStringParams(
+                row, filter.stringParams);
             refreshFilterTable();
         }
     }
@@ -2247,6 +2278,12 @@ VDFilterType VDVideoFilterAddDialog::getSelectedFilterType() const {
     return VDFilterType::Grayscale;
 }
 
+QString VDVideoFilterAddDialog::getSelectedPluginId() const {
+    const int row = mFilterList->currentRow();
+    return row >= 0 && row < mAvailableFilters.size()
+        ? mAvailableFilters[row].pluginId : QString();
+}
+
 // -----------------------------------------------------------------------------
 // VDFrameRateDialog Implementation (Matching Screenshot)
 // -----------------------------------------------------------------------------
@@ -3220,33 +3257,20 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
 
     // Left List
     mCodecList = new QListWidget(this);
-    const struct CodecDisplayEntry {
-        const char *display;
-        const char *id;
-        const char *fourcc;
-        const char *pixfmt;
-        bool delta;
-    } kCodecs[] = {
-        { "(Uncompressed RGB/YCbCr)", "(Uncompressed)", "DIB ", "rgb24", false },
-        { "FFMPEG / Apple ProRes (iCodec Pro)", "prores_ks", "apch", "yuv422p10le", false },
-        { "FFMPEG / VP8", "libvpx", "VP80", "yuv420p", true },
-        { "FFMPEG / VP9", "libvpx-vp9", "VP90", "yuv420p", true },
-        { "FFMPEG / SVT-AV1", "libsvtav1", "AV01", "yuv420p", true },
-        { "FFMPEG / x265", "libx265", "hvc1", "yuv420p", true },
-        { "FFMPEG / x265 lossless", "libx265_lossless", "hvc1", "yuv420p", false },
-        { "FFMPEG FFV1 lossless codec", "ffv1", "ffv1", "yuv420p", false },
-        { "FFMPEG Huffyuv lossless codec", "huffyuv", "hfyu", "yuv422p", false },
-        { "GoPro CineForm (native)", "cfhd", "CFHD", "yuv422p10le", false },
-        { "x264 10 bit - H.264/MPEG-4 AVC codec", "libx264_10bit", "avc1", "yuv420p10le", true },
-        { "x264 8 bit - H.264/MPEG-4 AVC codec", "libx264", "avc1", "yuv420p", true }
-    };
-
-    for (const auto& entry : kCodecs) {
-        QListWidgetItem *item = new QListWidgetItem(entry.display, mCodecList);
-        item->setData(Qt::UserRole, entry.id);
-        item->setData(Qt::UserRole + 1, entry.fourcc);
-        item->setData(Qt::UserRole + 2, entry.pixfmt);
-        item->setData(Qt::UserRole + 3, entry.delta);
+    const auto codecs = VDQtCodecEngine::instance().getAvailableVideoCodecs();
+    for (const VDVideoCodecInfo& codec : codecs) {
+        QListWidgetItem *item = new QListWidgetItem(codec.name, mCodecList);
+        item->setToolTip(codec.description);
+        item->setData(Qt::UserRole, codec.id);
+        const QString fourcc = codec.id == QStringLiteral("rawvideo")
+            ? QStringLiteral("DIB ")
+            : codec.id.left(4).toUpper().leftJustified(4, QLatin1Char(' '));
+        item->setData(Qt::UserRole + 1, fourcc);
+        item->setData(Qt::UserRole + 2,
+                      VDQtCodecEngine::getDefaultVideoParamsForCodec(codec.id).pixFmt);
+        item->setData(Qt::UserRole + 3,
+                      !codec.isLossless && codec.id != QStringLiteral("rawvideo"));
+        item->setData(Qt::UserRole + 4, codec.description);
     }
     topLayout->addWidget(mCodecList, 1);
 
@@ -3336,7 +3360,8 @@ VDVideoCompressionDialog::VDVideoCompressionDialog(QWidget *parent)
             break;
         }
     }
-    if (mCodecList->currentRow() < 0) mCodecList->setCurrentRow(1); // Default to ProRes
+    if (mCodecList->currentRow() < 0 && mCodecList->count() > 0)
+        mCodecList->setCurrentRow(0);
 
     onCodecSelectionChanged();
 }
@@ -3356,6 +3381,7 @@ void VDVideoCompressionDialog::onCodecSelectionChanged() {
     mLabelDeltaFrames->setText(delta ? "Yes" : "No");
     mLabelFourCC->setText(QString("'%1'").arg(fourcc));
     mLabelPixFmtText->setText(params.pixFmt.toUpper());
+    mInfoText->setText(item->data(Qt::UserRole + 4).toString());
 }
 
 void VDVideoCompressionDialog::onPixelFormatClicked() {
@@ -3445,6 +3471,20 @@ void VDVideoCompressionDialog::onConfigureClicked() {
         crfBox->setRange(0, 51);
         crfBox->setValue(params.crf);
 
+        QComboBox *rateMode = new QComboBox(&dlg);
+        rateMode->addItem("Constant quality (CRF)", "crf");
+        rateMode->addItem("Target bitrate", "bitrate");
+        const int rateIndex = rateMode->findData(params.rateMode);
+        if (rateIndex >= 0) rateMode->setCurrentIndex(rateIndex);
+        QSpinBox *bitrateBox = new QSpinBox(&dlg);
+        bitrateBox->setRange(1, 1000000);
+        bitrateBox->setSuffix(" kbps");
+        bitrateBox->setValue(params.targetBitrateKbps > 0
+                                 ? params.targetBitrateKbps : 6000);
+        QCheckBox *twoPass = new QCheckBox(
+            "Use two-pass encoding (bitrate mode)", &dlg);
+        twoPass->setChecked(params.twoPass);
+
         QComboBox *presetCombo = new QComboBox(&dlg);
         presetCombo->addItems({"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"});
         int pIdx = presetCombo->findText(params.preset);
@@ -3455,9 +3495,23 @@ void VDVideoCompressionDialog::onConfigureClicked() {
         keyframeBox->setRange(0, 1000);
         keyframeBox->setValue(params.keyframeInterval > 0 ? params.keyframeInterval : 250);
 
+        fl->addRow("Rate control:", rateMode);
         fl->addRow("Constant Rate Factor (CRF 0..51):", crfBox);
+        fl->addRow("Target bitrate:", bitrateBox);
+        fl->addRow(twoPass);
         fl->addRow("Speed Preset:", presetCombo);
         fl->addRow("Keyframe Interval (GOP, 250 default):", keyframeBox);
+        const auto refreshRateMode = [=]() {
+            const bool bitrate = rateMode->currentData().toString()
+                == QStringLiteral("bitrate");
+            crfBox->setEnabled(!bitrate);
+            bitrateBox->setEnabled(bitrate);
+            twoPass->setEnabled(bitrate);
+            if (!bitrate) twoPass->setChecked(false);
+        };
+        connect(rateMode, &QComboBox::currentIndexChanged, &dlg,
+                [refreshRateMode](int) { refreshRateMode(); });
+        refreshRateMode();
 
         QDialogButtonBox *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
         connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -3465,7 +3519,10 @@ void VDVideoCompressionDialog::onConfigureClicked() {
         fl->addRow(bb);
 
         if (dlg.exec() == QDialog::Accepted) {
+            params.rateMode = rateMode->currentData().toString();
             params.crf = crfBox->value();
+            params.targetBitrateKbps = bitrateBox->value();
+            params.twoPass = twoPass->isChecked();
             params.preset = presetCombo->currentText();
             params.keyframeInterval = keyframeBox->value();
             VDQtCodecEngine::instance().setVideoParamsForCodec(codecId, params);
@@ -3479,13 +3536,40 @@ void VDVideoCompressionDialog::onConfigureClicked() {
         QSpinBox *crfBox = new QSpinBox(&dlg);
         crfBox->setRange(0, 63);
         crfBox->setValue(params.crf);
+        QComboBox *rateMode = new QComboBox(&dlg);
+        rateMode->addItem("Constant quality", "crf");
+        rateMode->addItem("Target bitrate", "bitrate");
+        const int rateIndex = rateMode->findData(params.rateMode);
+        if (rateIndex >= 0) rateMode->setCurrentIndex(rateIndex);
+        QSpinBox *bitrateBox = new QSpinBox(&dlg);
+        bitrateBox->setRange(1, 1000000);
+        bitrateBox->setSuffix(" kbps");
+        bitrateBox->setValue(params.targetBitrateKbps > 0
+                                 ? params.targetBitrateKbps : 3000);
+        QCheckBox *twoPass = new QCheckBox(
+            "Use two-pass encoding (bitrate mode)", &dlg);
+        twoPass->setChecked(params.twoPass);
 
         QSpinBox *keyframeBox = new QSpinBox(&dlg);
         keyframeBox->setRange(0, 1000);
         keyframeBox->setValue(params.keyframeInterval > 0 ? params.keyframeInterval : (codecId == "libvpx-vp9" ? 240 : 120));
 
+        fl->addRow("Rate control:", rateMode);
         fl->addRow("Constant Rate Factor (CRF 0..63):", crfBox);
+        fl->addRow("Target bitrate:", bitrateBox);
+        fl->addRow(twoPass);
         fl->addRow("Keyframe Interval (GOP):", keyframeBox);
+        const auto refreshRateMode = [=]() {
+            const bool bitrate = rateMode->currentData().toString()
+                == QStringLiteral("bitrate");
+            crfBox->setEnabled(!bitrate);
+            bitrateBox->setEnabled(bitrate);
+            twoPass->setEnabled(bitrate);
+            if (!bitrate) twoPass->setChecked(false);
+        };
+        connect(rateMode, &QComboBox::currentIndexChanged, &dlg,
+                [refreshRateMode](int) { refreshRateMode(); });
+        refreshRateMode();
 
         QDialogButtonBox *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
         connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -3493,7 +3577,10 @@ void VDVideoCompressionDialog::onConfigureClicked() {
         fl->addRow(bb);
 
         if (dlg.exec() == QDialog::Accepted) {
+            params.rateMode = rateMode->currentData().toString();
             params.crf = crfBox->value();
+            params.targetBitrateKbps = bitrateBox->value();
+            params.twoPass = twoPass->isChecked();
             params.keyframeInterval = keyframeBox->value();
             VDQtCodecEngine::instance().setVideoParamsForCodec(codecId, params);
         }
@@ -3533,7 +3620,64 @@ void VDVideoCompressionDialog::onConfigureClicked() {
             VDQtCodecEngine::instance().setVideoParamsForCodec(codecId, params);
         }
     } else {
-        QMessageBox::information(this, "Codec Configuration", "Standard options active for this codec.");
+        QDialog dlg(this);
+        dlg.setWindowTitle(QString("%1 Codec Configuration").arg(codecId));
+        dlg.setStyleSheet(kDialogStyle);
+        QFormLayout *form = new QFormLayout(&dlg);
+        auto *rateMode = new QComboBox(&dlg);
+        rateMode->addItem("Constant quality", "crf");
+        rateMode->addItem("Target bitrate", "bitrate");
+        rateMode->addItem("Lossless (when supported)", "lossless");
+        int rateIndex = rateMode->findData(params.rateMode);
+        if (rateIndex >= 0) rateMode->setCurrentIndex(rateIndex);
+        auto *quality = new QSpinBox(&dlg);
+        quality->setRange(0, 63);
+        quality->setValue(std::clamp(params.crf, 0, 63));
+        auto *bitrate = new QSpinBox(&dlg);
+        bitrate->setRange(1, 1000000);
+        bitrate->setSuffix(" kbps");
+        bitrate->setValue(params.targetBitrateKbps > 0
+                              ? params.targetBitrateKbps : 6000);
+        auto *gop = new QSpinBox(&dlg);
+        gop->setRange(0, 10000);
+        gop->setSpecialValueText("Encoder default");
+        gop->setValue(std::clamp(params.keyframeInterval, 0, 10000));
+        auto *preset = new QLineEdit(params.preset, &dlg);
+        preset->setPlaceholderText("Encoder default");
+        auto *twoPass = new QCheckBox(
+            "Use two-pass encoding (bitrate mode)", &dlg);
+        twoPass->setChecked(params.twoPass);
+        form->addRow("Rate control:", rateMode);
+        form->addRow("Quality / quantizer:", quality);
+        form->addRow("Target bitrate:", bitrate);
+        form->addRow("Keyframe interval:", gop);
+        form->addRow("Preset:", preset);
+        form->addRow(twoPass);
+        const auto refreshRateMode = [=]() {
+            const bool targetBitrate = rateMode->currentData().toString()
+                == QStringLiteral("bitrate");
+            quality->setEnabled(!targetBitrate);
+            bitrate->setEnabled(targetBitrate);
+            twoPass->setEnabled(targetBitrate);
+            if (!targetBitrate) twoPass->setChecked(false);
+        };
+        connect(rateMode, &QComboBox::currentIndexChanged, &dlg,
+                [refreshRateMode](int) { refreshRateMode(); });
+        refreshRateMode();
+        auto *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+        connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        form->addRow(buttons);
+        if (dlg.exec() == QDialog::Accepted) {
+            params.rateMode = rateMode->currentData().toString();
+            params.crf = quality->value();
+            params.targetBitrateKbps = bitrate->value();
+            params.keyframeInterval = gop->value();
+            params.preset = preset->text().trimmed();
+            params.twoPass = twoPass->isChecked();
+            VDQtCodecEngine::instance().setVideoParamsForCodec(codecId, params);
+        }
     }
 }
 
@@ -3563,23 +3707,12 @@ VDAudioCompressionDialog::VDAudioCompressionDialog(QWidget *parent)
     QVBoxLayout *leftLayout = new QVBoxLayout();
     leftLayout->addWidget(new QLabel("Select Audio Codec:", this));
     mCodecList = new QListWidget(this);
-    struct AudioCodecEntry {
-        const char *name;
-        const char *id;
-    } const kAudioCodecs[] = {
-        { "PCM Uncompressed (pcm_s16le)", "pcm_s16le" },
-        { "PCM Uncompressed 24-bit (pcm_s24le)", "pcm_s24le" },
-        { "AAC (Advanced Audio Coding)", "aac" },
-        { "MP3 (libmp3lame)", "libmp3lame" },
-        { "Opus Audio Codec", "libopus" },
-        { "Vorbis (Ogg Vorbis)", "libvorbis" },
-        { "AC3 (Dolby Digital)", "ac3" },
-        { "FLAC Lossless Audio", "flac" }
-    };
-
-    for (const auto& entry : kAudioCodecs) {
-        QListWidgetItem *item = new QListWidgetItem(entry.name, mCodecList);
-        item->setData(Qt::UserRole, entry.id);
+    const auto audioCodecs =
+        VDQtCodecEngine::instance().getAvailableAudioCodecs();
+    for (const VDAudioCodecInfo& codec : audioCodecs) {
+        QListWidgetItem *item = new QListWidgetItem(codec.name, mCodecList);
+        item->setData(Qt::UserRole, codec.id);
+        item->setToolTip(codec.description);
     }
     leftLayout->addWidget(mCodecList);
     topLayout->addLayout(leftLayout, 1);

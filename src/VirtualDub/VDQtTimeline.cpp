@@ -52,7 +52,8 @@ bool VDQtTimeline::isIdentity() const {
     if (mSourceFrameCount == 0) return mSegments.isEmpty();
     return mSegments.size() == 1
         && mSegments.first().sourceStartFrame == 0
-        && mSegments.first().frameCount == mSourceFrameCount;
+        && mSegments.first().frameCount == mSourceFrameCount
+        && !mSegments.first().masked;
 }
 
 bool VDQtTimeline::validateSegments(
@@ -96,7 +97,8 @@ QList<VDQtTimelineSegment> VDQtTimeline::normalized(
         if (!result.isEmpty()) {
             VDQtTimelineSegment& previous = result.last();
             if (previous.sourceStartFrame + previous.frameCount
-                == segment.sourceStartFrame) {
+                    == segment.sourceStartFrame
+                && previous.masked == segment.masked) {
                 previous.frameCount += segment.frameCount;
                 continue;
             }
@@ -120,12 +122,34 @@ bool VDQtTimeline::replaceSegments(
 qint64 VDQtTimeline::mapOutputToSource(qint64 outputFrame) const {
     if (outputFrame < 0) return -1;
     qint64 outputCursor = 0;
+    qint64 precedingUnmaskedFrame = -1;
     for (const VDQtTimelineSegment& segment : mSegments) {
-        if (outputFrame < outputCursor + segment.frameCount)
+        if (outputFrame < outputCursor + segment.frameCount) {
+            if (segment.masked) {
+                // VirtualDub falls back to the first frame of a leading mask;
+                // subsequent masks hold the preceding unmasked frame.
+                return precedingUnmaskedFrame >= 0
+                    ? precedingUnmaskedFrame : segment.sourceStartFrame;
+            }
             return segment.sourceStartFrame + outputFrame - outputCursor;
+        }
+        if (!segment.masked)
+            precedingUnmaskedFrame = segment.sourceStartFrame
+                + segment.frameCount - 1;
         outputCursor += segment.frameCount;
     }
     return -1;
+}
+
+bool VDQtTimeline::isOutputFrameMasked(qint64 outputFrame) const {
+    if (outputFrame < 0) return false;
+    qint64 outputCursor = 0;
+    for (const VDQtTimelineSegment& segment : mSegments) {
+        if (outputFrame < outputCursor + segment.frameCount)
+            return segment.masked;
+        outputCursor += segment.frameCount;
+    }
+    return false;
 }
 
 qint64 VDQtTimeline::mapSourceToOutput(qint64 sourceFrame,
@@ -160,7 +184,8 @@ QList<VDQtTimelineSegment> VDQtTimeline::slice(
         const qint64 overlapEnd = std::min(endFrameExclusive, segmentEnd);
         if (overlapStart < overlapEnd) {
             result.append({segment.sourceStartFrame + overlapStart - segmentStart,
-                           overlapEnd - overlapStart});
+                           overlapEnd - overlapStart,
+                           segment.masked});
         }
         outputCursor = segmentEnd;
         if (outputCursor >= endFrameExclusive) break;
