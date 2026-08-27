@@ -352,6 +352,7 @@ void VDQtVideoDecoder::setDecoderThreadCount(int threadCount) {
 }
 
 void VDQtVideoDecoder::applyFrameCacheBudget() {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     mFrameCache.setMaxCost(getFrameCacheBudgetKiB());
 }
 
@@ -603,6 +604,7 @@ bool VDQtVideoDecoder::setupSwsContext(AVPixelFormat sourceFormat,
 }
 
 void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     mForcedFormatName = formatName;
     mColorSpaceMode = colorSpace;
     mComponentRangeMode = componentRange;
@@ -633,6 +635,7 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
 }
 
 bool VDQtVideoDecoder::openFile(const QString& filePath) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     close();
     mLastError.clear();
 
@@ -991,6 +994,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
 }
 
 void VDQtVideoDecoder::clearCache() {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     mFrameCache.clear();
 }
 
@@ -1015,6 +1019,7 @@ void VDQtVideoDecoder::cacheFrame(int frameIndex, const QImage& image) {
 }
 
 void VDQtVideoDecoder::close() {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     clearCache();
     mFrameIndex.clear();
 
@@ -1495,6 +1500,7 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
 }
 
 QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     if (!mIsOpen || frameIndex < 0) return QImage();
 
     if (mFrameCountStatus == FrameCountStatus::Exact
@@ -1676,12 +1682,14 @@ void VDQtVideoDecoder::applyErrorMode() {
 }
 
 void VDQtVideoDecoder::setErrorMode(int errorMode) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     mErrorMode = std::clamp(errorMode, 0, 2);
     mDiscardUntilKeyFrame = false;
     applyErrorMode();
 }
 
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     VDScanResult res;
     if (!mIsOpen) {
         res.errorMessage = "No video stream is currently loaded.";

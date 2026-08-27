@@ -39,6 +39,7 @@ class AVSAudioDevice : public QIODevice {
 public:
     AVSAudioDevice(AVS_Clip *clip,
                    const AVS_VideoInfo *vi,
+                   QRecursiveMutex *avsAccessMutex = nullptr,
                    int testDecodeDelayMs = 0,
                    QObject *parent = nullptr);
     ~AVSAudioDevice() override;
@@ -67,6 +68,7 @@ private:
 
     AVS_Clip *m_clip;
     const AVS_VideoInfo *m_vi;
+    QRecursiveMutex *m_avsAccessMutex = nullptr;
     QByteArray m_buffer;
     qsizetype m_bufferOffset = 0;
     int64_t m_baseSample = 0;
@@ -94,7 +96,9 @@ public:
     bool openFile(const QString& filePath, int requestedStreamIndex = -1);
     static QList<VDAudioStreamInfo> probeAudioStreams(
         const QString& filePath, QString *errorMessage = nullptr);
-    bool openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi);
+    bool openAvsClip(AVS_Clip *clip,
+                     const AVS_VideoInfo *vi,
+                     QRecursiveMutex *avsAccessMutex = nullptr);
     void close();
 
     void play();
@@ -157,6 +161,7 @@ private:
 
     AVS_Clip *mClip = nullptr;
     const AVS_VideoInfo *mVi = nullptr;
+    QRecursiveMutex *mAvsAccessMutex = nullptr;
 
 #ifdef VDQT_AUDIO_TESTING
     bool mLastExportUsedSeek = false;

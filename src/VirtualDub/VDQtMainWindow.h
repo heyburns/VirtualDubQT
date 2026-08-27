@@ -247,10 +247,6 @@ private:
     VDVideoDisplayWidget *mOutputDisplay;
     VDQtPositionControlWidget *mPositionControl;
     VDQtVideoDecoder mVideoDecoder;
-    // Native AviSynth audio gets an independently evaluated clip. AviSynth
-    // filters are not universally safe when get_audio/get_frame run on the
-    // same graph from the audio and video threads.
-    VDQtVideoDecoder mAvsAudioDecoder;
     VDQtAudioPlayer mAudioPlayer;
     QThread *mFrameDecodeThread = nullptr;
     VDQtFrameDecodeWorker *mFrameDecodeWorker = nullptr;

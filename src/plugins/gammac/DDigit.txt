@@ -1,0 +1,253 @@
+DDigit Plugin Text Rendering Pack for Plugin writers.
+
+// DDIGIT @ http://forum.doom9.org/showthread.php?t=156888
+
+
+First  Release 17 Sept  2010, Wrongly Date named DDigit_25_dll_20101017
+Second Release v1.0, 26 Sept  2010,  DDigitTest_25_dll_20100926
+Third  Release v1.01, 6  March 2011.  DDigitTest_25_dll_20110306
+	Speeded up YV12 somewhat, by thieving some of the mods from New Info.H.
+	Added control code parsing for formatting and color selection within print string.
+Fourth  v1.02, Release 11 March 2011.  DDigitTest_25_dll_20110311
+        Fix dshift bug introduced in v1.01 Planar.
+Fifth Release v1.03, 2nd June 2011.  DDigitTest_25_dll_20110602
+	Adopted a 'new name' for the ColorSpace Independant Renderer in DDigit, new name being
+	"DDigit MONOLITHIC".
+	Added 'DDigit DISCRETE', NEW ColorSpace Dependant Renderers.
+	DDigit DISCRETE, has all the functionality of DDigit MONOLITHIC with the exception
+	of the vertical print functions.
+	Added DDigit DISCRETE to the DDigitTest() demo plugin.
+	Now using modified Info.h of April 2011.
+	Added unmodified Info.h together with an Info.h companion, InfoF.h which compliments
+	Info.h with formatted print via embedded control codes (see demo).
+Sixth release v1.04,  20th Apr 2013,
+        Background multiplier now selectable, via define DDIGIT_BACKGROUNDFADE in header.
+	Options: mult by 7/8, 3/4 5/8, or 1/2 or OPAQUE BLACK background.
+	Added compile for v2.6 plugin stuff.
+v1.05, 05 June 2013. Extended CMAP to 32. YV411 Luma ONLY. New color control codes added.
+   '\a', Color selection control code. Followed by any one of '0123456789ABCDEFGHIJKLMNOPQRSTUV-!*'.
+         0 -> V select the colors 0 -> 31. (lower case also allowed).
+         '-' selects DDIGIT_DEFAULT.
+         '!' selects DDIGIT_HILITE.
+         '*' selects the on entry color.
+// 10 July 2013, Added Length Arg.
+//    Switched ON YV411 chroma render, although looks better luma only (uncomment #define DDIGIT_SKIP_YV411_CHROMA)
+
+------------------------------------------------------------------------------------------
+
+	DDigit comprises of DDigit.h, and DDigit.cpp which implement a colorspace independant
+	text renderer (DDigit MONOLITHIC) and a colorspace dependant set of renderers
+	(DDigit DISCRETE).  DDigit is based on the source Info.h from the Avisynth project,
+	but provides printing in both horizontal and vertical, pixel or character coordinates
+	and in 16 colors + 16 greyscale levels.
+	The renderers support embedded control codes to provide both formatting
+	and color selection, within print strings. The renderers are bounds aware and will not
+	crash if text wraps off screen. Both the MONOLITHIC and DISCRETE renderers provide means
+	to disable unused colorspace code and also allow selection of the full font for characters
+	above 127 or you can save 4KB by disabling half of the font. Most of the options of
+	DDigit are switch off-able, even the ability to parse control codes in strings, disabling
+	these options will result in a reduction of code size. There is pretty much zero reason
+	to edit out any source code, so if anyone decides to grab a copy from your plugin source,
+	they should have the complete source files.
+
+	DDigit supports planar formats eg YV12, YUY2, RGB32 and RGB24, and in color for all
+	except of course Y8.
+
+	The only really small problem I see is that there has been no attempt to cope with
+	any special color palette for Y8, so you would get whatever luma value any
+	particular color would have had (and they are not in ascending order of value).
+	v1.05, added 16 greyscale level colors, index 16 to 31, 16 = black, 31 = white..
+
+	Further on color, the colors took a fair bit of time to select, it aint easy finding
+	ones that dont look rubbish under YV12. However, all colors chosen look pretty good
+	with the exception of one, DDIGIT_ORANGERED which is a bit blurry BUT was chosen
+	as a sort catastrophic error denoting color and so is not expected to be used
+	frequently. The colors chosen, all came from the standard Color Presets AVSI file,
+	Thought I should restrict myself to using standard color names rather than making
+	my own up, eg, DDIGIT_FISHFINGER_ORANGE or DDIGIT_PUTRID_PUCE.
+
+	Control codes within print strings.
+		 '\n', Newline, positioning cursor 1 line down and at left edge of screen.
+		 '\r', Newline Special, moves 1 line down and positions cursor at original on-entry X position.
+		 '\b', Backspace, obvious, not sure how useful this will be.
+		 '\f', Forward Space, again obvious, re-uses formfeed code for this. Again, maybe not so useful.
+		 '\t', Tab, @ character positions, every 4 characters.(relative screen LHS).
+		 '\a', Color selection control code. Followed by any one of '0123456789ABCDEFGHIJKLMNOPQRSTUV-!*'.
+			0 -> V select the colors 0 -> 31. (lower case also allowed)
+			'-' selects DDIGIT_DEFAULT.
+			'!' selects DDIGIT_HILITE.
+			'*' selects the on entry color.
+
+
+
+To configure DDigit, Edit the lines contained at the beginning of the DDigit.H file:-
+
+// ---------------------------------------------------------------------------------
+//  !!! Below lines configure DDIGIT and remove code, Edit as required !!!
+//
+// NOTE, DDigitTest enables BOTH MONOLITHIC & DISCRETE colorspace code, you are UNLIKELY to want this.
+// NOTE, Enabling any of below, without enabling the code it affects, will do nothing.
+// ---------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
+// !!! ONE (or rarely both) OF THE BELOW TWO SHOULD BE ENABLED !!!
+//
+// MONOLITHIC ColorSpace Independant code, Includes Horiz,Vert,pixel,char, 32 color print, ctrl codes.
+#define DDIGIT_ENABLE_MONOLITHIC_CODE			// DDigitS()
+//
+// DISCRETE ColorSpace code, eg DrawStringRGB24() @ pixel coords (optional, color, ctrl codes).
+#define DDIGIT_ENABLE_DISCRETE_COLORSPACE_CODE		// Does not require additional DrawString stubs.
+//
+// ---------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------------
+// MONOLITHIC ONLY config [Stubs Additional to DDigitS()]
+#define DDIGIT_INCLUDE_DRAWSTRING_FUNCTIONS		// Stubs, Print Strings @ Pixel Coords
+#define DDIGIT_INCLUDE_DRAWSTRING_VERTICAL		// Stubs, Print Vertical Strings @ Pixel Coords
+#define DDIGIT_INCLUDE_DRAWSTR_VERTICAL			// Stubs, Print Vertical Strings @ Char Coords
+//----
+// BOTH Monolithic & DISCRETE color space config
+#define DDIGIT_INCLUDE_DRAWSTR_FUNCTIONS		// Stubs, Print Strings @ Character Coords
+// ColorSpaces to enable support for (Affects BOTH MONOLITHIC & DISCRETE COLOR SPACE CODE)
+#define DDIGIT_ENABLE_SUPPORT_PLANAR			// Enable PLANAR eg YV12 Support
+#define DDIGIT_ENABLE_SUPPORT_YUY2			// Enable YUY2 Support
+#define DDIGIT_ENABLE_SUPPORT_RGB32			// Enable RGB32 Support
+#define DDIGIT_ENABLE_SUPPORT_RGB24			// Enable RGB24 Support
+// BOTH, Enable control code handling support in print strings, including color control.
+#define DDIGIT_ENABLE_SUPPORT_CONTROL_CODES	// Formatting + 32 color ctrl.
+// BOTH, Font, Enable full character set (incl 128 to 223), Comment out saves 4kb (ASCII 32-127 only)
+#define	DDIGIT_ENABLE_EXTENDED_ASCII		// Disable this, omits half of the font.
+//
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+//
+// ------------ Other possible configuration stuff
+#define DDIGIT_TABCNT		4									// Tab step setting (4)
+// Color index's used for defaults
+#define DDIGIT_INDEX_TO_USE_AS_DEFAULT		DDIGIT_WHITE		// DDIGIT_WHITE
+#define DDIGIT_INDEX_TO_USE_AS_HILITE		DDIGIT_ORANGE		// DDIGIT_ORANGE
+// Extended Luma cmap default index's, used for Y8 AND YV411 only (if skipping YV411 chroma)
+#define DDIGIT_Y_INDEX_TO_USE_AS_DEFAULT	DDIGIT_Y_D			// DDIGIT_Y_D
+#define DDIGIT_Y_INDEX_TO_USE_AS_HILITE		DDIGIT_Y_F			// DDIGIT_Y_F
+
+//----
+
+#define	DDIGIT_SKIP_YV411_CHROMA			// If defined, then print Luma Only for YV411
+
+//----
+
+// Enable ONE of Following: 0=most transparent, 4 least transparent(OPAQUE BLACK).
+//
+#define DDIGIT_BACKGROUNDFADE 0				// Background fade multiplier = 7/8
+//#define DDIGIT_BACKGROUNDFADE 1			// Background fade multiplier = 3/4
+//#define DDIGIT_BACKGROUNDFADE 2			// Background fade multiplier = 5/8
+//#define DDIGIT_BACKGROUNDFADE 3			// Background fade multiplier = 1/2
+//#define DDIGIT_BACKGROUNDFADE 4			// Background OPAQUE BLACK
+//
+// ---------------------------------------------------------------------------------
+
+
+DDigit MONOLITHIC:- Enabled via, #define DDIGIT_ENABLE_MONOLITHIC_CODE
+
+// Draw EXT ASCII string at [x,y] PIXEL or CHARACTER coords with color[32] selection
+// of forground. pix==true = pixel coords: vert==true = Vertical (top down printing)
+// ctrl = false, temporarily disables control code handling, just used in testing full
+// character set printing in Demo.
+
+extern void __stdcall DDigitS(const VideoInfo &vi,PVideoFrame &dst,int x,int y,int color, \
+	const bool pix,const bool vert,const char *s,bool ctrl=true,int length=0);
+
+
+DDigitS() is the lo level MONOLITHIC core of DDigit. It implements printing at pixel and character
+coordinates, both horizontally and vertically in 16+16 different colors for strings. There
+is no individual routine for printing lone characters, only strings are handled.
+
+The above defines eg: DDIGIT_INCLUDE_DRAWSTRING_FUNCTIONS make available stub routines
+which just make the calling of DDigitS() a little easier, in this case it makes available
+3 overloaded routines for printing text at pixel positions, horizontally, ie:
+
+DrawString(const VideoInfo &vi,PVideoFrame &dst,int x,int y,int color,const char *s);
+DrawString(const VideoInfo &vi,PVideoFrame &dst,int x,int y,const char *s);
+DrawString(const VideoInfo &vi,PVideoFrame &dst,int x,int y,bool hilite,const char *s);
+
+where you can call the stub with no color argument (defaults to white), with a bool
+to denote hilite ON/OFF status (hi-lite ON in Orange), or with an int to denote
+a color index 0-31. The 1st stub above is implemented as so:-
+
+	void __stdcall DrawString(const VideoInfo &vi,PVideoFrame &dst,int x,int y,int color,const char *s) {
+		DDigitS(vi,dst, x, y, color ,true,false, s);	// color is an index
+	}
+
+so there is no iterative calling of DDigitS() to render strings, DDigitS, does it all and
+the overhead of the DrawString() type stubs is so small as to make it unnecessary to
+disable them, even if you dont use them, but the option is there.
+
+Anyway, take a look at the DDigit.H header file for further info.
+
+If you mistakenly call DDigitS() for a colorspace that has not being enabled, then
+nothing will happen, ie it will not crash, it just will not do anything.
+
+// ---------------------------------------------------------------------------------
+
+DDigit DISCRETE:-  Enabled via, #define DDIGIT_ENABLE_DISCRETE_COLORSPACE_CODE
+
+Enabling the DISCRETE colorspace code will generate code for the enabled colorspaces,
+eg if you #define DDIGIT_ENABLE_SUPPORT_PLANAR then these functions will be added:-
+
+	void DrawStringPlanar(PVideoFrame &dst, int x, int y, int color,const char *s,bool ctrl=true,int length=0);
+	void DrawStringPlanar(PVideoFrame &dst, int x, int y, bool hilite,const char *s);
+	void DrawStringPlanar(PVideoFrame &dst, int x, int y, const char *s);
+
+if you also #define DDIGIT_INCLUDE_DRAWSTR_FUNCTIONS then these function stubs will be added for character coords.
+	void DrawStrPlanar(PVideoFrame &dst, int x, int y, int color, const char *s);
+	void DrawStrPlanar(PVideoFrame &dst, int x, int y, bool hilite, const char *s);
+	void DrawStrPlanar(PVideoFrame &dst, int x, int y, const char *s);
+
+NOTE, The MONOLITHIC code requires a VideoInfo reference in the args list, whereas the DISCRETE code does not.
+
+// ---------------------------------------------------------------------------------
+
+Also included, a 'throw away' plugin that just shows DDigit in action,
+nothing special but it does the job.
+If you do take a look at it, dont forget to remove it from your plugins directory
+afterwards. Plugin name "DDigitTest.DLL", compiled for Avisynth 2.5.
+Also "DDigitTest26.DLL" Supports 2.6 color spaces.
+
+	Args:-
+		DDigitTest()	// Defaults to -1, SHOW MONOLITHIC DEMO
+		DDigitTest(-1)	// SHOW MONOLITHIC DEMO
+		DDigitTest(-2)	// SHOW DISCRETE DEMO
+		DDigitTest(-3)	// SHOW short DEMO for new Info.h
+		DDigitTest(0)	// Speed Test, No Print
+		DDigitTest(1)	// Speed Test, DDIGIT MONOLITHIC
+		DDigitTest(2)	// Speed Test, DDIGIT DISCRETE
+		DDigitTest(3)	// Speed Test, INFO.H
+
+		Note, the above args have changed from previous versions of DDigittest.
+
+	Use the included AVS files.
+		DDigitDemo.AVS
+		DDigitTimeTest.AVS
+
+Anyways, hope you find a use for it.
+
+StainlessS @ Doom9.
+// ---------------------------------------------------------------------------------
+
+The new Info.h also now implements bounds checking and can be obtained from the
+below address if you would prefer to use that:-
+
+	http://avisynth2.cvs.sourceforge.net/viewvc/avisynth2/avisynth/src/core/
+
+Or,
+
+ The Info.h of May 2013 is included with this package (together with a
+companion header, InfoF.h, providing Info.h with layout format printing).
+
+
+Compiling for both Avisynth v2.58 & v2.6 ProjectName under VS6, where ProjectName is the base name of the plugin.
+Create an additional project ProjectName26 and copy the
+project files into ProjectName folder. Add headers and source files to v2.6 project.
+You should have "avisynth25.h" in the ProjectName Header Files and
+"avisynth26.h" in the ProjectName26 Header Files.
+For the v2.58 project, add preprocessor definition to :-
+	Menu/Project/Settings/All Configuration/C/C++, AVISYNTH_PLUGIN_25

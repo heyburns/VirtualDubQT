@@ -33,6 +33,8 @@ endif()
 get_filename_component(AVISYNTH_LIBRARY_DIR "${AVISYNTH_LIBRARY}" DIRECTORY)
 
 set(VIRTUALDUB_QT_SOURCES
+    src/VirtualDub/VDQtApplicationIcon.h
+    src/VirtualDub/VDQtApplicationIcon.cpp
     src/VirtualDub/VDQtFrameDecodeWorker.h
     src/VirtualDub/VDQtFrameDecodeWorker.cpp
     src/VirtualDub/VDQtVideoDecoder.h

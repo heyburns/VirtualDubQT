@@ -2338,7 +2338,9 @@ int main(int argc, char **argv) {
             std::cerr << decoder.getLastError().toStdString() << '\n';
             return 1;
         }
-        if (!require(audioPlayer.openAvsClip(decoder.getAvsClip(), decoder.getAvsVi()),
+        if (!require(audioPlayer.openAvsClip(
+                         decoder.getAvsClip(), decoder.getAvsVi(),
+                         decoder.getAvsAccessMutex()),
                      "open AviSynth audio for fast recompress"))
             return 1;
 

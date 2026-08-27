@@ -728,18 +728,11 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
             // intentionally removed it (for example with KillAudio()).
             const AVS_VideoInfo *videoInfo = mVideoDecoder.getAvsVi();
             if (videoInfo && avs_has_audio(videoInfo)) {
-                mAvsAudioDecoder.setDecompressionConfig(
-                    mDecompressionFormatConfig.formatName,
-                    mDecompressionFormatConfig.colorSpace,
-                    mDecompressionFormatConfig.componentRange);
-                mAvsAudioDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
-                if (mAvsAudioDecoder.openFile(filePath)) {
-                    mAudioPlayer.openAvsClip(
-                        mAvsAudioDecoder.getAvsClip(), mAvsAudioDecoder.getAvsVi());
-                } else {
+                if (!mAudioPlayer.openAvsClip(
+                        mVideoDecoder.getAvsClip(), videoInfo,
+                        mVideoDecoder.getAvsAccessMutex())) {
                     VDLogWindow::instance(this)->appendLog(
-                        QString("[Audio] AviSynth audio graph could not be opened independently: %1")
-                            .arg(mAvsAudioDecoder.getLastError()));
+                        QStringLiteral("[Audio] The loaded AviSynth graph contains audio, but playback initialization failed."));
                 }
             }
         } else {
@@ -1215,7 +1208,6 @@ void VDQtMainWindow::onFileClose() {
     if (mFrameServer) mFrameServer->stop();
     closeInteractiveDecoder();
     mAudioPlayer.close();
-    mAvsAudioDecoder.close();
     QCoreApplication::processEvents();
     mVideoDecoder.close();
     mInputDisplay->clearDisplay();
@@ -1403,11 +1395,6 @@ void VDQtMainWindow::applyProcessingState(const VDQtProcessingState& state) {
         mDecompressionFormatConfig.colorSpace,
         mDecompressionFormatConfig.componentRange);
     mVideoDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
-    mAvsAudioDecoder.setDecompressionConfig(
-        mDecompressionFormatConfig.formatName,
-        mDecompressionFormatConfig.colorSpace,
-        mDecompressionFormatConfig.componentRange);
-    mAvsAudioDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
     if (mFrameDecodeWorker && mFrameDecodeThread
         && mFrameDecodeThread->isRunning()) {
         QMetaObject::invokeMethod(
@@ -1614,7 +1601,6 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
 
     if (project.audioDisabled) {
         mAudioPlayer.close();
-        mAvsAudioDecoder.close();
         mAudioDisabled = true;
         mAudioSourcePath.clear();
         mAudioStreamIndex = -1;
@@ -1815,7 +1801,9 @@ void VDQtMainWindow::onFileSaveAudio() {
 
     if (!mAudioPlayer.hasAudio()) {
         if (mVideoDecoder.isAvsNative() && mVideoDecoder.getAvsClip() && mVideoDecoder.getAvsVi()) {
-            mAudioPlayer.openAvsClip(mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi());
+            mAudioPlayer.openAvsClip(
+                mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi(),
+                mVideoDecoder.getAvsAccessMutex());
         } else {
             QString srcFile = mVideoDecoder.getFilePath();
             mAudioPlayer.openFile(srcFile);
@@ -4291,7 +4279,6 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         return false;
     }
 
-    VDQtVideoDecoder avsAudioDecoder;
     VDQtAudioPlayer audioPlayer;
     const bool needsAudio = job.operation == VDQtJobOperation::VideoExport
                          || job.operation == VDQtJobOperation::AudioExport;
@@ -4307,14 +4294,9 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         const AVS_VideoInfo *videoInfo = decoder.getAvsVi();
         audioPrepared = !videoInfo || !avs_has_audio(videoInfo);
         if (videoInfo && avs_has_audio(videoInfo)) {
-            avsAudioDecoder.setDecompressionConfig(
-                job.processing.decompression.formatName,
-                job.processing.decompression.colorSpace,
-                job.processing.decompression.componentRange);
-            avsAudioDecoder.setErrorMode(job.processing.decoderErrorMode.errorMode);
-            audioPrepared = avsAudioDecoder.openFile(inputPath)
-                && audioPlayer.openAvsClip(
-                    avsAudioDecoder.getAvsClip(), avsAudioDecoder.getAvsVi());
+            audioPrepared = audioPlayer.openAvsClip(
+                decoder.getAvsClip(), videoInfo,
+                decoder.getAvsAccessMutex());
         }
     } else if (needsAudio && !job.audioDisabled) {
         audioPrepared = audioPlayer.openFile(inputPath) && audioPlayer.hasAudio();
@@ -7534,7 +7516,6 @@ void VDQtMainWindow::onAudioSource() {
     mAudioPlayer.stop();
     if (requestedStream == kNoAudio) {
         mAudioPlayer.close();
-        mAvsAudioDecoder.close();
         mAudioDisabled = true;
         mAudioSourcePath.clear();
         mAudioStreamIndex = -1;
@@ -7544,15 +7525,9 @@ void VDQtMainWindow::onAudioSource() {
 
     bool opened = false;
     if (requestedStream == kAviSynthAudio) {
-        mAvsAudioDecoder.close();
-        mAvsAudioDecoder.setDecompressionConfig(
-            mDecompressionFormatConfig.formatName,
-            mDecompressionFormatConfig.colorSpace,
-            mDecompressionFormatConfig.componentRange);
-        mAvsAudioDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
-        opened = mAvsAudioDecoder.openFile(mVideoDecoder.getFilePath())
-            && mAudioPlayer.openAvsClip(
-                mAvsAudioDecoder.getAvsClip(), mAvsAudioDecoder.getAvsVi());
+        opened = mAudioPlayer.openAvsClip(
+            mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi(),
+            mVideoDecoder.getAvsAccessMutex());
         mAudioSourcePath.clear();
     } else {
         const QString path = requestedPath.isEmpty()
@@ -7799,7 +7774,6 @@ void VDQtMainWindow::onOptionsPreferences() {
     VDQtVideoDecoder::setFrameCacheBudgetMiB(mPreferencesConfig.frameCacheMiB);
     VDQtVideoDecoder::setDecoderThreadCount(mPreferencesConfig.decoderThreads);
     mVideoDecoder.applyFrameCacheBudget();
-    mAvsAudioDecoder.applyFrameCacheBudget();
     if (mFrameDecodeWorker && mFrameDecodeThread
         && mFrameDecodeThread->isRunning()) {
         QMetaObject::invokeMethod(
@@ -9218,12 +9192,19 @@ bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *er
         mFrameDecodeWorker,
         [this, &opened, &workerError, filePath, chain]() {
             mFrameDecodeWorker->setFilterChain(chain);
-            opened = mFrameDecodeWorker->openSource(
-                filePath,
-                mDecompressionFormatConfig.formatName,
-                mDecompressionFormatConfig.colorSpace,
-                mDecompressionFormatConfig.componentRange,
-                mDecoderErrorModeConfig.errorMode);
+            if (mVideoDecoder.isAvsNative()) {
+                // Keep one authoritative AviSynth environment. Re-evaluating
+                // a script for preview/audio is unsafe for plugins that retain
+                // process-global state, so the worker borrows the main decoder.
+                opened = mFrameDecodeWorker->useSharedAvsSource(&mVideoDecoder);
+            } else {
+                opened = mFrameDecodeWorker->openSource(
+                    filePath,
+                    mDecompressionFormatConfig.formatName,
+                    mDecompressionFormatConfig.colorSpace,
+                    mDecompressionFormatConfig.componentRange,
+                    mDecoderErrorModeConfig.errorMode);
+            }
             if (!opened) workerError = mFrameDecodeWorker->lastError();
         },
         Qt::BlockingQueuedConnection);

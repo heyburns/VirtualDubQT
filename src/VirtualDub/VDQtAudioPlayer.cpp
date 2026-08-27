@@ -239,9 +239,12 @@ bool readAvsAsInt16(AVS_Clip *clip,
                     const AVS_VideoInfo *vi,
                     int64_t startSample,
                     int64_t sampleCount,
-                    char *output)
+                    char *output,
+                    QRecursiveMutex *avsAccessMutex)
 {
     if (!clip || !vi || !output || sampleCount <= 0 || vi->nchannels <= 0) return false;
+
+    QMutexLocker<QRecursiveMutex> avsLock(avsAccessMutex);
 
     const int64_t valueCount64 = sampleCount * static_cast<int64_t>(vi->nchannels);
     if (valueCount64 <= 0 ||
@@ -1821,7 +1824,7 @@ bool VDQtRunAvsAudioDecodeAheadDeadlineRegression(AVS_Clip *clip,
 
     // Artificial graph latency is paid by the producer thread during priming
     // and refill. Pulling from the QIODevice must remain a bounded buffer copy.
-    AVSAudioDevice device(clip, vi, 15);
+    AVSAudioDevice device(clip, vi, nullptr, 15);
     if (!device.initialize()) {
         if (errorMessage) *errorMessage = device.error();
         return false;
@@ -1879,11 +1882,13 @@ bool VDQtRunAvsAudioDecodeAheadDeadlineRegression(AVS_Clip *clip,
 
 AVSAudioDevice::AVSAudioDevice(AVS_Clip *clip,
                                const AVS_VideoInfo *vi,
+                               QRecursiveMutex *avsAccessMutex,
                                int testDecodeDelayMs,
                                QObject *parent)
     : QIODevice(parent)
     , m_clip(clip)
     , m_vi(vi)
+    , m_avsAccessMutex(avsAccessMutex)
     , m_testDecodeDelayMs(std::max(0, testDecodeDelayMs))
 {
 }
@@ -2097,7 +2102,8 @@ void AVSAudioDevice::decodeLoop()
         }
 
         QByteArray decoded(byteCount, Qt::Uninitialized);
-        if (!readAvsAsInt16(m_clip, m_vi, startSample, samplesToRead, decoded.data())) {
+        if (!readAvsAsInt16(m_clip, m_vi, startSample, samplesToRead,
+                            decoded.data(), m_avsAccessMutex)) {
             QMutexLocker locker(&m_mutex);
             m_error = QStringLiteral("AviSynth failed while decoding playback audio.");
             m_producerFailed = true;
@@ -2267,7 +2273,9 @@ QList<VDAudioStreamInfo> VDQtAudioPlayer::probeAudioStreams(
     return streams;
 }
 
-bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
+bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip,
+                                  const AVS_VideoInfo *vi,
+                                  QRecursiveMutex *avsAccessMutex)
 {
     close();
     if (!clip || !vi || !avs_has_audio(vi) || vi->audio_samples_per_second <= 0 ||
@@ -2281,6 +2289,7 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
     mHasAudio = true;
     mClip = clip;
     mVi = vi;
+    mAvsAccessMutex = avsAccessMutex;
     mSampleRate = vi->audio_samples_per_second;
     mChannels = vi->nchannels;
     mBitsPerSample = avs_bytes_per_channel_sample(vi) * 8;
@@ -2301,7 +2310,7 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip, const AVS_VideoInfo *vi)
         ? QMediaDevices::defaultAudioOutput()
         : QAudioDevice();
     if (!defaultDevice.isNull() && defaultDevice.isFormatSupported(format)) {
-        mAvsAudioDevice = new AVSAudioDevice(clip, vi);
+        mAvsAudioDevice = new AVSAudioDevice(clip, vi, avsAccessMutex);
         if (mAvsAudioDevice->initialize()) {
             mFilteredAudioDevice = new VDQtAudioFilterDevice(
                 mAvsAudioDevice, format.sampleRate(), format.channelCount());
@@ -2558,6 +2567,7 @@ void VDQtAudioPlayer::close()
     mPlaybackBaseTimeSeconds = 0.0;
     mClip = nullptr;
     mVi = nullptr;
+    mAvsAccessMutex = nullptr;
 }
 
 void VDQtAudioPlayer::play()
@@ -2805,8 +2815,13 @@ bool VDQtAudioPlayer::exportAudioToFile(
                 break;
             }
             QByteArray buffer(static_cast<int>(byteCount), Qt::Uninitialized);
-            if (avs_get_audio(mClip, buffer.data(), currentSample, count) != 0 ||
-                !writer.write(buffer.constData(), buffer.size())) {
+            bool decoded = false;
+            {
+                QMutexLocker<QRecursiveMutex> avsLock(mAvsAccessMutex);
+                decoded = avs_get_audio(
+                    mClip, buffer.data(), currentSample, count) == 0;
+            }
+            if (!decoded || !writer.write(buffer.constData(), buffer.size())) {
                 ok = false;
                 break;
             }

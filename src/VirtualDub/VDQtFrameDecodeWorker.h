@@ -22,8 +22,9 @@ public:
                     int colorSpace,
                     int componentRange,
                     int errorMode);
+    bool useSharedAvsSource(VDQtVideoDecoder *decoder);
     void closeSource();
-    QString lastError() const { return mDecoder.getLastError(); }
+    QString lastError() const;
     void setDecompressionConfig(const QString& formatName, int colorSpace, int componentRange);
     void setErrorMode(int errorMode);
     void applyFrameCacheBudget();
@@ -66,7 +67,13 @@ private:
     bool mProcessScheduled = false;
 
     VDQtVideoDecoder mDecoder;
+    // Non-owning. The main window closes the worker synchronously before the
+    // authoritative decoder can be closed or destroyed.
+    VDQtVideoDecoder *mSharedAvsDecoder = nullptr;
     VDQtFilterSystem mFilters;
+
+    VDQtVideoDecoder* activeDecoder();
+    const VDQtVideoDecoder* activeDecoder() const;
 };
 
 #endif // VDQTFRAMEDECODEWORKER_H

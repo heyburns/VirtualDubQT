@@ -73,9 +73,9 @@ RoboCrop::RoboCrop(PClip child, int samples, float thresh, bool laced, int wmod,
       m_hmod(hmod > 0 ? hmod : (laced ? 4 : (child->GetVideoInfo().IsYV12() ? 2 : 1))),
       m_rlbt(rlbt != 0 ? rlbt : 15),
       m_debug(debug),
-      m_ignore(ignore),
+      m_ignore(ignore >= 0.0f ? ignore : 0.1f),
       m_matrix(matrix),
-      m_baffle(baffle > 0 ? baffle : 2),
+      m_baffle(baffle > 0 ? baffle : 4),
       m_scaleAutoThreshRGB(scaleRGB),
       m_scaleAutoThreshYUV(scaleYUV),
       m_cropMode(cropMode),
@@ -97,7 +97,6 @@ RoboCrop::RoboCrop(PClip child, int samples, float thresh, bool laced, int wmod,
 {
     if (m_wmod <= 0) m_wmod = 2;
     if (m_hmod <= 0) m_hmod = (m_laced ? 4 : 2);
-    if (m_thresh <= 0.0f) m_thresh = 40.0f * m_atm;
 
     CalculateCrop(env);
 
@@ -115,21 +114,32 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
     int origHeight = vi.height;
     int totalFrames = vi.num_frames;
 
+    if (origWidth <= 0 || origHeight <= 0 || totalFrames <= 0) return;
+
     if (m_start < 0) m_start = 0;
     if (m_end < m_start || m_end >= totalFrames) m_end = totalFrames - 1;
 
-    int numSamples = std::max(8, std::min(m_samples, 64));
+    int numSamples = std::max(8, std::min(m_samples, 128));
 
-    int minLeft = origWidth;
-    int minTop = origHeight;
-    int minRight = origWidth;
-    int minBot = origHeight;
-    int activeFramesCount = 0;
+    std::vector<int> leftSamples;
+    std::vector<int> topSamples;
+    std::vector<int> rightSamples;
+    std::vector<int> botSamples;
 
-    int effectiveThresh = static_cast<int>(std::round(m_thresh > 0.0f ? m_thresh : 40.0f * m_atm));
+    leftSamples.reserve(numSamples);
+    topSamples.reserve(numSamples);
+    rightSamples.reserve(numSamples);
+    botSamples.reserve(numSamples);
+
+    int bitsPerComp = vi.BitsPerComponent();
+    if (bitsPerComp <= 0) bitsPerComp = 8;
+    int bitShift = bitsPerComp - 8;
+
+    int bytesPerSample = vi.ComponentSize();
+    if (bytesPerSample <= 0) bytesPerSample = 1;
 
     for (int s = 0; s < numSamples; ++s) {
-        int frameNum = m_start + (int)(((int64_t)(s * 2 + 1) * (m_end - m_start)) / (2 * numSamples));
+        int frameNum = m_start + static_cast<int>(((static_cast<int64_t>(s * 2 + 1)) * (m_end - m_start)) / (2 * numSamples));
         frameNum = std::clamp(frameNum, m_start, m_end);
 
         PVideoFrame frame;
@@ -140,11 +150,46 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
         }
         if (!frame) continue;
 
+        // Auto-threshold determination based on noise floor in corner regions
+        int thresh = 0;
+        if (m_thresh > 0.0f) {
+            thresh = static_cast<int>(std::round(m_thresh * (1 << bitShift)));
+        } else {
+            // Measure corner baseline black level
+            int cornerSum = 0;
+            int cornerCount = 0;
+            int cornerSize = std::min(16, std::min(origWidth / 8, origHeight / 8));
+            if (cornerSize < 2) cornerSize = 2;
+
+            if (vi.IsPlanar()) {
+                const uint8_t* srcY = frame->GetReadPtr(PLANAR_Y);
+                int pitch = frame->GetPitch(PLANAR_Y);
+                for (int cy = 0; cy < cornerSize; ++cy) {
+                    for (int cx = 0; cx < cornerSize; ++cx) {
+                        int vTL = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + cy * pitch)[cx] : srcY[cy * pitch + cx];
+                        int vTR = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + cy * pitch)[origWidth - 1 - cx] : srcY[cy * pitch + origWidth - 1 - cx];
+                        int vBL = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + (origHeight - 1 - cy) * pitch)[cx] : srcY[(origHeight - 1 - cy) * pitch + cx];
+                        int vBR = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + (origHeight - 1 - cy) * pitch)[origWidth - 1 - cx] : srcY[(origHeight - 1 - cy) * pitch + origWidth - 1 - cx];
+                        cornerSum += (vTL + vTR + vBL + vBR);
+                        cornerCount += 4;
+                    }
+                }
+            }
+
+            int avgBlack = cornerCount > 0 ? (cornerSum / cornerCount) : (16 << bitShift);
+            int deltaThresh = static_cast<int>(std::round(14.0f * m_atm * (1 << bitShift)));
+            thresh = std::clamp(avgBlack + deltaThresh, 20 << bitShift, 70 << bitShift);
+        }
+
         int frameLeft = 0;
         int frameTop = 0;
         int frameRight = 0;
         int frameBot = 0;
         bool frameHasActive = false;
+
+        // Baffle calculation: at least m_baffle pixels OR 1.5% of scan dimension
+        int baffleH = std::max(m_baffle, std::max(2, static_cast<int>((origHeight - m_topSkip - m_botSkip) * 0.015f)));
+        int baffleW = std::max(m_baffle, std::max(2, static_cast<int>((origWidth - m_leftSkip - m_rightSkip) * 0.015f)));
 
         if (vi.IsPlanar()) {
             const uint8_t* srcY = frame->GetReadPtr(PLANAR_Y);
@@ -155,11 +200,12 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int x = m_leftSkip; x < origWidth / 2; ++x) {
                     int count = 0;
                     for (int y = m_topSkip; y < origHeight - m_botSkip; ++y) {
-                        if (srcY[y * pitch + x] > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        int val = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + y * pitch)[x] : srcY[y * pitch + x];
+                        if (val > thresh) {
+                            if (++count >= baffleH) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleH) {
                         frameLeft = x;
                         frameHasActive = true;
                         break;
@@ -172,11 +218,12 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int x = origWidth - 1 - m_rightSkip; x >= origWidth / 2; --x) {
                     int count = 0;
                     for (int y = m_topSkip; y < origHeight - m_botSkip; ++y) {
-                        if (srcY[y * pitch + x] > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        int val = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + y * pitch)[x] : srcY[y * pitch + x];
+                        if (val > thresh) {
+                            if (++count >= baffleH) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleH) {
                         frameRight = (origWidth - 1 - x);
                         frameHasActive = true;
                         break;
@@ -189,11 +236,12 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int y = m_topSkip; y < origHeight / 2; ++y) {
                     int count = 0;
                     for (int x = m_leftSkip; x < origWidth - m_rightSkip; ++x) {
-                        if (srcY[y * pitch + x] > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        int val = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + y * pitch)[x] : srcY[y * pitch + x];
+                        if (val > thresh) {
+                            if (++count >= baffleW) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleW) {
                         frameTop = y;
                         frameHasActive = true;
                         break;
@@ -206,11 +254,12 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int y = origHeight - 1 - m_botSkip; y >= origHeight / 2; --y) {
                     int count = 0;
                     for (int x = m_leftSkip; x < origWidth - m_rightSkip; ++x) {
-                        if (srcY[y * pitch + x] > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        int val = (bytesPerSample == 2) ? reinterpret_cast<const uint16_t*>(srcY + y * pitch)[x] : srcY[y * pitch + x];
+                        if (val > thresh) {
+                            if (++count >= baffleW) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleW) {
                         frameBot = (origHeight - 1 - y);
                         frameHasActive = true;
                         break;
@@ -222,22 +271,22 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
             int pitch = frame->GetPitch();
             int bpp = vi.IsRGB32() ? 4 : 3;
 
-            // Top Scan
+            // Top Scan (visual row y -> buffer row origHeight - 1 - y)
             if (m_rlbt & 8) {
                 for (int y = m_topSkip; y < origHeight / 2; ++y) {
-                    int srcY = (origHeight - 1 - y);
-                    const uint8_t* row = src + srcY * pitch;
+                    int bufY = origHeight - 1 - y;
+                    const uint8_t* row = src + bufY * pitch;
                     int count = 0;
                     for (int x = m_leftSkip; x < origWidth - m_rightSkip; ++x) {
                         int b = row[x * bpp + 0];
                         int g = row[x * bpp + 1];
                         int r = row[x * bpp + 2];
                         int luma = (r * 77 + g * 150 + b * 29) >> 8;
-                        if (luma > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        if (luma > thresh) {
+                            if (++count >= baffleW) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleW) {
                         frameTop = y;
                         frameHasActive = true;
                         break;
@@ -245,22 +294,22 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 }
             }
 
-            // Bottom Scan
+            // Bottom Scan (visual row origHeight - 1 - y -> buffer row y)
             if (m_rlbt & 4) {
                 for (int y = origHeight - 1 - m_botSkip; y >= origHeight / 2; --y) {
-                    int srcY = (origHeight - 1 - y);
-                    const uint8_t* row = src + srcY * pitch;
+                    int bufY = origHeight - 1 - y;
+                    const uint8_t* row = src + bufY * pitch;
                     int count = 0;
                     for (int x = m_leftSkip; x < origWidth - m_rightSkip; ++x) {
                         int b = row[x * bpp + 0];
                         int g = row[x * bpp + 1];
                         int r = row[x * bpp + 2];
                         int luma = (r * 77 + g * 150 + b * 29) >> 8;
-                        if (luma > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        if (luma > thresh) {
+                            if (++count >= baffleW) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleW) {
                         frameBot = (origHeight - 1 - y);
                         frameHasActive = true;
                         break;
@@ -273,14 +322,14 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int x = m_leftSkip; x < origWidth / 2; ++x) {
                     int count = 0;
                     for (int y = m_topSkip; y < origHeight - m_botSkip; ++y) {
-                        int srcY = (origHeight - 1 - y);
-                        const uint8_t* pixel = src + srcY * pitch + x * bpp;
+                        int bufY = origHeight - 1 - y;
+                        const uint8_t* pixel = src + bufY * pitch + x * bpp;
                         int luma = (pixel[2] * 77 + pixel[1] * 150 + pixel[0] * 29) >> 8;
-                        if (luma > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        if (luma > thresh) {
+                            if (++count >= baffleH) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleH) {
                         frameLeft = x;
                         frameHasActive = true;
                         break;
@@ -293,14 +342,14 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
                 for (int x = origWidth - 1 - m_rightSkip; x >= origWidth / 2; --x) {
                     int count = 0;
                     for (int y = m_topSkip; y < origHeight - m_botSkip; ++y) {
-                        int srcY = (origHeight - 1 - y);
-                        const uint8_t* pixel = src + srcY * pitch + x * bpp;
+                        int bufY = origHeight - 1 - y;
+                        const uint8_t* pixel = src + bufY * pitch + x * bpp;
                         int luma = (pixel[2] * 77 + pixel[1] * 150 + pixel[0] * 29) >> 8;
-                        if (luma > effectiveThresh) {
-                            if (++count >= m_baffle) break;
+                        if (luma > thresh) {
+                            if (++count >= baffleH) break;
                         }
                     }
-                    if (count >= m_baffle) {
+                    if (count >= baffleH) {
                         frameRight = (origWidth - 1 - x);
                         frameHasActive = true;
                         break;
@@ -309,22 +358,41 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
             }
         }
 
-        // If the frame had active content (not completely black/blank), accumulate crop limits
         if (frameHasActive) {
-            minLeft = std::min(minLeft, frameLeft);
-            minTop = std::min(minTop, frameTop);
-            minRight = std::min(minRight, frameRight);
-            minBot = std::min(minBot, frameBot);
-            activeFramesCount++;
+            leftSamples.push_back(frameLeft);
+            topSamples.push_back(frameTop);
+            rightSamples.push_back(frameRight);
+            botSamples.push_back(frameBot);
         }
     }
 
-    if (activeFramesCount == 0 || minLeft > origWidth / 2 || minTop > origHeight / 2 || minRight > origWidth / 2 || minBot > origHeight / 2) {
-        minLeft = 0;
-        minTop = 0;
-        minRight = 0;
-        minBot = 0;
+    int validSamples = static_cast<int>(leftSamples.size());
+    int minLeft = 0;
+    int minTop = 0;
+    int minRight = 0;
+    int minBot = 0;
+
+    if (validSamples > 0) {
+        std::sort(leftSamples.begin(), leftSamples.end());
+        std::sort(topSamples.begin(), topSamples.end());
+        std::sort(rightSamples.begin(), rightSamples.end());
+        std::sort(botSamples.begin(), botSamples.end());
+
+        // Outlier rejection quantile index (default discard lower ignore fraction)
+        int idx = std::clamp(static_cast<int>(std::floor(validSamples * std::clamp(m_ignore, 0.0f, 0.45f))),
+                             0, validSamples - 1);
+
+        minLeft = leftSamples[idx];
+        minTop = topSamples[idx];
+        minRight = rightSamples[idx];
+        minBot = botSamples[idx];
     }
+
+    // Safety clamp: do not crop more than 45% of any edge
+    if (minLeft > origWidth * 0.45f) minLeft = 0;
+    if (minRight > origWidth * 0.45f) minRight = 0;
+    if (minTop > origHeight * 0.45f) minTop = 0;
+    if (minBot > origHeight * 0.45f) minBot = 0;
 
     minLeft = std::max(0, minLeft + m_leftAdd);
     minTop = std::max(0, minTop + m_topAdd);
@@ -365,8 +433,9 @@ void RoboCrop::CalculateCrop(IScriptEnvironment* env) {
     env->SetGlobalVar((m_prefix + "HEIGHT").c_str(), AVSValue(m_croppedHeight));
 
     if (m_debug) {
-        printf("[RoboCrop] Crop rect: Left=%d, Top=%d, Width=%d, Height=%d (Right=%d, Bot=%d)\n",
-               m_finalLeft, m_finalTop, m_croppedWidth, m_croppedHeight, m_finalRight, m_finalBot);
+        printf("[RoboCrop] Crop rect: Left=%d, Top=%d, Width=%d, Height=%d (Right=%d, Bot=%d) [Samples=%d/%d, Thresh=%d]\n",
+               m_finalLeft, m_finalTop, m_croppedWidth, m_croppedHeight, m_finalRight, m_finalBot, validSamples, numSamples,
+               static_cast<int>(m_thresh));
     }
 }
 
@@ -408,17 +477,14 @@ PVideoFrame __stdcall RoboCrop::GetFrame(int n, IScriptEnvironment* env) {
         }
     } else {
         int bpp = vi.BitsPerPixel() / 8;
-        const uint8_t* srcPtr = src->GetReadPtr() + m_finalTop * src->GetPitch() + m_finalLeft * bpp;
+        // AviSynth packed RGB is bottom-up DIB. The visual top row of the cropped image (row m_finalTop)
+        // is at memory offset: (origHeight - 1 - (m_finalTop + vi.height - 1)) * pitch.
+        int origHeight = child->GetVideoInfo().height;
+        int bufY = origHeight - 1 - (m_finalTop + vi.height - 1);
+        const uint8_t* srcPtr = src->GetReadPtr() + bufY * src->GetPitch() + m_finalLeft * bpp;
         env->BitBlt(dst->GetWritePtr(), dst->GetPitch(),
                     srcPtr, src->GetPitch(),
                     vi.width * bpp, vi.height);
-    }
-
-    static int s_robocrop_count = 0;
-    if (++s_robocrop_count <= 10 || s_robocrop_count % 30 == 0) {
-        printf("[RoboCrop] Active in pipeline -> Output frame %d cropped: (%d,%d) %dx%d (count=%d)\n",
-               n, m_finalLeft, m_finalTop, vi.width, vi.height, s_robocrop_count);
-        fflush(stdout);
     }
 
     return dst;
@@ -433,9 +499,9 @@ AVSValue __cdecl Create_RoboCrop(AVSValue args, void* user_data, IScriptEnvironm
     int hmod = args[5].AsInt(4);
     int rlbt = args[6].AsInt(15);
     bool debug = args[7].AsBool(false);
-    float ignore = (float)args[8].AsFloat(0.0f);
+    float ignore = (float)args[8].AsFloat(0.1f);
     int matrix = args[9].AsInt(0);
-    int baffle = args[10].AsInt(2);
+    int baffle = args[10].AsInt(4);
     bool scaleRGB = args[11].AsBool(true);
     bool scaleYUV = args[12].AsBool(true);
     int cropMode = args[13].AsInt(0);

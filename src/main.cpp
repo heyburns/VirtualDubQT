@@ -1,8 +1,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QIcon>
 #include <QTextStream>
 #include <algorithm>
+#include "VirtualDub/VDQtApplicationIcon.h"
 #include "VirtualDub/VDQtMainWindow.h"
 
 namespace {
@@ -67,6 +69,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("VirtualDub");
     app.setOrganizationName("VirtualDub Port");
+    app.setWindowIcon(vdqtApplicationIcon());
 
     VDQtMainWindow w;
     w.setAutomationUnattended(unattended);

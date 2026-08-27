@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QImage>
 #include <QCache>
+#include <QMutex>
 #include <QVector>
 #include <functional>
 
@@ -50,6 +51,11 @@ public:
     bool isAvsNative() const { return mIsAvsNative; }
     AVS_Clip* getAvsClip() const { return mAvsClip; }
     const AVS_VideoInfo* getAvsVi() const { return mAvsVi; }
+    // All consumers of the native AviSynth clip share this lock. A number of
+    // third-party filters do not support simultaneous GetFrame/GetAudio calls,
+    // and evaluating the script a second time is even less safe for plugins
+    // with process-global state.
+    QRecursiveMutex* getAvsAccessMutex() { return &mAvsAccessMutex; }
     QString getPixFormat() const {
         if (mIsAvsNative && mAvsVi) {
             if (avs_is_yv12(mAvsVi)) return "YV12";
@@ -182,6 +188,7 @@ private:
     AVS_ScriptEnvironment *mAvsEnv = nullptr;
     AVS_Clip *mAvsClip = nullptr;
     const AVS_VideoInfo *mAvsVi = nullptr;
+    QRecursiveMutex mAvsAccessMutex;
 
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;

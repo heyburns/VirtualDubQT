@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QProgressDialog>
 #include <QApplication>
+#include <QEvent>
 #include <QElapsedTimer>
 #include <QDebug>
 #include <QFileInfo>
@@ -37,6 +38,65 @@ namespace {
 constexpr qint64 kMaxQueuedFfmpegBytes = 8 * 1024 * 1024;
 constexpr int kProcessPollMs = 25;
 constexpr int kMaxDiagnosticBytes = 1024 * 1024;
+
+class ScopedEditorInputBlocker final : public QObject {
+public:
+    explicit ScopedEditorInputBlocker(QWidget *protectedWidget)
+        : mProtectedWindow(protectedWidget ? protectedWidget->window() : nullptr) {
+        if (mProtectedWindow) qApp->installEventFilter(this);
+    }
+
+    ~ScopedEditorInputBlocker() override {
+        if (mProtectedWindow) qApp->removeEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (!mProtectedWindow || !isUserInteraction(event->type())) return false;
+
+        for (QObject *object = watched; object; object = object->parent()) {
+            if (qobject_cast<QProgressDialog *>(object)) return false;
+            if (object == mProtectedWindow) return true;
+        }
+
+        const QWidget *widget = qobject_cast<QWidget *>(watched);
+        return widget
+            && (widget == mProtectedWindow || mProtectedWindow->isAncestorOf(widget));
+    }
+
+private:
+    static bool isUserInteraction(QEvent::Type type) {
+        switch (type) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+        case QEvent::Shortcut:
+        case QEvent::ShortcutOverride:
+        case QEvent::ContextMenu:
+        case QEvent::Close:
+        case QEvent::DragEnter:
+        case QEvent::DragMove:
+        case QEvent::DragLeave:
+        case QEvent::Drop:
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
+        case QEvent::TabletPress:
+        case QEvent::TabletMove:
+        case QEvent::TabletRelease:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    QWidget *mProtectedWindow = nullptr;
+};
 
 struct AudioStreamProbe {
     bool succeeded = false;
@@ -950,7 +1010,8 @@ bool VDQtVideoExporter::exportRawVideo(
         QProgressDialog indexingProgress(
             "Indexing source frames for raw export...", "Cancel",
             0, totalFrames > 0 ? totalFrames : 0, parentWidget);
-        indexingProgress.setWindowModality(Qt::WindowModal);
+        indexingProgress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker rawIndexInputBlocker(parentWidget);
         indexingProgress.setMinimumDuration(0);
         const int initialEstimate = totalFrames;
         const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
@@ -1116,7 +1177,8 @@ bool VDQtVideoExporter::exportRawVideo(
 
     QProgressDialog progress(
         "Exporting raw video...", "Cancel", 0, framesToExport, parentWidget);
-    progress.setWindowModality(Qt::WindowModal);
+    progress.setWindowModality(Qt::NonModal);
+    ScopedEditorInputBlocker rawExportInputBlocker(parentWidget);
     progress.setMinimumDuration(0);
     progress.setValue(0);
     QElapsedTimer timer;
@@ -1429,7 +1491,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         QProgressDialog indexingProgress(
             "Indexing source frames for an exact export range...", "Cancel",
             0, totalFrames > 0 ? totalFrames : 0, parentWidget);
-        indexingProgress.setWindowModality(Qt::WindowModal);
+        indexingProgress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker exportIndexInputBlocker(parentWidget);
         indexingProgress.setMinimumDuration(0);
 
         const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
@@ -1856,7 +1919,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             QProgressDialog audioProgress(
                 QStringLiteral("Preparing selected audio for fast recompress..."),
                 QStringLiteral("Cancel"), 0, 100, parentWidget);
-            audioProgress.setWindowModality(Qt::WindowModal);
+            audioProgress.setWindowModality(Qt::NonModal);
+            ScopedEditorInputBlocker fastAudioInputBlocker(parentWidget);
             audioProgress.setMinimumDuration(0);
             const bool prepared = audioPlayer->exportAudioToFile(
                 processedAudioPath, startSample, sampleCount,
@@ -1997,7 +2061,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         QProgressDialog progress(
             "Fast recompressing video in native pixel formats...", "Cancel",
             0, 0, parentWidget);
-        progress.setWindowModality(Qt::WindowModal);
+        progress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker fastRecompressInputBlocker(parentWidget);
         progress.setMinimumDuration(0);
         if (progressCallback && !progressCallback(100, 1000)) {
             mWasCancelled = true;
@@ -2172,7 +2237,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         qDebug() << "[Exporter] Direct Stream Copy ffmpeg args:" << args.join(" ");
 
         QProgressDialog progress("Direct stream copy in progress...", "Cancel", 0, 100, parentWidget);
-        progress.setWindowModality(Qt::WindowModal);
+        progress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker directCopyInputBlocker(parentWidget);
         progress.setMinimumDuration(0);
         progress.setValue(30);
         if (progressCallback && !progressCallback(100, 1000)) {
@@ -2302,7 +2368,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
         QProgressDialog audioProgress(
             "Preparing processed audio...", "Cancel", 0, 100, parentWidget);
-        audioProgress.setWindowModality(Qt::WindowModal);
+        audioProgress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker processedAudioInputBlocker(parentWidget);
         audioProgress.setMinimumDuration(0);
         bool audioPrepared = false;
         if (editedTimeline) {
@@ -2583,7 +2650,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     QProgressDialog progress("Exporting processed video...", "Cancel", 0, 100, parentWidget);
-    progress.setWindowModality(Qt::WindowModal);
+    progress.setWindowModality(Qt::NonModal);
+    ScopedEditorInputBlocker processedExportInputBlocker(parentWidget);
     progress.setMinimumDuration(0);
     progress.setValue(0);
 

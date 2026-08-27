@@ -14,34 +14,62 @@ bool VDQtFrameDecodeWorker::openSource(const QString& filePath,
                                        int componentRange,
                                        int errorMode) {
     Q_ASSERT(QThread::currentThread() == thread());
+    mSharedAvsDecoder = nullptr;
     mDecoder.close();
     mDecoder.setDecompressionConfig(formatName, colorSpace, componentRange);
     mDecoder.setErrorMode(errorMode);
     return mDecoder.openFile(filePath);
 }
 
+bool VDQtFrameDecodeWorker::useSharedAvsSource(VDQtVideoDecoder *decoder) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    mDecoder.close();
+    if (!decoder || !decoder->isOpen() || !decoder->isAvsNative()) {
+        mSharedAvsDecoder = nullptr;
+        return false;
+    }
+    mSharedAvsDecoder = decoder;
+    return true;
+}
+
 void VDQtFrameDecodeWorker::closeSource() {
     Q_ASSERT(QThread::currentThread() == thread());
+    mSharedAvsDecoder = nullptr;
     mDecoder.close();
     QMutexLocker lock(&mRequestMutex);
     mRequestedFrame = -1;
+}
+
+QString VDQtFrameDecodeWorker::lastError() const {
+    const VDQtVideoDecoder *decoder = activeDecoder();
+    return decoder ? decoder->getLastError()
+                   : QStringLiteral("No interactive decoder is open.");
+}
+
+VDQtVideoDecoder* VDQtFrameDecodeWorker::activeDecoder() {
+    return mSharedAvsDecoder ? mSharedAvsDecoder : &mDecoder;
+}
+
+const VDQtVideoDecoder* VDQtFrameDecodeWorker::activeDecoder() const {
+    return mSharedAvsDecoder ? mSharedAvsDecoder : &mDecoder;
 }
 
 void VDQtFrameDecodeWorker::setDecompressionConfig(const QString& formatName,
                                                     int colorSpace,
                                                     int componentRange) {
     Q_ASSERT(QThread::currentThread() == thread());
-    mDecoder.setDecompressionConfig(formatName, colorSpace, componentRange);
+    if (!mSharedAvsDecoder)
+        mDecoder.setDecompressionConfig(formatName, colorSpace, componentRange);
 }
 
 void VDQtFrameDecodeWorker::setErrorMode(int errorMode) {
     Q_ASSERT(QThread::currentThread() == thread());
-    mDecoder.setErrorMode(errorMode);
+    if (!mSharedAvsDecoder) mDecoder.setErrorMode(errorMode);
 }
 
 void VDQtFrameDecodeWorker::applyFrameCacheBudget() {
     Q_ASSERT(QThread::currentThread() == thread());
-    mDecoder.applyFrameCacheBudget();
+    if (!mSharedAvsDecoder) mDecoder.applyFrameCacheBudget();
 }
 
 void VDQtFrameDecodeWorker::setFilterChain(const QList<VDFilterInstance>& chain) {
@@ -100,14 +128,21 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
             mRequestedFrame = -1;
         }
 
-        QImage inputImage = mDecoder.getFrameImage(frameIndex, preserveSequentialDecode);
+        VDQtVideoDecoder *decoder = activeDecoder();
+        if (!decoder || !decoder->isOpen()) {
+            QMutexLocker lock(&mRequestMutex);
+            mProcessScheduled = false;
+            return;
+        }
+
+        QImage inputImage = decoder->getFrameImage(frameIndex, preserveSequentialDecode);
         QList<QImage> outputImages;
         if (!inputImage.isNull() && renderFilteredOutput) {
             VDFilterFrameContext context;
             context.frameNumber = frameIndex;
             context.timestampSeconds =
-                mDecoder.getFrameTimestampSeconds(frameIndex);
-            context.frameRate = mDecoder.getFps();
+                decoder->getFrameTimestampSeconds(frameIndex);
+            context.frameRate = decoder->getFps();
             if (!mFilters.processFrameSequence(inputImage, outputImages, context))
                 outputImages.clear();
         }
@@ -119,26 +154,26 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         }
 
         if (currentResult) {
-            const int status = static_cast<int>(mDecoder.getFrameCountStatus());
+            const int status = static_cast<int>(decoder->getFrameCountStatus());
             if (!inputImage.isNull()) {
                 Q_EMIT frameReady(
                     frameIndex,
                     generation,
                     inputImage,
                     outputImages,
-                    mDecoder.isKeyFrame(frameIndex),
-                    mDecoder.getFrameTimestampSeconds(frameIndex),
-                    mDecoder.getFrameDurationSeconds(frameIndex),
-                    mDecoder.getFrameCount(),
+                    decoder->isKeyFrame(frameIndex),
+                    decoder->getFrameTimestampSeconds(frameIndex),
+                    decoder->getFrameDurationSeconds(frameIndex),
+                    decoder->getFrameCount(),
                     status,
-                    mDecoder.getSeekCount(),
-                    mDecoder.getDecodedFrameCount());
+                    decoder->getSeekCount(),
+                    decoder->getDecodedFrameCount());
             } else {
                 Q_EMIT frameUnavailable(
                     frameIndex,
                     generation,
-                    mDecoder.getLastError(),
-                    mDecoder.getFrameCount(),
+                    decoder->getLastError(),
+                    decoder->getFrameCount(),
                     status);
             }
         }
