@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=VirtualDubQT
+GenericName=Video Editor
+Comment=Capture, process, and export video
+Exec=VirtualDubQt %F
+TryExec=VirtualDubQt
+Icon=virtualdubqt
+Terminal=false
+Categories=AudioVideo;AudioVideoEditing;Qt;
+MimeType=video/x-msvideo;video/mp4;video/quicktime;video/x-matroska;video/webm;
+StartupNotify=true
+StartupWMClass=VirtualDub

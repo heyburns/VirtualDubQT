@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
-project(VirtualDubQt VERSION 0.1.0 LANGUAGES CXX)
+project(VirtualDubQt VERSION 0.1.1 LANGUAGES CXX)
 
 include(CTest)
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -83,7 +84,10 @@ add_executable(VirtualDubQt
     src/main.cpp
     ${VIRTUALDUB_QT_SOURCES}
 )
-target_compile_definitions(VirtualDubQt PRIVATE QT_NO_KEYWORDS)
+target_compile_definitions(VirtualDubQt PRIVATE
+    QT_NO_KEYWORDS
+    VDQT_VERSION_STRING="${PROJECT_VERSION}"
+)
 target_include_directories(VirtualDubQt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${AVISYNTH_INCLUDE_DIR}
@@ -119,10 +123,63 @@ target_link_libraries(VirtualDubQt PRIVATE
     ${AVISYNTH_LIBRARY}
     PkgConfig::FFMPEG
 )
-set_target_properties(VirtualDubQt PROPERTIES BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
+set_target_properties(VirtualDubQt PROPERTIES
+    BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
+    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/virtualdubqt"
+)
 
 # Compatibility alias for build scripts
 add_custom_target(VirtualDub_Port DEPENDS VirtualDubQt)
+
+install(TARGETS VirtualDubQt
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+install(FILES packaging/virtualdubqt.desktop
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+)
+install(FILES packaging/virtualdubqt.png
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps"
+)
+install(FILES LICENSE
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/virtualdubqt"
+)
+
+# AviSynth+ does not currently ship in the target Debian and Fedora repositories,
+# so include its runtime library while leaving plug-ins under the user's control.
+file(REAL_PATH "${AVISYNTH_LIBRARY}" AVISYNTH_REAL_LIBRARY)
+if(IS_SYMLINK "${AVISYNTH_LIBRARY}")
+    file(READ_SYMLINK "${AVISYNTH_LIBRARY}" AVISYNTH_LIBRARY_LINK_TARGET)
+    get_filename_component(AVISYNTH_SONAME "${AVISYNTH_LIBRARY_LINK_TARGET}" NAME)
+else()
+    get_filename_component(AVISYNTH_SONAME "${AVISYNTH_REAL_LIBRARY}" NAME)
+endif()
+install(FILES "${AVISYNTH_REAL_LIBRARY}"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/virtualdubqt"
+    RENAME "${AVISYNTH_SONAME}"
+)
+
+set(CPACK_PACKAGE_NAME "virtualdubqt")
+set(CPACK_PACKAGE_VENDOR "VirtualDubQT contributors")
+set(CPACK_PACKAGE_CONTACT "Alan Burns <alan.burns@icloud.com>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Native Linux video capture, processing, and export application"
+)
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/heyburns/VirtualDubQT")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "VirtualDubQT")
+set(CPACK_STRIP_FILES ON)
+
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_SECTION "video")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
+set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
+
+include(CPack)
 
 if (BUILD_TESTING)
     add_executable(stabilization_tests

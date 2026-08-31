@@ -1,0 +1,208 @@
+name: Publish Linux release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AVISYNTH_VERSION: "3.7.5"
+
+jobs:
+  deb-and-appimage:
+    name: AppImage and Ubuntu 24.04 DEB
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fq "project(VirtualDubQt VERSION ${version} " CMakeLists.txt
+          test -f "packaging/release-notes-${GITHUB_REF_NAME}.md"
+
+      - name: Install build tools and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake curl desktop-file-utils dpkg-dev file git \
+            libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libfuse2t64 libswresample-dev libswscale-dev ninja-build pkg-config \
+            qt6-base-dev qt6-multimedia-dev
+
+      - name: Build AviSynth+ runtime
+        run: |
+          git clone --branch "v${AVISYNTH_VERSION}" --depth 1 \
+            https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
+          cmake -S /tmp/AviSynthPlus -B /tmp/AviSynthPlus/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DENABLE_PLUGINS=OFF
+          cmake --build /tmp/AviSynthPlus/build --parallel
+          sudo cmake --install /tmp/AviSynthPlus/build
+          sudo ldconfig
+
+      - name: Build VirtualDubQT
+        run: |
+          cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DBUILD_TESTING=OFF
+          cmake --build build-release --parallel
+          desktop-file-validate packaging/virtualdubqt.desktop
+
+      - name: Build and validate DEB
+        run: |
+          mkdir -p dist
+          cpack -G DEB -B dist --config build-release/CPackConfig.cmake
+          deb_file="$(find dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "${deb_file}"
+          dpkg-deb --info "${deb_file}"
+          dpkg-deb --contents "${deb_file}"
+          package_root="$(mktemp -d)"
+          dpkg-deb --extract "${deb_file}" "${package_root}"
+          QT_QPA_PLATFORM=offscreen \
+            "${package_root}/usr/bin/VirtualDubQt" --help
+
+      - name: Build and validate AppImage
+        shell: bash
+        run: |
+          linuxdeploy_version="1-alpha-20250213-2"
+          qt_plugin_version="1-alpha-20250213-1"
+          curl --fail --location --retry 3 \
+            --output linuxdeploy-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${linuxdeploy_version}/linuxdeploy-x86_64.AppImage"
+          curl --fail --location --retry 3 \
+            --output linuxdeploy-plugin-qt-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/${qt_plugin_version}/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+
+          export QMAKE="$(command -v qmake6)"
+          export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --executable build-release/VirtualDubQt \
+            --desktop-file packaging/virtualdubqt.desktop \
+            --icon-file packaging/virtualdubqt.png \
+            --plugin qt
+          install -Dm644 LICENSE AppDir/usr/share/licenses/virtualdubqt/LICENSE
+
+          version="${GITHUB_REF_NAME#v}"
+          export VERSION="${version}"
+          export OUTPUT="${GITHUB_WORKSPACE}/dist/VirtualDubQT-${version}-x86_64.AppImage"
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          test -x "${OUTPUT}"
+          APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen \
+            "${OUTPUT}" --help
+
+      - name: Upload Ubuntu packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-packages
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+
+  rpm:
+    name: Fedora 43 RPM
+    runs-on: ubuntu-24.04
+    container: fedora:43
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fq "project(VirtualDubQt VERSION ${version} " CMakeLists.txt
+
+      - name: Install build tools and libraries
+        run: |
+          dnf install -y \
+            cmake file findutils gcc-c++ git ninja-build pkgconf-pkg-config \
+            qt6-qtbase-devel qt6-qtmultimedia-devel ffmpeg-free-devel \
+            rpm-build
+
+      - name: Build AviSynth+ runtime
+        run: |
+          git clone --branch "v${AVISYNTH_VERSION}" --depth 1 \
+            https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
+          cmake -S /tmp/AviSynthPlus -B /tmp/AviSynthPlus/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_INSTALL_LIBDIR=lib64 \
+            -DENABLE_PLUGINS=OFF
+          cmake --build /tmp/AviSynthPlus/build --parallel
+          cmake --install /tmp/AviSynthPlus/build
+          ldconfig
+
+      - name: Build VirtualDubQT and RPM
+        run: |
+          cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DBUILD_TESTING=OFF
+          cmake --build build-release --parallel
+          mkdir -p dist
+          cpack -G RPM -B dist --config build-release/CPackConfig.cmake
+
+      - name: Validate RPM
+        run: |
+          rpm_file="$(find dist -maxdepth 1 -type f -name '*.rpm' -print -quit)"
+          test -n "${rpm_file}"
+          rpm -qpi "${rpm_file}"
+          rpm -qpl "${rpm_file}"
+          rpm -qpR "${rpm_file}"
+
+      - name: Upload Fedora package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-package
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - deb-and-appimage
+      - rpm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "VirtualDubQT ${GITHUB_REF_NAME}" \
+            --notes-file "packaging/release-notes-${GITHUB_REF_NAME}.md" \
+            --verify-tag

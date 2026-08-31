@@ -1,4 +1,4 @@
-# VirtualDubQT (v0.1)
+# VirtualDubQT
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/heyburns/VirtualDubQT/main/docs/screenshot.png" alt="VirtualDubQt Screenshot" width="800">

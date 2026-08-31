@@ -301,7 +301,7 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
         mDecompressionFormatConfig.componentRange);
     mVideoDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
 
-    setWindowTitle("VirtualDubQt v0.1");
+    setWindowTitle(QStringLiteral("VirtualDubQt v" VDQT_VERSION_STRING));
     resize(1120, 780);
     setAcceptDrops(true);
 
@@ -769,7 +769,7 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
         mPositionControl->SetFrameRate(mVideoDecoder.getFps());
         autoFitWindowToVideo();
 
-        setWindowTitle(QString("VirtualDubQt v0.1 - [%1]").arg(
+        setWindowTitle(QStringLiteral("VirtualDubQt v" VDQT_VERSION_STRING " - [%1]").arg(
             concatenated ? displayName : QFileInfo(filePath).fileName()));
 
         VDLogWindow::instance(this)->appendLog(QString("[File] Opened video stream: %1 (%2x%3 @ %4 fps, %5 frames)")
@@ -881,7 +881,7 @@ void VDQtMainWindow::onFileOpenImageSequence() {
     mFrameRateConfig.sourceMode = 1;
     mFrameRateConfig.customSourceFps = frameRate;
     mPositionControl->SetFrameRate(frameRate);
-    setWindowTitle(QString("VirtualDubQt v0.1 - [Image sequence: %1 files]")
+    setWindowTitle(QStringLiteral("VirtualDubQt v" VDQT_VERSION_STRING " - [Image sequence: %1 files]")
                        .arg(images.size()));
     statusBar()->showMessage(
         QString("Opened %1 images at %2 fps")
@@ -1047,7 +1047,7 @@ void VDQtMainWindow::onFileOpenRawVideo() {
     mFrameRateConfig.sourceMode = 1;
     mFrameRateConfig.customSourceFps = mRawInputFrameRate;
     mPositionControl->SetFrameRate(mRawInputFrameRate);
-    setWindowTitle(QString("VirtualDubQt v0.1 - [Raw: %1]")
+    setWindowTitle(QStringLiteral("VirtualDubQt v" VDQT_VERSION_STRING " - [Raw: %1]")
                        .arg(QFileInfo(sourcePath).fileName()));
     statusBar()->showMessage(QString("Opened raw %1 %2x%3 at %4 fps")
         .arg(mRawInputPixelFormat).arg(mRawInputWidth).arg(mRawInputHeight)
