@@ -256,6 +256,7 @@ private:
     QString mRecoveryPath;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;
+    int mPlaybackPausedFrame = -1;
     bool mPlaybackPreview = false;
     int mPlaybackClockFrame = 0;
     int mPlaybackOutputPhase = 0;

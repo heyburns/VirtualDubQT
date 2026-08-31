@@ -1754,6 +1754,48 @@ bool VDQtRunAudioDecodeAheadDeadlineRegression(const QString& filePath, QString 
     return true;
 }
 
+bool VDQtRunAudioRapidSeekRegression(const QString& filePath,
+                                     QString *errorMessage)
+{
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+
+    VDQtFFmpegAudioDevice device(filePath, -1, format, 0);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+
+    const qint64 pullBytes = format.bytesForDuration(20000);
+    QByteArray buffer(static_cast<qsizetype>(pullBytes), Qt::Uninitialized);
+    for (int iteration = 0; iteration < 40; ++iteration) {
+        const int64_t targetSample = (iteration % 8) * 6000;
+        if (!device.seekToSample(targetSample)
+            || device.currentSample() != targetSample) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral(
+                    "Rapid audio seek %1 failed to restart at sample %2: %3")
+                                    .arg(iteration)
+                                    .arg(targetSample)
+                                    .arg(device.error());
+            }
+            return false;
+        }
+        if (device.read(buffer.data(), pullBytes) != pullBytes) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral(
+                    "Rapid audio seek %1 did not provide a complete buffer: %2")
+                                    .arg(iteration)
+                                    .arg(device.error());
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 bool VDQtRunAudioGapRegression(const QString& filePath,
                                int64_t gapStartSample,
                                int64_t gapLengthSamples,
@@ -2592,8 +2634,13 @@ void VDQtAudioPlayer::play()
 
 void VDQtAudioPlayer::pause()
 {
-    if (!mHasAudio || !mAudioSink) return;
-    mAudioSink->suspend();
+    if (!mHasAudio || !mAudioSink) {
+        mIsPlaying = false;
+        return;
+    }
+    const QAudio::State state = mAudioSink->state();
+    if (state == QAudio::ActiveState || state == QAudio::IdleState)
+        mAudioSink->suspend();
     mIsPlaying = false;
 }
 

@@ -12,6 +12,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 extern "C" {
@@ -509,11 +511,62 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
             && mSwsSourceWidth == w
             && mSwsSourceHeight == h;
         if ((contextMatches || setupSwsContext(srcFmt, w, h, mOutputPixelFormat)) && mSwsCtx) {
-            uint8_t *dstSlice[4] = { img.bits(), nullptr, nullptr, nullptr };
-            int dstStride[4] = { static_cast<int>(img.bytesPerLine()), 0, 0, 0 };
-            const int scaledRows = sws_scale(mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
+            // Do not give swscale direct access to QImage storage. Optimized
+            // packed-RGB converters can finish a partial row with a complete
+            // SIMD store; at widths such as 648 RGB24 pixels that crosses the
+            // exact end of Qt's allocation and corrupts the heap. Use an
+            // aligned row stride plus a padded allocation, then copy only the
+            // visible bytes into the image.
+            constexpr qsizetype kConversionAlignment = 64;
+            constexpr qsizetype kConversionTailPadding = 64;
+            const int visibleRowBytes = av_image_get_linesize(
+                mOutputPixelFormat, w, 0);
+            const qsizetype alignedRowBytes = visibleRowBytes > 0
+                ? (static_cast<qsizetype>(visibleRowBytes)
+                    + kConversionAlignment - 1)
+                    & ~(kConversionAlignment - 1)
+                : 0;
+            const qsizetype maximumSize = std::numeric_limits<qsizetype>::max();
+            const bool invalidSize = visibleRowBytes <= 0
+                || img.bytesPerLine() < visibleRowBytes
+                || alignedRowBytes > std::numeric_limits<int>::max()
+                || h <= 0
+                || alignedRowBytes >
+                    (maximumSize - kConversionTailPadding
+                     - (kConversionAlignment - 1)) / h;
+            if (invalidSize) {
+                mLastError = QStringLiteral(
+                    "Invalid RGB conversion buffer size for AviSynth frame %1.")
+                                 .arg(frameIndex);
+                avs_release_video_frame(frame);
+                return QImage();
+            }
+
+            const qsizetype bufferSize = alignedRowBytes * h
+                + kConversionTailPadding + (kConversionAlignment - 1);
+            mAvsConversionBuffer.resize(bufferSize);
+            const uintptr_t rawAddress = reinterpret_cast<uintptr_t>(
+                mAvsConversionBuffer.data());
+            const uintptr_t alignedAddress = (rawAddress
+                + static_cast<uintptr_t>(kConversionAlignment - 1))
+                & ~static_cast<uintptr_t>(kConversionAlignment - 1);
+            auto *conversionPixels = reinterpret_cast<uint8_t *>(alignedAddress);
+
+            uint8_t *dstSlice[4] = { conversionPixels, nullptr, nullptr, nullptr };
+            int dstStride[4] = { static_cast<int>(alignedRowBytes), 0, 0, 0 };
+            const int scaledRows = sws_scale(
+                mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
             avs_release_video_frame(frame);
-            if (scaledRows == h) return img;
+            if (scaledRows == h) {
+                for (int row = 0; row < h; ++row) {
+                    std::memcpy(
+                        img.scanLine(row),
+                        conversionPixels + static_cast<qsizetype>(row)
+                            * alignedRowBytes,
+                        static_cast<size_t>(visibleRowBytes));
+                }
+                return img;
+            }
 
             mLastError = QStringLiteral("Pixel conversion failed for AviSynth frame %1.").arg(frameIndex);
             return QImage();
@@ -1033,6 +1086,8 @@ void VDQtVideoDecoder::close() {
         avs_delete_script_environment(mAvsEnv);
         mAvsEnv = nullptr;
     }
+
+    mAvsConversionBuffer = QByteArray();
 
     if (mSwsCtx) {
         sws_freeContext(mSwsCtx);

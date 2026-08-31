@@ -113,6 +113,10 @@ public:
     double getPlaybackTimeSeconds() const;
 
     bool isPlaying() const { return mIsPlaying; }
+    bool isPaused() const {
+        return mAudioSink
+            && mAudioSink->state() == QAudio::SuspendedState;
+    }
     bool hasAudio() const { return mHasAudio; }
     int getSampleRate() const { return mSampleRate; }
     int getChannels() const { return mChannels; }
@@ -172,6 +176,8 @@ private:
 #ifdef VDQT_AUDIO_TESTING
 bool VDQtRunAudioBufferRegression(const QString& filePath, QString *errorMessage);
 bool VDQtRunAudioDecodeAheadDeadlineRegression(const QString& filePath, QString *errorMessage);
+bool VDQtRunAudioRapidSeekRegression(const QString& filePath,
+                                     QString *errorMessage);
 bool VDQtRunAudioGapRegression(const QString& filePath,
                                int64_t gapStartSample,
                                int64_t gapLengthSamples,

@@ -1163,6 +1163,13 @@ int main(int argc, char **argv) {
             std::cerr << audioBufferError.toStdString() << '\n';
             return 1;
         }
+        audioBufferError.clear();
+        if (!require(VDQtRunAudioRapidSeekRegression(
+                         audioFixture, &audioBufferError),
+                     "rapid audio restarts serialize producer teardown and recreation")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
 
         const QString jitterFixture = settingsDirectory.filePath(QStringLiteral("subsample_jitter.nut"));
         if (!require(runProcess(
@@ -2292,6 +2299,34 @@ int main(int argc, char **argv) {
                          "AviSynth import restores process working directory"))
                 return 1;
         }
+    }
+
+    {
+        // The optimized swscale RGB24 tail writes a complete SIMD vector for
+        // widths that do not end on a vector boundary. A 648-pixel row used to
+        // write 24 bytes beyond a tightly packed QImage and corrupt the heap.
+        const QString scriptPath = settingsDirectory.filePath(
+            QStringLiteral("avs_rgb24_simd_tail.avs"));
+        const QByteArray script =
+            "BlankClip(length=1, width=648, height=472, pixel_type=\"YV12\", "
+            "color=$204060)\n";
+        if (!require(writeFile(scriptPath, script),
+                     "write AviSynth SIMD-tail conversion script"))
+            return 1;
+
+        VDQtVideoDecoder decoder;
+        if (!require(decoder.openFile(scriptPath),
+                     "open AviSynth SIMD-tail conversion script")) {
+            std::cerr << decoder.getLastError().toStdString() << '\n';
+            return 1;
+        }
+        const QImage frame = decoder.getFrameImage(0);
+        if (!require(!frame.isNull()
+                        && frame.size() == QSize(648, 472)
+                        && frame.format() == QImage::Format_RGB888,
+                     "AviSynth RGB24 conversion safely contains SIMD tail writes"))
+            return 1;
+        decoder.close();
     }
 
     {

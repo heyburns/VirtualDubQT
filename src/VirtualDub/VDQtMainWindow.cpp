@@ -1205,6 +1205,7 @@ bool VDQtMainWindow::appendVideoSegments(
 
 void VDQtMainWindow::onFileClose() {
     mPlaybackTimer->stop();
+    mPlaybackPausedFrame = -1;
     if (mFrameServer) mFrameServer->stop();
     closeInteractiveDecoder();
     mAudioPlayer.close();
@@ -8739,6 +8740,8 @@ void VDQtMainWindow::onHelpAbout() {
 
 void VDQtMainWindow::onPositionChanged(int frame) {
     if (mIsExporting) return;
+    if (!mPlaybackTimer->isActive() && frame != mPlaybackPausedFrame)
+        mPlaybackPausedFrame = -1;
     updateFrameDisplay(frame);
 }
 
@@ -8759,6 +8762,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     case VDQT_PCN_STOP: // 0 - Stop
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = static_cast<int>(mPositionControl->GetPosition());
         updateFrameDisplay(mPositionControl->GetPosition());
         break;
 
@@ -8767,6 +8771,8 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
             mAudioPlayer.pause();
+            mPlaybackPausedFrame = static_cast<int>(
+                mPositionControl->GetPosition());
             updateFrameDisplay(mPositionControl->GetPosition());
         } else {
             mPlaybackStartFrame = mPositionControl->GetPosition();
@@ -8786,8 +8792,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
             const int sourceFrame = sourceFrameForTimelineFrame(mPlaybackStartFrame);
             mPlaybackAudioOriginSeconds = sourceFrame >= 0
                 ? mVideoDecoder.getFrameTimestampSeconds(sourceFrame) : -1.0;
-            seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
+            const bool resumePausedAudio = mPlaybackPausedFrame
+                    == mPlaybackStartFrame
+                && mAudioPlayer.isPaused();
+            if (!resumePausedAudio)
+                seekAudioToVideoFrame(mPlaybackStartFrame);
             mAudioPlayer.play();
+            mPlaybackPausedFrame = -1;
             syncInteractiveFilterChain();
             mDecodedPreviewFrames.clear();
             mDecodedPreviewTimelineFrame = -1;
@@ -8803,6 +8814,8 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
             mAudioPlayer.pause();
+            mPlaybackPausedFrame = static_cast<int>(
+                mPositionControl->GetPosition());
             updateFrameDisplay(mPositionControl->GetPosition());
         } else {
             mPlaybackStartFrame = mPositionControl->GetPosition();
@@ -8822,8 +8835,13 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
             const int sourceFrame = sourceFrameForTimelineFrame(mPlaybackStartFrame);
             mPlaybackAudioOriginSeconds = sourceFrame >= 0
                 ? mVideoDecoder.getFrameTimestampSeconds(sourceFrame) : -1.0;
-            seekAudioToVideoFrame(static_cast<int>(mPositionControl->GetPosition()));
+            const bool resumePausedAudio = mPlaybackPausedFrame
+                    == mPlaybackStartFrame
+                && mAudioPlayer.isPaused();
+            if (!resumePausedAudio)
+                seekAudioToVideoFrame(mPlaybackStartFrame);
             mAudioPlayer.play();
+            mPlaybackPausedFrame = -1;
             syncInteractiveFilterChain();
             mDecodedPreviewFrames.clear();
             mDecodedPreviewTimelineFrame = -1;
@@ -8837,12 +8855,14 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     case VDQT_PCN_START: // 4 - Jump to Start (|<)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         mPositionControl->SetPosition(0);
         break;
 
     case VDQT_PCN_END: // 7 - Jump to End (>|)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         if (!ensureExactFrameRange(QStringLiteral("end of stream"))) break;
         if (mTimeline.frameCount() > 0) {
             int target = static_cast<int>(mTimeline.frameCount() - 1);
@@ -8856,6 +8876,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     case VDQT_PCN_BACKWARD: // 5 - Step Backward 1 frame (<)
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         mPositionControl->SetPosition(std::max<qint64>(0, mPositionControl->GetPosition() - 1));
         break;
 
@@ -8863,6 +8884,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         const int target = static_cast<int>(mPositionControl->GetPosition()) + 1;
         if (!mTimeline.sourceFrameCountExact() && mTimeline.isIdentity()) {
             const int rangeEnd = std::max(target, mVideoDecoder.getFrameCount() - 1);
@@ -8879,6 +8901,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         const int source = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
         const int targetSource = mVideoDecoder.getPreviousKeyFrame(source);
@@ -8892,6 +8915,7 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
     {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
+        mPlaybackPausedFrame = -1;
         const int source = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
         const int targetSource = mVideoDecoder.getNextKeyFrame(source);

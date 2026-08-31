@@ -92,6 +92,27 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // A suspended sink must be resumed in place. Repeatedly stopping,
+    // resetting, seeking, and recreating the producer for an unchanged
+    // playhead used to race the backend when the transport was toggled fast.
+    for (int iteration = 0; iteration < 40; ++iteration) {
+        player.play();
+        application.processEvents();
+        QThread::msleep(5);
+        player.pause();
+        QElapsedTimer pauseWait;
+        pauseWait.start();
+        while (!player.isPaused() && pauseWait.elapsed() < 250) {
+            application.processEvents();
+            QThread::msleep(1);
+        }
+        if (!player.isPaused()) {
+            std::cerr << "FAIL: rapid playback toggle " << iteration
+                      << " did not leave the audio sink suspended\n";
+            return 1;
+        }
+    }
+
     std::cout << "real audio backend playback passed at " << previousTime << " seconds\n";
     return 0;
 }

@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QByteArray>
 #include <QImage>
 #include <QCache>
 #include <QMutex>
@@ -189,6 +190,11 @@ private:
     AVS_Clip *mAvsClip = nullptr;
     const AVS_VideoInfo *mAvsVi = nullptr;
     QRecursiveMutex mAvsAccessMutex;
+    // swscale's SIMD RGB24 converters may store a complete vector at the end
+    // of the final scanline. Qt images only guarantee bytesPerLine() * height
+    // writable bytes, so native AviSynth frames are converted through this
+    // aligned, explicitly tail-padded buffer before being copied to QImage.
+    QByteArray mAvsConversionBuffer;
 
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
