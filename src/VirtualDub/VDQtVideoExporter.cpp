@@ -594,7 +594,11 @@ public:
     }
 
 private:
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
     static int writePacket(void *opaque, const uint8_t *buffer, int size) {
+#else
+    static int writePacket(void *opaque, uint8_t *buffer, int size) {
+#endif
         return static_cast<TimestampedNutWriter *>(opaque)->writeBytes(buffer, size);
     }
 
