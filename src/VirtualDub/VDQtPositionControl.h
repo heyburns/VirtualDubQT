@@ -25,6 +25,8 @@ enum VDQtTransportAction {
     VDQT_PCN_PLAYPREVIEW = 10
 };
 
+// QSlider with lightweight overlays for the half-open selection and timeline
+// markers. It deliberately contains no source/timeline mapping logic.
 class VDTimelineSlider : public QSlider {
     Q_OBJECT
 public:
@@ -41,6 +43,10 @@ private:
     QList<qint64> mMarkers;
 };
 
+// VirtualDub-style transport strip and position model. Public positions are
+// 64-bit, while QSlider is 32-bit; the implementation maps long sources into
+// the visible slider range. Scrub notifications are coalesced by mScrubTimer so
+// fast mouse movement cannot flood the decoder with obsolete seeks.
 class VDQtPositionControlWidget : public QWidget {
     Q_OBJECT
 public:
@@ -100,7 +106,7 @@ private:
     qint64 mRangeHi = 1000;
     qint64 mPosition = 0;
     qint64 mSelStart = 0;
-    qint64 mSelEnd = 0;
+    qint64 mSelEnd = 0; // Exclusive, matching VirtualDub range semantics.
     double mFrameRate = 30000.0 / 1001.0;
 
     VDTimelineSlider *mSlider;

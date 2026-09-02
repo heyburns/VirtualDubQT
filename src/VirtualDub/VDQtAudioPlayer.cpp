@@ -1,3 +1,7 @@
+// Streaming audio backend for FFmpeg and native AviSynth sources. This file is
+// intentionally larger than the public player: internal QIODevice producers
+// own decode-ahead threads, bounded buffers, timestamp repair, seek/restart
+// coordination, and sample-accurate export helpers.
 #include "VDQtAudioPlayer.h"
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
@@ -304,6 +308,10 @@ bool readAvsAsInt16(AVS_Clip *clip,
     }
 }
 
+// Low-level synchronous decoder/resampler used by both live-device producers
+// and offline export. It converts the selected source stream into one requested
+// packed PCM format and repairs only sub-millisecond timestamp jitter; genuine
+// timeline gaps are emitted as silence rather than collapsed.
 class FFmpegAudioDecoder final {
 public:
     FFmpegAudioDecoder() = default;
@@ -856,6 +864,8 @@ private:
     QString mError;
 };
 
+// Complete description of an offline PCM stream before it is wrapped in WAV or
+// handed to an external encoder.
 struct PcmOutputSpec {
     AVSampleFormat sampleFormat = AV_SAMPLE_FMT_S16;
     int containerBits = 16;
@@ -884,6 +894,8 @@ PcmOutputSpec choosePcmOutput(AVSampleFormat sourceFormat, int sourceBits)
     return result;
 }
 
+// Minimal seekable WAV/RF64 writer. Headers are finalized after the last sample
+// so long exports do not require retaining PCM in memory.
 class WavWriter final {
 public:
     bool open(const QString &path,
@@ -1135,6 +1147,11 @@ bool transcodeTemporaryWav(const QString &wavPath,
 
 } // namespace
 
+// Pull-based FFmpeg device used by QAudioSink. A producer thread fills a bounded
+// PCM ring/window using FFmpegAudioDecoder. readData() therefore performs only
+// buffer copies/waits and never invokes codec or resampler work on Qt's audio
+// callback thread. A seek stops and rejoins the old producer before resetting
+// decoder state, preventing overlapping codec access during rapid transport.
 class VDQtFFmpegAudioDevice final : public QIODevice {
 public:
     VDQtFFmpegAudioDevice(const QString &filePath,
@@ -1922,6 +1939,10 @@ bool VDQtRunAvsAudioDecodeAheadDeadlineRegression(AVS_Clip *clip,
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Native AviSynth decode-ahead device
+// ---------------------------------------------------------------------------
+
 AVSAudioDevice::AVSAudioDevice(AVS_Clip *clip,
                                const AVS_VideoInfo *vi,
                                QRecursiveMutex *avsAccessMutex,
@@ -2225,6 +2246,10 @@ qint64 AVSAudioDevice::writeData(const char *, qint64)
 {
     return -1;
 }
+
+// ---------------------------------------------------------------------------
+// Session audio-player facade and stream selection
+// ---------------------------------------------------------------------------
 
 VDQtAudioPlayer::VDQtAudioPlayer()
     : mIsOpen(false)
@@ -2747,6 +2772,10 @@ QString VDQtAudioPlayer::getAudioCompressionString() const
     }
     return "Unknown";
 }
+
+// ---------------------------------------------------------------------------
+// Offline audio export
+// ---------------------------------------------------------------------------
 
 bool VDQtAudioPlayer::exportAudioToFile(
     const QString &outputPath,

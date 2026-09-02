@@ -1,3 +1,6 @@
+// Curated FFmpeg encoder catalog and option normalization. Availability checks
+// interrogate the linked libavcodec build; argument builders are the canonical
+// translation from UI/project parameters to ffmpeg(1) encoder options.
 #include "VDQtCodecEngine.h"
 #include "VDQtCodecSettings.h"
 #include <algorithm>
@@ -19,7 +22,14 @@ VDQtCodecEngine& VDQtCodecEngine::instance() {
     return inst;
 }
 
+// -----------------------------------------------------------------------------
+// Runtime encoder catalog
+// -----------------------------------------------------------------------------
+
 QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
+    // Preferred encoders appear first with richer capability metadata. They are
+    // still filtered against the local FFmpeg build; the UI must never promise
+    // an encoder merely because this application knows how to configure it.
     const QList<VDVideoCodecInfo> preferred = {
         {QStringLiteral("rawvideo"), QStringLiteral("Uncompressed RGB/YCbCr"),
          QStringLiteral("Uncompressed native frames."), false, false, false, false, false, true},
@@ -60,6 +70,8 @@ QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
         }
     }
 
+    // Preserve access to less common distribution-provided encoders by adding
+    // everything else after the curated list in alphabetical order.
     QList<VDVideoCodecInfo> discovered;
     void *iterator = nullptr;
     const AVCodec *codec = nullptr;
@@ -139,6 +151,10 @@ QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
     result.append(discovered);
     return result;
 }
+
+// -----------------------------------------------------------------------------
+// Session parameters and codec-specific defaults
+// -----------------------------------------------------------------------------
 
 VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &codecId) {
     VDVideoCodecParams p;
@@ -240,6 +256,8 @@ void VDQtCodecEngine::setAudioParams(const VDAudioCodecParams& params) {
 }
 
 void VDQtCodecEngine::resetToDefaults() {
+    // These defaults are application-session state. Project/job snapshots copy
+    // concrete values, so resetting here cannot silently alter queued work.
     mCodecParamsMap.clear();
     mVideoParams = getDefaultVideoParamsForCodec("prores_ks");
 
@@ -276,6 +294,10 @@ VDAudioCodecParams VDQtCodecEngine::audioParamsFromConfig(
         params.bitDepth = 16;
     return params;
 }
+
+// -----------------------------------------------------------------------------
+// FFmpeg command-line translation and capability checks
+// -----------------------------------------------------------------------------
 
 QStringList VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
     const VDAudioCodecParams& params)
@@ -352,6 +374,8 @@ QStringList VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
             args << "-b:a" << QString("%1k").arg(params.bitrateKbps);
     }
 
+    // Some encoders accept only a small set of sampling rates. Normalize here
+    // rather than letting different export callers make different decisions.
     if (codec == "libopus" || codec == "opus") {
         int rate = params.sampleRate;
         if (rate != 8000 && rate != 12000 && rate != 16000

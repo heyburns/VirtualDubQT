@@ -1,3 +1,7 @@
+// QImage-based built-in and VDX plug-in filter pipeline. Catalog construction
+// and default parameters precede the hot processing loop; expensive filters use
+// cached lookup tables/assets and QtConcurrent row bands where that is safe.
+// Temporal state is per pipeline instance and is reset at discontinuities.
 #include "VDQtFilterSystem.h"
 #include "VDQtPluginHost.h"
 #include <QTransform>
@@ -20,6 +24,9 @@ namespace {
 constexpr int kMaxSequencedBobFilters = 6;
 constexpr qint64 kParallelFilterPixelThreshold = 256 * 1024;
 
+// Split independent rows across the global Qt thread pool only when the image
+// is large enough to repay task scheduling. Callers must capture disjoint output
+// rows and treat their input image as immutable.
 template <typename Function>
 void parallelFor(int count, qint64 workItems, Function&& function) {
     const int idealThreads = std::max(1, QThread::idealThreadCount());
@@ -104,11 +111,17 @@ void setRgba64Channel(QRgba64& pixel, int channel, quint16 value) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Catalog and active-chain configuration
+// ---------------------------------------------------------------------------
+
 VDQtFilterSystem::VDQtFilterSystem() = default;
 
 VDQtFilterSystem::~VDQtFilterSystem() = default;
 
 void VDQtFilterSystem::clearFilters() {
+    // A persistent-chain change invalidates plugin instances and every cache;
+    // those objects may contain state tied to an entry that no longer exists.
     for (const VDFilterInstance& filter : std::as_const(mActiveChain))
         VDQtPluginHost::instance().forgetInstance(filter.id);
     mActiveChain.clear();
@@ -127,6 +140,9 @@ void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) 
 
 void VDQtFilterSystem::replaceActiveChainTransient(
     const QList<VDFilterInstance>& chain) {
+    // Worker/export copies use the same filter descriptions but independent
+    // runtime state. Asset cache entries are retained here because changing a
+    // numeric preview parameter should not reload unchanged logo files.
     mActiveChain = chain;
     mSixAxisLutCache.clear();
     mTemporalStates.clear();
@@ -138,6 +154,9 @@ VDQtFilterSystem& VDQtFilterSystem::instance() {
 }
 
 QList<VDQtFilterSystem::FilterInfo> VDQtFilterSystem::getAvailableFilters() const {
+    // Built-ins have stable enum identities. Plugin records are discovered at
+    // runtime and carry pluginId because their display names are not guaranteed
+    // unique or stable enough for project serialization.
     QList<FilterInfo> filters = {
         { VDFilterType::SixAxis, "6-axis color correction", "6-axis hue, saturation, and color balance correction." },
         { VDFilterType::BobDoubler, "bob doubler", "Upsamples an interlaced video to double frame rate." },
@@ -220,6 +239,9 @@ bool VDQtFilterSystem::addPluginFilter(const QString& pluginId) {
 }
 
 void VDQtFilterSystem::addFilter(VDFilterType type) {
+    // Defaults define a harmless or conventional initial configuration and are
+    // part of script/project compatibility. Dialogs edit these named values;
+    // processFrameForPhase interprets the same keys later.
     VDFilterInstance inst;
     inst.id = QUuid::createUuid().toString();
     inst.type = type;
@@ -518,6 +540,10 @@ void VDQtFilterSystem::resetRuntimeState() {
     VDQtPluginHost::instance().forgetAllInstances();
 }
 
+// ---------------------------------------------------------------------------
+// Frame processing and temporal-rate expansion
+// ---------------------------------------------------------------------------
+
 QImage VDQtFilterSystem::processFrame(const QImage& inputFrame) {
     // The historical API can return only one image. Use the first field phase
     // so preview remains deterministic; rate-aware pipelines must call
@@ -537,6 +563,8 @@ VDFilterTimingInfo VDQtFilterSystem::getTimingInfo() const {
             ++bobFilters;
     }
 
+    // Each bob filter doubles phases; cap the exponential expansion before a
+    // malformed project can request an impractical number of output images.
     if (bobFilters > kMaxSequencedBobFilters)
         return { 0, false };
 
@@ -569,6 +597,8 @@ QImage VDQtFilterSystem::processFrameForPhase(
     const VDFilterFrameContext& context) {
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
 
+    // Normalize once at chain entry. 64-bit input remains 16-bit-per-channel;
+    // ordinary input uses packed 8-bit RGB(A) understood by the optimized loops.
     bool highPrecision = inputFrame.depth() > 32;
 
     QImage result = highPrecision
@@ -581,6 +611,9 @@ QImage VDQtFilterSystem::processFrameForPhase(
     }
     int bobFilterIndex = 0;
 
+    // The chain is interpreted in order. Reserved _sylia.* parameters carry
+    // script-only range, clipping, and opacity-curve metadata without widening
+    // the public filter ABI or losing round-trip compatibility with VCF files.
     for (const auto& filter : mActiveChain) {
         if (!filter.enabled) continue;
 
@@ -621,6 +654,8 @@ QImage VDQtFilterSystem::processFrameForPhase(
         // the actual pixel layout instead of the input frame's layout.
         highPrecision = result.depth() > 32;
 
+        // Each case must leave result as a detached image. Geometry-changing
+        // filters replace it; in-place filters write only after detachment.
         switch (filter.type) {
         case VDFilterType::Plugin: {
             QImage pluginResult;

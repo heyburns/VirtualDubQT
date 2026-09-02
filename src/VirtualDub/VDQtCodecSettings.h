@@ -3,6 +3,9 @@
 
 #include <QString>
 
+// Lightweight, in-memory dialog/session preferences. These are deliberately
+// distinct from VDQtCodecEngine's encoder parameters: they remember what the
+// Save dialogs last displayed and are cleared when the application exits.
 struct VDAudioCodecConfig {
     QString codecId = "aac";
     QString codecName = "AAC (Advanced Audio Coding)";

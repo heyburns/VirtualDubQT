@@ -1,3 +1,6 @@
+// Batch-wizard presentation and job construction. Rows remain ordinary table
+// data until acceptJobs() validates destinations and converts them into durable
+// VDQtJobState records; this module never starts encoders itself.
 #include "VDQtBatchWizard.h"
 
 #include <QCheckBox>
@@ -27,6 +30,9 @@
 
 namespace {
 
+// Audio-only jobs do not expose a separate container picker. Keep their file
+// suffix derived from the selected encoder so the generated destination agrees
+// with the audio exporter's muxer choice.
 QString audioExtension(const VDAudioCodecParams& params) {
     const QString codec = params.codecId.toLower();
     if (codec.contains(QStringLiteral("mp3"))) return QStringLiteral("mp3");
@@ -50,6 +56,10 @@ QString replaceText(QString input, const QString& search,
 }
 
 } // namespace
+
+// -----------------------------------------------------------------------------
+// Dialog construction and input collection
+// -----------------------------------------------------------------------------
 
 VDQtBatchWizardDialog::VDQtBatchWizardDialog(
     const VDQtJobState& processingTemplate,
@@ -197,6 +207,9 @@ void VDQtBatchWizardDialog::addFiles() {
 }
 
 void VDQtBatchWizardDialog::addSourceFiles(const QStringList& paths) {
+    // Canonical absolute names prevent the same source from being added twice
+    // through different relative spellings. Symlink identity is checked later
+    // by the queue's safety validation, where destinations are also available.
     QSet<QString> existing;
     for (int row = 0; row < mTable->rowCount(); ++row)
         existing.insert(QFileInfo(mTable->item(row, 0)->text()).absoluteFilePath());
@@ -265,6 +278,8 @@ void VDQtBatchWizardDialog::updateOutputMode() {
 }
 
 void VDQtBatchWizardDialog::updateOperation() {
+    // Changing the operation rewrites only the extension. The editable base
+    // name is retained so a user's naming work survives operation changes.
     const VDQtJobOperation operation = selectedOperation();
     mContainer->setEnabled(operation == VDQtJobOperation::VideoExport);
     mImageFormat->setEnabled(operation == VDQtJobOperation::ImageSequenceExport);
@@ -313,6 +328,10 @@ VDQtJobOperation VDQtBatchWizardDialog::selectedOperation() const {
     return static_cast<VDQtJobOperation>(mOperation->currentData().toInt());
 }
 
+// -----------------------------------------------------------------------------
+// Translation from table rows to persistent queue records
+// -----------------------------------------------------------------------------
+
 QString VDQtBatchWizardDialog::outputPathForRow(int row) const {
     if (selectedOperation() == VDQtJobOperation::VideoAnalysis) return {};
     const QTableWidgetItem *sourceItem = mTable->item(row, 0);
@@ -339,6 +358,9 @@ void VDQtBatchWizardDialog::setRowOutputName(int row, const QString& name) {
 
 QList<VDQtJobState> VDQtBatchWizardDialog::buildJobs(
     QString *errorMessage) const {
+    // mTemplate is a snapshot of the main window's current processing state.
+    // Every row receives an independent copy, then source-specific fields and
+    // all transient execution state are reset below.
     QList<VDQtJobState> result;
     if (mTable->rowCount() == 0) {
         if (errorMessage) *errorMessage = QStringLiteral("Add at least one source file.");
@@ -391,6 +413,8 @@ QList<VDQtJobState> VDQtBatchWizardDialog::buildJobs(
     }
     QList<VDQtJobState> allJobs = mExistingJobs;
     allJobs.append(result);
+    // Validate the combined queue, not just the new rows. This catches a new
+    // destination colliding with one that was already waiting in Job Control.
     if (!VDQtJobQueue::validateJobs(allJobs, errorMessage)) {
         result.clear();
         return result;

@@ -1,3 +1,6 @@
+// Dedicated interactive-preview worker. Requests may arrive from the GUI faster
+// than decoding, so they are collapsed into one latest-request slot protected by
+// mRequestMutex. Generation tokens keep late results from repainting stale UI.
 #include "VDQtFrameDecodeWorker.h"
 
 #include <QMetaObject>
@@ -14,6 +17,8 @@ bool VDQtFrameDecodeWorker::openSource(const QString& filePath,
                                        int componentRange,
                                        int errorMode) {
     Q_ASSERT(QThread::currentThread() == thread());
+    // Normal media gets a decoder owned exclusively by this worker. Closing it
+    // here also ensures no codec context survives a main-window source change.
     mSharedAvsDecoder = nullptr;
     mDecoder.close();
     mDecoder.setDecompressionConfig(formatName, colorSpace, componentRange);
@@ -23,6 +28,9 @@ bool VDQtFrameDecodeWorker::openSource(const QString& filePath,
 
 bool VDQtFrameDecodeWorker::useSharedAvsSource(VDQtVideoDecoder *decoder) {
     Q_ASSERT(QThread::currentThread() == thread());
+    // Native AviSynth sources cannot safely be opened as a second independent
+    // graph by every preview consumer. In this mode MainWindow serializes use
+    // of its decoder and guarantees that the borrowed pointer outlives us.
     mDecoder.close();
     if (!decoder || !decoder->isOpen() || !decoder->isAvsNative()) {
         mSharedAvsDecoder = nullptr;
@@ -81,6 +89,9 @@ void VDQtFrameDecodeWorker::requestFrame(int frameIndex,
                                          quint64 generation,
                                          bool preserveSequentialDecode,
                                          bool renderFilteredOutput) {
+    // This entry point may be called directly by the GUI thread. It performs no
+    // decode work: it replaces the one pending slot, then posts at most one
+    // event to the worker thread. That is the key to responsive scrubbing.
     bool schedule = false;
     {
         QMutexLocker lock(&mRequestMutex);
@@ -110,6 +121,9 @@ void VDQtFrameDecodeWorker::cancelPending(quint64 generation) {
 void VDQtFrameDecodeWorker::processPendingRequest() {
     Q_ASSERT(QThread::currentThread() == thread());
 
+    // Drain until no request remains. A request arriving during decode replaces
+    // the pending slot and is picked up by the next iteration without growing a
+    // potentially unbounded Qt event queue.
     for (;;) {
         int frameIndex = -1;
         quint64 generation = 0;
@@ -128,6 +142,8 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
             mRequestedFrame = -1;
         }
 
+        // The mutex is intentionally released for decoding and filtering. The
+        // GUI remains free to publish a newer request while this one is costly.
         VDQtVideoDecoder *decoder = activeDecoder();
         if (!decoder || !decoder->isOpen()) {
             QMutexLocker lock(&mRequestMutex);
@@ -147,6 +163,9 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                 outputImages.clear();
         }
 
+        // Generation equality is checked only after all expensive work. A stale
+        // decode may warm decoder/filter caches, but it must never repaint the
+        // display or move the playhead backward.
         bool currentResult = false;
         {
             QMutexLocker lock(&mRequestMutex);

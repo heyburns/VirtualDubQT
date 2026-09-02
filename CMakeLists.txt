@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(VirtualDubQt VERSION 0.1.1 LANGUAGES CXX)
 
+# The native Qt port is intentionally a self-contained target. The repository
+# also retains much of the original Windows source as a parity reference, but it
+# is not globbed or compiled here; every maintained source is listed explicitly.
 include(CTest)
 include(GNUInstallDirs)
 
@@ -11,6 +14,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia DBus Concurrent)
 find_package(PkgConfig REQUIRED)
+# Version floors match the modern FFmpeg channel-layout/frame APIs used by the
+# decoder, exporter, and audio pipeline. PkgConfig::FFMPEG carries include and
+# transitive link flags to every target below.
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat>=60
     libavcodec>=60
@@ -33,6 +39,9 @@ if (NOT AVISYNTH_INCLUDE_DIR OR NOT AVISYNTH_LIBRARY)
 endif()
 get_filename_component(AVISYNTH_LIBRARY_DIR "${AVISYNTH_LIBRARY}" DIRECTORY)
 
+# Application modules are kept in one list so the production target and source
+# reviews have a single authoritative inventory. Tests below select the smaller
+# subset required for each isolated executable.
 set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtApplicationIcon.h
     src/VirtualDub/VDQtApplicationIcon.cpp
@@ -95,6 +104,7 @@ target_include_directories(VirtualDubQt PRIVATE
 
 option(ENABLE_SANITIZERS "Build VirtualDubQt with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
+# Keep warning/sanitizer policy identical across the application and tests.
 function(vdqt_enable_diagnostics target_name)
     if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target_name} PRIVATE
@@ -130,6 +140,10 @@ set_target_properties(VirtualDubQt PROPERTIES
 
 # Compatibility alias for build scripts
 add_custom_target(VirtualDub_Port DEPENDS VirtualDubQt)
+
+# -----------------------------------------------------------------------------
+# Linux installation and CPack release artifacts
+# -----------------------------------------------------------------------------
 
 install(TARGETS VirtualDubQt
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
@@ -181,7 +195,12 @@ set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
 
 include(CPack)
 
+# -----------------------------------------------------------------------------
+# Regression, performance, ABI, script, and parity test executables
+# -----------------------------------------------------------------------------
+
 if (BUILD_TESTING)
+    # Large integration suite covering workflows that cross module boundaries.
     add_executable(stabilization_tests
         src/VirtualDub/test_stabilization.cpp
         src/VirtualDub/VDQtFrameDecodeWorker.cpp
@@ -244,6 +263,7 @@ if (BUILD_TESTING)
     set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
     add_test(NAME stabilization_tests COMMAND stabilization_tests)
 
+    # Focused guardrails stay separate so performance regressions are obvious.
     add_executable(playback_performance_tests
         src/VirtualDub/test_playback_performance.cpp
         src/VirtualDub/VDQtVideoDecoder.cpp
@@ -326,6 +346,7 @@ if (BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
+    # Build a real shared VDX module rather than mocking the dlopen ABI.
     add_library(vdqt_test_plugin MODULE
         src/VirtualDub/test_vdx_plugin.cpp
     )
@@ -409,6 +430,8 @@ if (BUILD_TESTING)
         TIMEOUT 15
     )
 
+    # Final smoke test crosses the process boundary and exercises main.cpp's
+    # unattended script path under an isolated configuration directory.
     add_test(NAME generated_vcf_execution_test
         COMMAND VirtualDubQt
             --script ${CMAKE_CURRENT_SOURCE_DIR}/tests/parity/generated-processing.vcf

@@ -1,3 +1,6 @@
+// Guardrail benchmarks for computationally heavy built-in filters. Thresholds
+// are intentionally broad enough for CI variance but catch accidental returns
+// to obviously quadratic/unparallelized preview behavior.
 #include "VDQtFilterSystem.h"
 
 #include <QGuiApplication>

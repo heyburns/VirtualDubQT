@@ -12,6 +12,8 @@ class QProgressBar;
 class QPushButton;
 class QTableView;
 
+// Read/write Qt model over VDQtJobQueue. The queue owns all job records; the
+// model emits the correct reset/data notifications when queue signals arrive.
 class VDQtJobTableModel final : public QAbstractTableModel {
     Q_OBJECT
 public:
@@ -32,6 +34,9 @@ private:
     VDQtJobQueue *mQueue = nullptr;
 };
 
+// Modeless queue-management window modeled after VirtualDub Job Control.
+// Execution stays in VDQtMainWindow because it owns the active exporters and
+// dialogs; this window only edits queue state and emits queue requests.
 class VDQtJobControlWindow final : public QDialog {
     Q_OBJECT
 public:

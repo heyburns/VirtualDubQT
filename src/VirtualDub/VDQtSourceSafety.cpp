@@ -1,3 +1,6 @@
+// Output-path alias protection. Comparisons proceed from cheap normalized path
+// checks to device/inode identity, then include conservatively audited script
+// dependencies before an exporter is allowed to replace a destination.
 #include "VDQtSourceSafety.h"
 
 #include <QFile>
@@ -12,6 +15,9 @@ bool VDQtSourceSafety::pathsReferToSameFile(const QString& firstPath,
     const QFileInfo second(secondPath);
     if (first.absoluteFilePath() == second.absoluteFilePath()) return true;
 
+    // Text comparison misses hard links and symlink aliases. Device/inode is
+    // the authoritative identity for existing Unix files and does not require
+    // resolving user-controlled path strings ourselves.
     struct stat firstStatus = {};
     struct stat secondStatus = {};
     const QByteArray firstName = QFile::encodeName(first.absoluteFilePath());
@@ -42,6 +48,9 @@ VDQtOutputSafetyReport VDQtSourceSafety::evaluateOutputPath(
         if (isScriptPath(sourcePath)) scriptPaths.append(sourcePath);
     }
     scriptPaths.removeDuplicates();
+    // Script dependencies join directly loaded media in the protected set.
+    // auditScriptDependencies is conservative: it reports whether every path
+    // expression was statically resolvable rather than guessing dynamic values.
     if (!scriptPaths.isEmpty()) {
         result.scriptDependencies.complete = true;
         for (const QString& currentScript : scriptPaths) {
@@ -71,6 +80,9 @@ VDQtOutputSafetyReport VDQtSourceSafety::evaluateOutputPath(
         }
     }
 
+    // An incomplete audit is not automatically fatal for a new destination.
+    // Refuse replacement of an existing path, however, because that operation
+    // could destroy a dynamically computed dependency before the script opens it.
     const QFileInfo output(outputPath);
     if (!scriptPaths.isEmpty()
         && !result.scriptDependencies.complete

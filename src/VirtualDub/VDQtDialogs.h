@@ -21,7 +21,12 @@
 
 #include "VDQtFilterSystem.h"
 
-// Video Filters Manager Dialog
+// This file contains configuration-only dialogs. They translate widgets into
+// plain state structures or mutate the session filter/codec catalogs; media
+// decoding, exporting, and durable persistence remain in their owning modules.
+
+// Edits the ordered session video-filter chain. Configuration subdialogs work
+// on parameter copies and commit only when accepted.
 class VDVideoFiltersDialog : public QDialog {
     Q_OBJECT
 public:
@@ -51,7 +56,7 @@ private:
     QPushButton *btnConfigure;
 };
 
-// Filter Preview Floating Dialog
+// Reusable floating still-frame preview owned by a filter configuration dialog.
 class VDFilterPreviewDialog : public QDialog {
     Q_OBJECT
 public:
@@ -306,7 +311,8 @@ private:
     QList<VDQtFilterSystem::FilterInfo> mAvailableFilters;
 };
 
-// Video Frame Rate Control Dialog (Matching VirtualDub Screenshot)
+// Serializable frame-rate policy. sourceMode reinterprets input timing;
+// convMode actually drops/duplicates frames during export.
 struct VDFrameRateConfig {
     int sourceMode = 0; // 0: No change, 1: Custom fps, 2: Match audio
     double customSourceFps = 0.0;
@@ -351,7 +357,7 @@ private:
     QPushButton *btnCancel;
 };
 
-// Decompression Format Dialog (Matching VirtualDub Screenshot)
+// Controls decoder-to-QImage conversion, not the encoded export pixel format.
 struct VDDecompressionFormatConfig {
     QString formatName = "Autoselect";
     int colorSpace = 0;     // 0: No change, 1: Rec. 601 (SD), 2: Rec. 709 (HD)
@@ -551,6 +557,8 @@ private:
     QComboBox *mRangeCombo;
 };
 
+// Performance settings applied immediately to decoder instances and future
+// worker snapshots. decoderThreads=0 delegates thread choice to FFmpeg.
 struct VDPreferencesConfig {
     int frameCacheMiB = 64;
     int decoderThreads = 0;

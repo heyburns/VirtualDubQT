@@ -18,8 +18,19 @@ extern "C" {
 #include <avisynth/avisynth_c.h>
 }
 
+// Random-access video decoder shared by preview, export, analysis, and frame
+// serving. Ordinary media uses libavformat/libavcodec; .avs files are evaluated
+// directly through AviSynth+ so video and audio can share one script graph.
+//
+// FFmpeg decoding is presentation-order aware: mFrameIndex records timestamps
+// and keyframes as frames are discovered, seeks restart from a safe timestamp,
+// and dependent frames are decoded forward. getFrameImage() returns a detached
+// QImage cached by frame number. The class is internally guarded by a recursive
+// mutex because native AVS audio/video may enter it from separate workers.
 class VDQtVideoDecoder {
 public:
+    // Container frame counts are often estimates. Callers that require an exact
+    // end frame must scan to EOF or use ensureExactFrameRange() in the UI.
     enum class FrameCountStatus {
         Exact,
         Estimated,
@@ -29,6 +40,8 @@ public:
     VDQtVideoDecoder();
     ~VDQtVideoDecoder();
 
+    // Transactional: an unsuccessful open leaves the object closed and frees
+    // all partially constructed FFmpeg/AviSynth resources.
     bool openFile(const QString& filePath);
     void close();
 
@@ -90,6 +103,7 @@ public:
     static void setDecoderThreadCount(int threadCount);
     void applyFrameCacheBudget();
     struct ScriptDependencyReport {
+        // complete=false means output-overwrite safety must remain conservative.
         QStringList resolvedPaths;
         QStringList unresolvedPathLiterals;
         QStringList diagnostics;
@@ -120,6 +134,8 @@ public:
     QString getLastError() const { return mLastError; }
 
 private:
+    // One presentation-order observation. Entries are gradually refined as
+    // decoding reaches parts of files whose container metadata was incomplete.
     struct FrameIndexEntry {
         int64_t timestamp = AV_NOPTS_VALUE;
         int64_t duration = 0;
@@ -141,6 +157,7 @@ private:
     void applyErrorMode();
     void cacheFrame(int frameIndex, const QImage& image);
 
+    // Public source metadata and last diagnostic.
     bool mIsOpen;
     QString mFilePath;
     QString mLastError;
@@ -152,14 +169,19 @@ private:
     int mVideoStreamIndex;
     int64_t mDuration;
 
+    // FFmpeg ownership. Frames/packets belong exclusively to this decoder.
     AVFormatContext *mFormatCtx;
     AVCodecContext *mCodecCtx;
     SwsContext *mSwsCtx;
     AVFrame *mFrame;
     AVFrame *mFrameRGB;
     AVPacket *mPacket;
+    // Owns the allocation backing mFrameRGB. mFrameRGB->data[0] is aligned
+    // within this allocation and intentionally has padded rows and tail room.
     uint8_t *mBuffer;
 
+    // Sequential decode/seek state. A packet may remain pending while the codec
+    // emits multiple frames, hence mPacketPending is distinct from demux EOF.
     int mCurrentFrameIndex;
     int mNextDecodeFrameIndex;
     int64_t mStreamStartTimestamp;
@@ -171,6 +193,7 @@ private:
     bool mDiscardUntilKeyFrame;
     quint64 mSeekCount;
     quint64 mDecodedFrameCount;
+    // swscale configuration and destination image format.
     AVPixelFormat mSwsSourceFormat;
     AVPixelFormat mSwsDestinationFormat;
     AVPixelFormat mOutputPixelFormat;
@@ -186,16 +209,18 @@ private:
     int mColorSpaceMode = 0; // 0: No change, 1: Rec.601, 2: Rec.709
     int mComponentRangeMode = 0; // 0: No change, 1: Limited, 2: Full
 
+    // Native AviSynth backend. mAvsClip is released before mAvsEnv in close().
     AVS_ScriptEnvironment *mAvsEnv = nullptr;
     AVS_Clip *mAvsClip = nullptr;
     const AVS_VideoInfo *mAvsVi = nullptr;
     QRecursiveMutex mAvsAccessMutex;
-    // swscale's SIMD RGB24 converters may store a complete vector at the end
-    // of the final scanline. Qt images only guarantee bytesPerLine() * height
-    // writable bytes, so native AviSynth frames are converted through this
-    // aligned, explicitly tail-padded buffer before being copied to QImage.
+    // swscale's SIMD packed-RGB converters may store a complete vector at the
+    // end of the final scanline. Native AviSynth frames are converted through
+    // this aligned, explicitly tail-padded buffer before being copied to
+    // QImage; ordinary FFmpeg frames use the same layout through mBuffer.
     QByteArray mAvsConversionBuffer;
 
+    // QCache cost is KiB, not entry count; this bounds memory for large frames.
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
 

@@ -1,3 +1,6 @@
+// Checks stable compatibility contracts against the curated VirtualDub2
+// reference JSON: command spellings, built-in filter catalogs/defaults, audio
+// filters, and timeline semantics. It does not launch the full GUI.
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtFilterSystem.h"
 #include "VDQtScriptEngine.h"

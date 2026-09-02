@@ -1,3 +1,7 @@
+// Live and export audio-filter implementation. Simple fixed-rate DSP runs
+// directly on interleaved PCM; variable-rate work uses an FFmpeg libavfilter
+// graph. The final section maps the same chain to ffmpeg(1) arguments so preview
+// and offline output apply equivalent processing.
 #include "VDQtAudioFilterSystem.h"
 
 #include <QUuid>
@@ -32,6 +36,8 @@ QString number(double value) {
 }
 
 QStringList atempoChain(double factor) {
+    // FFmpeg's atempo node accepts only 0.5..2.0. Factor the requested rate into
+    // a legal chain so extreme but supported values behave predictably.
     factor = std::clamp(factor, 0.03125, 32.0);
     QStringList filters;
     while (factor < 0.5) {
@@ -48,6 +54,9 @@ QStringList atempoChain(double factor) {
 
 } // namespace
 
+// Pull adapter for filters whose output duration differs from their input.
+// pending stores packed S16 frames already produced by the graph; nextPts is in
+// input samples and is reset whenever a seek rebuilds the graph.
 struct VDQtAudioFilterDevice::VariableRateProcessor {
     AVFilterGraph *graph = nullptr;
     AVFilterContext *source = nullptr;
@@ -82,6 +91,9 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
         sampleRate = std::max(1, requestedSampleRate);
         channels = std::max(1, requestedChannels);
 
+        // Reuse the export graph generator, then pin the live graph back to the
+        // QAudioSink format. That keeps preview/export semantics aligned while
+        // giving this pull device a stable packed-S16 contract.
         VDQtAudioFilterSystem graphSystem;
         graphSystem.replaceActiveChain(chain);
         QString description = graphSystem.ffmpegFilterGraph(sampleRate);
@@ -158,6 +170,8 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
     }
 
     void drainSink() {
+        // libavfilter may emit zero, one, or several frames per input block.
+        // Convert that push behavior into pending bytes consumed by readData().
         if (!sink || sinkFinished) return;
         AVFrame *frame = av_frame_alloc();
         if (!frame) return;
@@ -191,6 +205,8 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
     bool feed(QIODevice *input, qint64 preferredBytes) {
         if (!source || !input || sourceFlushed) return false;
         const qint64 frameBytes = channels * sizeof(qint16);
+        // Read complete interleaved sample frames and cap temporary allocation;
+        // a rate-changing graph can otherwise amplify a very large pull request.
         qint64 requestBytes = std::max<qint64>(
             preferredBytes, frameBytes * 4096);
         requestBytes -= requestBytes % frameBytes;
@@ -260,6 +276,10 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Fixed-rate in-place DSP
+// ---------------------------------------------------------------------------
+
 void VDQtAudioFilterProcessor::configure(
     const QList<VDAudioFilterInstance>& chain,
     int sampleRate,
@@ -267,6 +287,9 @@ void VDQtAudioFilterProcessor::configure(
     mChain = chain;
     mSampleRate = std::max(1, sampleRate);
     mChannels = std::max(1, channels);
+    // State slots follow chain indices, including disabled entries. Reordering
+    // or replacing a chain calls configure/reset so delay and IIR history can
+    // never migrate accidentally to a different filter.
     mStates.resize(mChain.size());
     reset();
 }
@@ -301,6 +324,8 @@ void VDQtAudioFilterProcessor::processInt16(char *data, qint64 bytes) {
     const qint64 frames = bytes / frameBytes;
     qint16 *samples = reinterpret_cast<qint16 *>(data);
 
+    // Process whole buffers one filter at a time to preserve chain order. Each
+    // stateful filter retains its per-channel history across QAudioSink pulls.
     for (int filterIndex = 0; filterIndex < mChain.size(); ++filterIndex) {
         const VDAudioFilterInstance& filter = mChain.at(filterIndex);
         if (!filter.enabled) continue;
@@ -407,6 +432,10 @@ void VDQtAudioFilterProcessor::processInt16(char *data, qint64 bytes) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Live pull-through device and session chain catalog
+// ---------------------------------------------------------------------------
+
 VDQtAudioFilterDevice::VDQtAudioFilterDevice(
     QIODevice *source,
     int sampleRate,
@@ -429,6 +458,8 @@ void VDQtAudioFilterDevice::setFilterChain(
     const QList<VDAudioFilterInstance>& chain) {
     mChain = chain;
     mProcessor.configure(chain, mSampleRate, mChannels);
+    // Fixed-duration effects stay in the inexpensive in-place processor.
+    // Anything that changes sample count requires libavfilter's buffered graph.
     const bool needsVariableRateProcessor = std::any_of(
         chain.cbegin(), chain.cend(), [](const VDAudioFilterInstance& filter) {
             return filter.enabled
@@ -474,6 +505,8 @@ qint64 VDQtAudioFilterDevice::readData(char *data, qint64 maximumLength) {
     if (!mSource || !data || maximumLength <= 0) return 0;
     if (mVariableProcessor)
         return mVariableProcessor->read(mSource, data, maximumLength);
+    // The ordinary path is a transparent pull followed by in-place DSP; it
+    // neither owns nor advances the upstream source except through this read.
     const qint64 frameBytes = std::max<qint64>(1, mChannels * sizeof(qint16));
     maximumLength -= maximumLength % frameBytes;
     const qint64 read = mSource->read(data, maximumLength);
@@ -584,7 +617,11 @@ bool VDQtAudioFilterSystem::hasEnabledFilters() const {
         [](const VDAudioFilterInstance& filter) { return filter.enabled; });
 }
 
+// Offline and variable-rate live processing share this graph translation. Keep
+// parameter defaults synchronized with createFilter() and the in-place DSP.
 QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate) const {
+    // This output is parsed both by libavfilter and ffmpeg(1); do not introduce
+    // shell quoting or options that are valid in only one of those contexts.
     sourceSampleRate = std::clamp(sourceSampleRate, 1000, 768000);
     int currentSampleRate = sourceSampleRate;
     QStringList graph;

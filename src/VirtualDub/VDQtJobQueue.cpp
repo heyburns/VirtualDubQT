@@ -1,3 +1,6 @@
+// Durable serial job queue. This module enforces legal records/status changes,
+// trims unbounded logs, emits model notifications, and coalesces autosave writes.
+// Encoding remains the responsibility of VDQtMainWindow's queue runner.
 #include "VDQtJobQueue.h"
 
 #include "VDQtSourceSafety.h"
@@ -12,6 +15,8 @@
 namespace {
 
 void trimJobLog(QStringList *entries) {
+    // Jobs are persisted, so an unlimited encoder log would make autosave files
+    // grow forever. Trim oldest entries by both count and total character size.
     if (!entries) return;
     qsizetype characters = 0;
     for (const QString& entry : std::as_const(*entries))
@@ -62,6 +67,8 @@ void VDQtJobQueue::normalizeNewJob(VDQtJobState *job) {
         job->name = base.isEmpty() ? operationText(job->operation)
                                    : base;
     }
+    // Running is meaningful only inside one process lifetime. A queue restored
+    // after a crash must expose those records as interrupted and retryable.
     if (job->status == VDQtJobStatus::Starting
         || job->status == VDQtJobStatus::Running
         || job->status == VDQtJobStatus::Aborting) {
@@ -81,6 +88,8 @@ bool VDQtJobQueue::addJobs(const QList<VDQtJobState>& jobs,
             *errorMessage = QStringLiteral("The session queue is limited to 1000 jobs.");
         return false;
     }
+    // Work on a copy so invalid additions cannot partially mutate the live
+    // queue or produce a confusing sequence of model notifications.
     QList<VDQtJobState> candidates = mJobs;
     for (VDQtJobState job : jobs) {
         normalizeNewJob(&job);
@@ -132,6 +141,7 @@ bool VDQtJobQueue::saveToFile(const QString& path, QString *errorMessage) const 
 void VDQtJobQueue::removeRows(const QList<int>& rows) {
     if (mRunning) return;
     QList<int> sorted = rows;
+    // Descending removal keeps later row indices valid as earlier rows vanish.
     std::sort(sorted.begin(), sorted.end(), std::greater<int>());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
     QList<VDQtJobState> remaining = mJobs;
@@ -264,6 +274,9 @@ bool VDQtJobQueue::setJobProgress(int index, double progress,
         trimJobLog(&job->logEntries);
     }
     Q_EMIT jobChanged(index);
+    // Progress is deliberately not autosaved on every callback; exporters can
+    // report many times per second. Status/log transitions provide checkpoints
+    // without turning the queue file into an I/O bottleneck.
     return true;
 }
 
@@ -321,11 +334,15 @@ bool VDQtJobQueue::flush(QString *errorMessage) const {
 }
 
 void VDQtJobQueue::scheduleAutosave() {
+    // Restarting the single-shot timer coalesces a burst of UI edits into one
+    // atomic project-file write.
     if (!mAutosavePath.isEmpty()) mAutosaveTimer.start();
 }
 
 bool VDQtJobQueue::validateJobs(const QList<VDQtJobState>& jobs,
                                 QString *errorMessage) {
+    // Validation is global because a path can be safe within one record yet
+    // collide with a source or destination belonging to another queued record.
     if (jobs.size() > 1000) {
         if (errorMessage)
             *errorMessage = QStringLiteral("The session queue is limited to 1000 jobs.");

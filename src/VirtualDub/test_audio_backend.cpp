@@ -1,3 +1,5 @@
+// Optional hardware smoke test. Exit code 77 means the host exposes no usable
+// Qt audio output and is configured as a CTest skip, not a product failure.
 #include "VDQtAudioPlayer.h"
 
 #include <cmath>

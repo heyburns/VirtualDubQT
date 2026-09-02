@@ -1,3 +1,6 @@
+// Process entry point and command-line compatibility layer. CLI options are
+// translated into the same safe Sylia command program used by the GUI, so batch
+// and interactive operation share one implementation and one error path.
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -10,6 +13,9 @@
 namespace {
 
 QString syliaString(const QString& value) {
+    // Paths are embedded in generated Sylia calls. Escape only the grammar's
+    // string-literal metacharacters; shell quoting is irrelevant because these
+    // commands are passed directly to VDQtScriptEngine, never through a shell.
     QString escaped;
     escaped.reserve(value.size() + 8);
     for (const QChar character : value) {
@@ -46,6 +52,9 @@ void printUsage() {
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // Inspect the raw arguments before constructing QApplication. Headless Qt
+    // platform selection must happen first or unattended jobs may try to open a
+    // display server and fail before our own argument parser can report errors.
     QStringList startupArguments;
     for (int index = 1; index < argc; ++index)
         startupArguments.append(QString::fromLocal8Bit(argv[index]));
@@ -75,6 +84,9 @@ int main(int argc, char *argv[]) {
     w.setAutomationUnattended(unattended);
     bool performedAction = false;
     QString error;
+    // Process options strictly left-to-right. The compatibility value "*" means
+    // "use the source loaded by an earlier argument or automation command", so
+    // reordering or pre-grouping options would change established CLI behavior.
     for (int index = 0; index < startupArguments.size(); ++index) {
         const QString argument = startupArguments.at(index);
         if (isOption(argument, {QStringLiteral("--exit"), QStringLiteral("--no-ui"),
@@ -194,6 +206,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Automation may explicitly request an exit status. Otherwise --no-ui
+    // considers completion of all synchronous actions a successful invocation.
     if (w.automationExitRequested()) return w.automationExitCode();
     if (unattended) return 0;
     Q_UNUSED(performedAction);

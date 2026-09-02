@@ -6,6 +6,10 @@
 #include <QObject>
 #include <QTimer>
 
+// Authoritative in-memory job list plus debounced JSON autosave. Mutators are
+// intentionally centralized here so the table model, runner, and recovery file
+// observe consistent status transitions. Jobs execute serially in the main
+// window; this class does not own worker threads or exporters.
 class VDQtJobQueue : public QObject {
     Q_OBJECT
 public:
@@ -75,7 +79,7 @@ private:
 
     QList<VDQtJobState> mJobs;
     QString mAutosavePath;
-    QTimer mAutosaveTimer;
+    QTimer mAutosaveTimer; // Coalesces bursts of progress/UI changes.
     bool mRunning = false;
     bool mAutoRun = false;
     int mCurrentIndex = -1;

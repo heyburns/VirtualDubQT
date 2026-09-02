@@ -9,6 +9,9 @@
 #include <QVector>
 #include <memory>
 
+// Audio filters are represented as plain data so the same chain can be used
+// by live preview, project/job serialization, and FFmpeg export generation.
+// Keep enum values stable: saved project files persist them numerically.
 enum class VDAudioFilterType {
     Gain = 0,
     LowPass,
@@ -36,6 +39,10 @@ struct VDAudioFilterInstance {
     }
 };
 
+// Stateful, allocation-free processor for filters that can operate in place on
+// signed 16-bit interleaved PCM. configure() builds one State per chain entry;
+// reset() must be called after a seek so history from the old time position is
+// never mixed into the new one.
 class VDQtAudioFilterProcessor {
 public:
     void configure(const QList<VDAudioFilterInstance>& chain,
@@ -59,6 +66,10 @@ private:
     int mChannels = 0;
 };
 
+// Pull-through adapter placed between an audio decoder QIODevice and
+// QAudioSink. Fixed-rate filters use VDQtAudioFilterProcessor. Pitch/time
+// filters are delegated to VariableRateProcessor because they can produce a
+// different number of output samples than they consume.
 class VDQtAudioFilterDevice final : public QIODevice {
 public:
     VDQtAudioFilterDevice(QIODevice *source,
@@ -87,6 +98,10 @@ private:
     std::unique_ptr<VariableRateProcessor> mVariableProcessor;
 };
 
+// Session-wide catalog and editable audio-filter chain. This object stores
+// configuration only; playback devices take snapshots so dialog edits cannot
+// mutate a processor while the audio callback is using it. ffmpegFilterGraph()
+// translates that same configuration for offline exports.
 class VDQtAudioFilterSystem {
 public:
     struct FilterInfo {

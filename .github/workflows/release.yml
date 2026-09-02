@@ -1,5 +1,7 @@
 name: Publish Linux release
 
+# Releases are tag-driven. The tag, CMake project version, and release-notes
+# filename must agree before any package is built.
 on:
   push:
     tags:
@@ -16,6 +18,9 @@ env:
   AVISYNTH_VERSION: "3.7.5"
 
 jobs:
+  # Ubuntu supplies the portable AppImage build environment as well as the
+  # native .deb packaging tools. AviSynth+ is built first because distributions
+  # do not consistently provide the required development/runtime version.
   deb-and-appimage:
     name: AppImage and Ubuntu 24.04 DEB
     runs-on: ubuntu-24.04
@@ -116,6 +121,8 @@ jobs:
           if-no-files-found: error
 
   rpm:
+    # Run Fedora packaging inside its own container so CPack resolves RPM
+    # dependencies against Fedora library/package names rather than Ubuntu's.
     name: Fedora 43 RPM
     runs-on: ubuntu-24.04
     container: fedora:43
@@ -176,6 +183,8 @@ jobs:
           if-no-files-found: error
 
   publish:
+    # Publishing waits for both platform jobs, combines their artifacts, and
+    # attaches one checksum manifest to the GitHub release created from the tag.
     name: Publish GitHub release
     needs:
       - deb-and-appimage

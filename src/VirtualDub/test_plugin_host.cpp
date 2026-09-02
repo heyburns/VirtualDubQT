@@ -1,3 +1,5 @@
+// End-to-end host ABI test using vdqt_test_plugin built beside this executable.
+// It verifies discovery, configuration, processing, and instance teardown.
 #include "VDQtFilterSystem.h"
 #include "VDQtPluginHost.h"
 

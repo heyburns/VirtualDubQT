@@ -21,6 +21,11 @@ struct VDQtTimelineSegment {
     }
 };
 
+// Non-destructive edit list. Segment operations never touch media; they only
+// map output-frame positions to the flattened decoder source. Every mutating
+// edit normalizes adjacent compatible segments and records a bounded undo
+// snapshot. Half-open ranges [start,end) are used throughout to avoid fencepost
+// ambiguity at selection end markers.
 class VDQtTimeline {
 public:
     static constexpr int kMaximumHistoryEntries = 100;
@@ -84,8 +89,8 @@ private:
     qint64 mSourceFrameCount = 0;
     bool mSourceFrameCountExact = false;
     QList<VDQtTimelineSegment> mSegments;
-    QList<QList<VDQtTimelineSegment>> mUndoStack;
-    QList<QList<VDQtTimelineSegment>> mRedoStack;
+    QList<QList<VDQtTimelineSegment>> mUndoStack; // Old segment snapshots.
+    QList<QList<VDQtTimelineSegment>> mRedoStack; // Cleared by a new edit.
 };
 
 #endif // VDQTTIMELINE_H

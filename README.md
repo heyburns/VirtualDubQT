@@ -92,6 +92,12 @@ cmake --build . -j$(nproc)
 ./VirtualDubQt
 ```
 
+### Maintainer Notes
+
+The [maintainer architecture guide](docs/ARCHITECTURE.md) explains the source
+layout, ownership, threading, decoding, filtering, exporting, job, script, and
+testing flows before you begin changing the code.
+
 ---
 
 ## License

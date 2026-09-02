@@ -1,3 +1,6 @@
+// Implementation of modal configuration dialogs declared in VDQtDialogs.h.
+// Dialogs edit copies of plain configuration values and commit on acceptance;
+// preview subdialogs may process the supplied still image but do not own media.
 #include "VDQtDialogs.h"
 #include <algorithm>
 #include <cmath>
@@ -110,6 +113,10 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
 // -----------------------------------------------------------------------------
 // VDVideoFiltersDialog Implementation
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Filter-chain editor and individual filter configuration dialogs
+// -----------------------------------------------------------------------------
+
 VDVideoFiltersDialog::VDVideoFiltersDialog(int sourceWidth, int sourceHeight, const QImage &sourceFrame, QWidget *parent)
     : QDialog(parent), mSourceWidth(sourceWidth), mSourceHeight(sourceHeight), mSourceFrame(sourceFrame) {
     setWindowTitle("Filters");
@@ -2224,6 +2231,9 @@ QMap<QString, double> VDBobDoublerFilterDialog::getParams() const {
 // -----------------------------------------------------------------------------
 // VDVideoFilterAddDialog
 // -----------------------------------------------------------------------------
+// The add-filter dialog is deliberately separate from the chain editor: it
+// chooses a filter type only. Configuration is delegated to the corresponding
+// filter-specific dialog after the new chain entry has been created.
 VDVideoFilterAddDialog::VDVideoFilterAddDialog(QWidget *parent)
     : QDialog(parent) {
     setWindowTitle("Add Filter");
@@ -2287,6 +2297,10 @@ QString VDVideoFilterAddDialog::getSelectedPluginId() const {
 // -----------------------------------------------------------------------------
 // VDFrameRateDialog Implementation (Matching Screenshot)
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Video processing and decoder policy dialogs
+// -----------------------------------------------------------------------------
+
 VDFrameRateDialog::VDFrameRateDialog(double sourceFps, double audioMatchFps, const VDFrameRateConfig &initialConfig, QWidget *parent)
     : QDialog(parent), mSourceFps(sourceFps > 0 ? sourceFps : 29.970), mAudioMatchFps(audioMatchFps > 0 ? audioMatchFps : mSourceFps), mConfig(initialConfig) {
     setWindowTitle("Video frame rate control");
@@ -2771,6 +2785,10 @@ VDDecoderErrorModeConfig VDDecoderErrorModeDialog::getConfig() const {
 // -----------------------------------------------------------------------------
 // VDSaveAudioDialog Implementation (Full Processing Codec Selection)
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Audio/video compression and export dialogs
+// -----------------------------------------------------------------------------
+
 VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &defaultFileName, const QString &compressionInfo, const QString &sampleLayoutInfo, QWidget *parent)
     : QDialog(parent) {
     (void)compressionInfo;
@@ -4185,6 +4203,10 @@ VDRawVideoExportConfig VDRawVideoExportDialog::getConfig() const {
     config.fullRange = mRangeCombo->currentData().toBool();
     return config;
 }
+
+// -----------------------------------------------------------------------------
+// Application-level utility dialogs
+// -----------------------------------------------------------------------------
 
 VDPreferencesDialog::VDPreferencesDialog(
     const VDPreferencesConfig& initialConfig,

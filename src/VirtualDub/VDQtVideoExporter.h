@@ -23,6 +23,11 @@ enum AudioProcessingMode {
 
 class VDQtAudioPlayer;
 
+// Coordinates every export path. Depending on mode it either asks FFmpeg to
+// remux compressed packets, builds a native-planar FFmpeg pipeline (Fast
+// Recompress), or pulls QImages through VDQtVideoDecoder/filter/timeline code.
+// Output is first written to a temporary sibling and atomically renamed only
+// after success, protecting existing destinations from partial exports.
 class VDQtVideoExporter {
 public:
     VDQtVideoExporter();
@@ -34,9 +39,11 @@ public:
     struct ExportOptions {
         QString inputPath;
         QString outputPath;
+        // Every directly or indirectly loaded source. SourceSafety rejects an
+        // output that aliases any entry, including through hard/symbolic links.
         QStringList protectedSourcePaths;
         int startFrame = 0;
-        int endFrame = -1;
+        int endFrame = -1; // Inclusive; -1 selects the known source end.
         double customFps = 0.0;
         // When true, customFps is a conversion target and source duration is
         // preserved by timestamp-based frame duplication/drop. When false,
@@ -101,6 +108,7 @@ public:
         std::function<bool(int completedFrames, int totalFrames)> progressCallback = nullptr);
 
 private:
+    // Exporter instances are reusable; each public operation resets both fields.
     bool mWasCancelled = false;
     QString mLastError;
 };

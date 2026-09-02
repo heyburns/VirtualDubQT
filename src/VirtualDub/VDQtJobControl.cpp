@@ -1,3 +1,6 @@
+// Job Control model and window. All durable mutations are delegated to
+// VDQtJobQueue; the UI reacts to queue signals and emits execution requests back
+// to the main window, which owns the actual export machinery.
 #include "VDQtJobControl.h"
 
 #include <QCheckBox>
@@ -38,6 +41,10 @@ QString sourceDisplay(const VDQtJobState& job) {
 }
 
 } // namespace
+
+// -----------------------------------------------------------------------------
+// Read-mostly table adapter over VDQtJobQueue
+// -----------------------------------------------------------------------------
 
 VDQtJobTableModel::VDQtJobTableModel(VDQtJobQueue *queue, QObject *parent)
     : QAbstractTableModel(parent), mQueue(queue) {
@@ -131,6 +138,10 @@ bool VDQtJobTableModel::setData(const QModelIndex& index,
     Q_EMIT dataChanged(index, index);
     return true;
 }
+
+// -----------------------------------------------------------------------------
+// Non-modal Job Control window
+// -----------------------------------------------------------------------------
 
 VDQtJobControlWindow::VDQtJobControlWindow(VDQtJobQueue *queue,
                                            QWidget *parent)
@@ -293,6 +304,8 @@ QList<int> VDQtJobControlWindow::selectedRows() const {
 }
 
 void VDQtJobControlWindow::updateSelectionControls() {
+    // Mutations that reorder or reload the queue are disabled while an export
+    // is active because the runner identifies its current job by row index.
     const int row = selectedRow();
     const VDQtJobState *job = mQueue->jobAt(row);
     const bool idle = !mQueue->isRunning();
@@ -309,6 +322,8 @@ void VDQtJobControlWindow::updateSelectionControls() {
 }
 
 void VDQtJobControlWindow::updateRunState(bool running, int currentIndex) {
+    // Queue state is authoritative. This method only projects it into buttons,
+    // labels, and the title; it never decides which job should execute next.
     mStartButton->setText(running ? QStringLiteral("Stop")
                                   : QStringLiteral("Start"));
     mStartButton->setEnabled(running || mQueue->pendingCount() > 0);
@@ -343,6 +358,8 @@ void VDQtJobControlWindow::updateCurrentProgress(int row) {
 }
 
 void VDQtJobControlWindow::showJobDetails(const QModelIndex& index) {
+    // Keep operational logs out of the dense table, but retain them in the job
+    // record so details survive application restarts and queue-file sharing.
     const VDQtJobState *job = mQueue->jobAt(index.row());
     if (!job) return;
     QString details;
@@ -413,6 +430,8 @@ void VDQtJobControlWindow::saveQueueAs() {
 }
 
 void VDQtJobControlWindow::restoreUiState() {
+    // Geometry is a user preference rather than project state and is therefore
+    // the only Job Control information stored through QSettings.
     QSettings settings(QStringLiteral("VirtualDub"),
                        QStringLiteral("VirtualDub_Port"));
     restoreGeometry(settings.value(QStringLiteral("jobControl/geometry")).toByteArray());

@@ -13,6 +13,9 @@
 #include <QString>
 #include <QStringList>
 
+// Everything that changes how frames/audio are processed, but not which media
+// is loaded or how the timeline is edited. This split allows the same JSON
+// representation to back processing-settings files, projects, and jobs.
 struct VDQtProcessingState {
     int videoMode = VideoMode_FullProcessing;
     int audioMode = AudioMode_DirectStreamCopy;
@@ -29,6 +32,9 @@ struct VDQtProcessingState {
     QMap<QString, QString> textMetadata;
 };
 
+// Complete restorable editing session. Paths are stored in portable JSON and
+// resolved by the loader; sourcePaths contains appended sources while
+// sourcePath remains the primary/backward-compatible field.
 struct VDQtProjectState {
     QString sourcePath;
     QStringList sourcePaths;
@@ -54,6 +60,8 @@ struct VDQtProjectState {
     VDQtProcessingState processing;
 };
 
+// Queue operations share one serialized state structure. The operation selects
+// which subset of VDQtJobState is consumed by the runner.
 enum class VDQtJobOperation {
     VideoExport = 0,
     AudioExport,
@@ -74,6 +82,8 @@ enum class VDQtJobStatus {
     Interrupted
 };
 
+// Durable queue record. Runtime-only exporter/decoder objects never enter this
+// structure, which is why interrupted jobs can be recovered after a restart.
 struct VDQtJobState {
     QString id;
     QString name;
@@ -103,6 +113,9 @@ struct VDQtJobState {
     VDQtProcessingState processing;
 };
 
+// Versioned JSON boundary for all durable state. Load functions parse into
+// temporary values and commit only after validation, so a malformed file does
+// not partially overwrite the caller's current session.
 class VDQtProjectFile {
 public:
     static bool saveProcessingSettings(

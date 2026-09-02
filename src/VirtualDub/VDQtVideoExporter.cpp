@@ -1,3 +1,7 @@
+// Export orchestration for remux, native-planar recompress, QImage processing,
+// raw video, audio, smart-render fallback, and edited timelines. Anonymous-
+// namespace helpers build subprocess pipelines and transactional output files;
+// the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
@@ -39,6 +43,9 @@ constexpr qint64 kMaxQueuedFfmpegBytes = 8 * 1024 * 1024;
 constexpr int kProcessPollMs = 25;
 constexpr int kMaxDiagnosticBytes = 1024 * 1024;
 
+// Export is synchronous from the caller's perspective but continues pumping Qt
+// events for progress/cancel. This filter blocks edits and close/drop actions on
+// the protected editor while still allowing the progress dialog to function.
 class ScopedEditorInputBlocker final : public QObject {
 public:
     explicit ScopedEditorInputBlocker(QWidget *protectedWidget)
@@ -491,6 +498,9 @@ bool writeFrame(QProcess& process, const QImage& image,
     return true;
 }
 
+// In-process NUT muxer used when QImage rendering must retain per-frame VFR
+// timestamps. It writes raw packed frames to an AVIO-backed pipe consumed by
+// the encoder process, avoiding the constant-rate limitation of rawvideo stdin.
 class TimestampedNutWriter {
 public:
     ~TimestampedNutWriter() { release(); }
@@ -712,6 +722,9 @@ bool validRawAlignment(int alignment) {
         && (alignment & (alignment - 1)) == 0;
 }
 
+// Converts QImage frames to the requested raw pixel format and writes planes in
+// caller-selected alignment/order/orientation. FFmpeg owns the conversion frame;
+// QFile/QSaveFile ownership remains with the public raw-export operation.
 class RawFrameWriter {
 public:
     ~RawFrameWriter() {
@@ -940,6 +953,10 @@ private:
 };
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Raw frame export
+// ---------------------------------------------------------------------------
 
 VDQtVideoExporter::VDQtVideoExporter() {}
 
@@ -1300,6 +1317,10 @@ bool VDQtVideoExporter::exportRawVideo(
     }
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Container/video export mode selection and pipeline execution
+// ---------------------------------------------------------------------------
 
 bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                                     VDQtVideoDecoder *activeDecoder,

@@ -22,6 +22,7 @@ extern "C" {
 class VDQtFFmpegAudioDevice;
 class VDQtAudioFilterDevice;
 
+// Description of one selectable audio stream returned by the demuxer probe.
 struct VDAudioStreamInfo {
     int streamIndex = -1;
     QString codecName;
@@ -34,6 +35,11 @@ struct VDAudioStreamInfo {
     QString displayName() const;
 };
 
+// QIODevice producer for audio owned by a native AviSynth clip. AviSynth graph
+// evaluation happens on a decode-ahead thread, never in QAudioSink's real-time
+// read callback. The bounded byte buffer and wait condition provide backpressure.
+// m_avsAccessMutex is shared with video because many third-party AVS plug-ins
+// are not safe when GetAudio and GetFrame run concurrently.
 class AVSAudioDevice : public QIODevice {
     Q_OBJECT
 public:
@@ -88,6 +94,15 @@ private:
 
 #include <functional>
 
+// Owns the session's selected audio stream and Qt output sink. FFmpeg files use
+// an internal streaming QIODevice (implemented in the .cpp); AVS uses
+// AVSAudioDevice. Both may be wrapped by VDQtAudioFilterDevice before reaching
+// QAudioSink. Decoding is pull-based and bounded, so opening long media does not
+// decode the entire soundtrack into memory.
+//
+// Threading/lifetime rule: close() first stops the sink and producer threads,
+// then releases filters, devices, codec, and demuxer in that order. Callers must
+// not destroy or replace a shared AviSynth decoder until close() returns.
 class VDQtAudioPlayer {
 public:
     VDQtAudioPlayer();
@@ -107,6 +122,8 @@ public:
     void seekToFrame(int frameIndex, double fps);
     void seekToTimeSeconds(double timeSeconds);
     void refreshAudioFilters();
+    // Decoder cursor includes buffered read-ahead; use getPlaybackTimeSeconds()
+    // when synchronizing video to what the user can currently hear.
     double getCurrentAudioTimeSeconds() const;
     // Time heard by the output device, unlike getCurrentAudioTimeSeconds(),
     // which is the decoder's read-ahead cursor.
@@ -139,6 +156,7 @@ public:
 #endif
 
 private:
+    // Logical source description.
     bool mIsOpen;
     bool mHasAudio;
     bool mIsPlaying;
@@ -152,9 +170,11 @@ private:
     QString mFilePath;
     int mAudioStreamIndex;
 
+    // FFmpeg backend (null for native AviSynth audio).
     AVFormatContext *mFormatCtx;
     AVCodecContext *mCodecCtx;
 
+    // Playback pipeline, ordered decoder -> optional filter -> sink.
     QAudioSink *mAudioSink;
     VDQtFFmpegAudioDevice *mFFmpegAudioDevice;
     AVSAudioDevice *mAvsAudioDevice;
@@ -163,6 +183,7 @@ private:
 
     QString mChannelLayoutName;
 
+    // Non-owning AVS handles retained by the authoritative video decoder.
     AVS_Clip *mClip = nullptr;
     const AVS_VideoInfo *mVi = nullptr;
     QRecursiveMutex *mAvsAccessMutex = nullptr;

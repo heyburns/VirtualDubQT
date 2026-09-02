@@ -1,3 +1,8 @@
+// Broad integration/regression suite. Each block creates isolated temporary
+// media and exercises a previously fragile cross-subsystem contract: timeline
+// edits, export modes, audio buffering, AVS ownership, jobs, frame serving,
+// source safety, and decoder/filter lifetime. Fail fast keeps the first broken
+// invariant visible in CI output.
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -2141,12 +2146,16 @@ int main(int argc, char **argv) {
                      "10-bit source is retained in a 16-bit-per-channel image"))
             return 1;
         VDQtVideoDecoder forcedRgb24Decoder;
-        forcedRgb24Decoder.setDecompressionConfig(
-            QStringLiteral("RGB24"), 0, 0);
         if (!require(forcedRgb24Decoder.openFile(fixturePath)
                         && forcedRgb24Decoder.getFrameImage(0).format()
-                               == QImage::Format_RGB888,
-                     "forced RGB24 decompression changes decoder output storage"))
+                               == QImage::Format_RGBA64,
+                     "automatic decompression initially retains 10-bit precision"))
+            return 1;
+        forcedRgb24Decoder.setDecompressionConfig(
+            QStringLiteral("RGB24"), 0, 0);
+        if (!require(forcedRgb24Decoder.getFrameImage(0).format()
+                        == QImage::Format_RGB888,
+                     "runtime RGB24 change safely replaces decoder output storage"))
             return 1;
 
         VDQtFilterSystem::instance().clearFilters();
@@ -2327,6 +2336,68 @@ int main(int argc, char **argv) {
                      "AviSynth RGB24 conversion safely contains SIMD tail writes"))
             return 1;
         decoder.close();
+    }
+
+    {
+        // Ordinary FFmpeg sources need the same padded conversion storage as
+        // native AviSynth frames. Exercise the reported AVS-to-AVI reload
+        // sequence with both the primary and interactive-style decoders.
+        const QString scriptPath = settingsDirectory.filePath(
+            QStringLiteral("reload_source.avs"));
+        const QString aviPath = settingsDirectory.filePath(
+            QStringLiteral("rgb24_simd_tail.avi"));
+        const QByteArray script =
+            "BlankClip(length=4, width=640, height=480, pixel_type=\"YV12\", "
+            "color=$204060)\n";
+        if (!require(writeFile(scriptPath, script),
+                     "write AVS-to-AVI reload script"))
+            return 1;
+
+        QByteArray ffmpegError;
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                           QStringLiteral("error"), QStringLiteral("-f"),
+                           QStringLiteral("lavfi"), QStringLiteral("-i"),
+                           QStringLiteral("testsrc2=size=648x472:rate=24:duration=0.2"),
+                           QStringLiteral("-c:v"), QStringLiteral("mpeg4"),
+                           QStringLiteral("-q:v"), QStringLiteral("2"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                           QStringLiteral("-an"), QStringLiteral("-y"), aviPath },
+                         &ffmpegError),
+                     "create 648x472 AVI SIMD-tail fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+
+        std::array<VDQtVideoDecoder, 2> decoders;
+        for (int reload = 0; reload < 8; ++reload) {
+            for (VDQtVideoDecoder& decoder : decoders) {
+                if (!require(decoder.openFile(scriptPath),
+                             "reload AviSynth source before raw AVI")) {
+                    std::cerr << decoder.getLastError().toStdString() << '\n';
+                    return 1;
+                }
+                const QImage avsFrame = decoder.getFrameImage(reload % 4);
+                if (!require(!avsFrame.isNull()
+                                && avsFrame.size() == QSize(640, 480),
+                             "render AviSynth frame before raw AVI reload"))
+                    return 1;
+
+                if (!require(decoder.openFile(aviPath),
+                             "switch repeatedly from AviSynth to raw AVI")) {
+                    std::cerr << decoder.getLastError().toStdString() << '\n';
+                    return 1;
+                }
+                const QImage aviFrame = decoder.getFrameImage(reload % 4);
+                if (!require(!aviFrame.isNull()
+                                && aviFrame.size() == QSize(648, 472)
+                                && aviFrame.format() == QImage::Format_RGB888,
+                             "raw AVI RGB24 conversion safely contains SIMD tail writes"))
+                    return 1;
+            }
+        }
+        for (VDQtVideoDecoder& decoder : decoders) decoder.close();
     }
 
     {

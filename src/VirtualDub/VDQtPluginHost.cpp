@@ -1,3 +1,6 @@
+// Linux host for the legacy VirtualDub VDX video-filter ABI. QLibrary performs
+// module loading, small compatibility callbacks adapt VDX pixmaps to QImage,
+// and one runtime object is retained per filter-chain instance ID.
 #include "VDQtPluginHost.h"
 
 #include <vd2/system/vdtypes.h>
@@ -34,6 +37,9 @@ constexpr qsizetype kMaximumPluginFrameBytes = qsizetype{1024} * 1024 * 1024;
 
 struct PluginDefinition;
 
+// Shared lifetime token passed to the legacy module initializer. Definitions
+// and runtimes retain the surrounding PluginModule so QLibrary cannot unload
+// while a callback or filter instance still points into its code.
 struct ModuleToken {
     alignas(std::max_align_t) unsigned char storage[64] = {};
 };
@@ -196,6 +202,8 @@ VDXFilterFunctions gFilterFunctions = {
 
 FilterModInitFunctions gFilterModFunctions = { addFilterMod };
 
+// Small FilterMod bridge that presents the current QImage-backed source/dest
+// pixmaps to plug-ins requesting the extended pixmap interface.
 class FilterModPixmapProvider final : public IFilterModPixmap {
 public:
     const VDXPixmap *source = nullptr;
@@ -212,6 +220,9 @@ public:
     }
 };
 
+// VDX filters may use aligned vector loads/stores beyond visible row bytes. This
+// owner keeps a padded aligned backing store and copies only visible pixels at
+// the Qt boundary, mirroring the decoder's swscale safety contract.
 struct AlignedImage {
     QByteArray bytes;
     QImage image;
@@ -280,6 +291,10 @@ void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
     bitmap.mpPixmap = &pixmap;
 }
 
+// One configured legacy filter instance. Construction runs init/start/config
+// callbacks in ABI order; destruction runs end/deinit before releasing module
+// ownership. process() serializes callbacks because legacy filters are commonly
+// stateful and do not promise thread safety.
 class VideoFilterRuntime {
 public:
     explicit VideoFilterRuntime(QSharedPointer<PluginDefinition> pluginDefinition)
@@ -569,6 +584,7 @@ bool isWindowsPortableExecutable(const QString& path) {
 
 } // namespace
 
+// Process-wide discovery cache and live-instance map hidden from the header.
 class VDQtPluginHost::Private {
 public:
     ~Private() { unload(); }

@@ -10,6 +10,8 @@
 
 #include <utility>
 
+// Built-in type IDs are serialized in projects/scripts; append new values
+// before Count instead of reordering existing entries.
 enum class VDFilterType {
     SixAxis,
     BobDoubler,
@@ -61,6 +63,8 @@ enum class VDFilterType {
     Count
 };
 
+// Serializable configuration for one stage of the active filter chain.
+// Runtime state and cached assets live in VDQtFilterSystem, never in this value.
 struct VDFilterInstance {
     QString id;
     QString name;
@@ -72,17 +76,29 @@ struct VDFilterInstance {
     QByteArray pluginConfiguration;
 };
 
+// Describes how a chain changes time. Bob deinterlacing is currently the main
+// rate-changing case and emits two output frames for each input frame.
 struct VDFilterTimingInfo {
     int outputFramesPerInput = 1;
     bool sequenceSupported = true;
 };
 
+// Per-input timing passed to text and temporal filters. A negative value means
+// the caller could not establish that piece of timing.
 struct VDFilterFrameContext {
     qint64 frameNumber = -1;
     double timestampSeconds = -1.0;
     double frameRate = 0.0;
 };
 
+// Ordered video-filter pipeline used by preview and full-processing export.
+// Each decoder worker owns a private instance/snapshot; instance() is the
+// editable session chain. This separation prevents temporal history, plug-in
+// instances, and mutable caches from being shared across threads.
+//
+// Frames enter as QImage. processFrameSequence() is the authoritative API
+// because one source frame may produce multiple output phases. Temporal state
+// is keyed by filter instance ID and reset on seeks/discontinuities.
 class VDQtFilterSystem {
 public:
     VDQtFilterSystem();
@@ -136,6 +152,7 @@ public:
     VDFilterTimingInfo getTimingInfo() const;
 
 private:
+    // Runs one temporal phase through every enabled filter in chain order.
     QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask,
                                 const VDFilterFrameContext& context);
 
@@ -146,6 +163,8 @@ private:
     };
 
     QList<VDFilterInstance> mActiveChain;
+    // Expensive derived data are cached by parameter/asset key and reused
+    // across frames. They are intentionally local to this pipeline instance.
     QHash<QString, QByteArray> mSixAxisLutCache;
     QHash<QString, QImage> mAssetCache;
     QHash<QString, TemporalState> mTemporalStates;

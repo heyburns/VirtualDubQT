@@ -1,3 +1,6 @@
+// Local FIFO/NUT frame server. A worker thread decodes and filters frames, feeds
+// raw video to an ffmpeg child process, and publishes the muxed NUT stream at the
+// requested named pipe. Cancellation closes the pipeline and removes the FIFO.
 #include "VDQtFrameServer.h"
 
 #include "VDQtVideoDecoder.h"
@@ -23,6 +26,8 @@ QString processError(QProcess& process) {
 bool writeImage(QProcess& process,
                 const QImage& image,
                 std::atomic_bool& cancelled) {
+    // QProcess buffers stdin in memory. Bound that buffer so a slow FIFO reader
+    // creates backpressure instead of letting a long serve consume all RAM.
     const QImage rgb = image.convertToFormat(QImage::Format_RGB888);
     for (int row = 0; row < rgb.height(); ++row) {
         const char *data = reinterpret_cast<const char *>(rgb.constScanLine(row));
@@ -56,6 +61,8 @@ VDQtFrameServer::~VDQtFrameServer() {
 }
 
 bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
+    // Validate and create the FIFO synchronously so callers either receive a
+    // usable endpoint or an immediate error. Decoding starts only after this.
     if (isRunning()) {
         if (errorMessage) *errorMessage = QStringLiteral("A frame server is already running.");
         return false;
@@ -99,6 +106,8 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
 }
 
 void VDQtFrameServer::stop() {
+    // run() polls this flag during scans, decode, and pipe writes. Waiting here
+    // makes destruction safe and guarantees the worker no longer touches this.
     mCancelRequested.store(true, std::memory_order_relaxed);
     if (mThread && mThread->isRunning()) mThread->wait();
 }
@@ -108,6 +117,8 @@ bool VDQtFrameServer::isRunning() const {
 }
 
 void VDQtFrameServer::run(Config config) {
+    // Phase 1: open the source and make the timeline length exact. A FIFO cannot
+    // revise its declared duration after the consumer has started reading it.
     QString error;
     VDQtVideoDecoder decoder;
     decoder.setDecompressionConfig(
@@ -158,6 +169,9 @@ void VDQtFrameServer::run(Config config) {
         error = QStringLiteral("The frame-server range is outside the decoded source.");
     }
 
+    // Phase 2: instantiate an isolated filter graph and render one frame. The
+    // probe establishes the fixed dimensions and the output phase multiplier
+    // required to describe the raw input stream to ffmpeg.
     VDQtFilterSystem filters;
     filters.replaceActiveChainTransient(config.filters);
     const int outputPhases = std::max(
@@ -180,6 +194,9 @@ void VDQtFrameServer::run(Config config) {
         }
     }
 
+    // Phase 3: ffmpeg wraps RGB frames (and optional PCM audio) in NUT. Using a
+    // real muxer supplies timestamps and stream metadata that raw FIFO bytes do
+    // not carry, while keeping video processing inside this application.
     QProcess ffmpeg;
     if (error.isEmpty()) {
         const QSize size = firstImages.first().size();
@@ -216,6 +233,8 @@ void VDQtFrameServer::run(Config config) {
         if (!ffmpeg.waitForStarted(5000)) error = ffmpeg.errorString();
     }
 
+    // Phase 4: decode/filter/write serially. Serial operation is intentional:
+    // stateful filters and the decoder's sequential fast path depend on order.
     if (error.isEmpty()) Q_EMIT serverStarted(config.pipePath);
     QSize outputSize = firstImages.isEmpty() ? QSize() : firstImages.first().size();
     for (int frameIndex = config.startFrame;

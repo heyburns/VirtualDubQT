@@ -21,7 +21,9 @@ struct VDQtPluginFilterInfo {
 
 // Host for Linux-native modules implementing VirtualDub's legacy VDX video
 // filter entry points. Windows DLLs cannot be loaded into a native Linux
-// process; they are reported to the catalog with a useful diagnostic.
+// process; they are reported to the catalog with a useful diagnostic. Loaded
+// modules and live filter instances are hidden behind Private so legacy ABI
+// types and dlopen handles do not leak into the rest of the application.
 class VDQtPluginHost {
 public:
     static VDQtPluginHost& instance();
@@ -37,6 +39,9 @@ public:
                             const QImage& input,
                             QImage *output,
                             QString *errorMessage = nullptr);
+    // Instance IDs correspond to entries in an active filter chain. Forgetting
+    // them runs plug-in teardown and prevents configuration/state leaking into
+    // a later chain that happens to use the same module.
     void forgetInstance(const QString& instanceId);
     void forgetAllInstances();
 

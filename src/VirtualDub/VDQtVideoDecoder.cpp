@@ -1,3 +1,6 @@
+// Random-access FFmpeg/AviSynth video decoder. This implementation owns demux,
+// codec, seek/index state, swscale conversion storage, script dependency audit,
+// and the memory-bounded frame cache. See the class header for lifetime rules.
 #include "VDQtVideoDecoder.h"
 #include <QDebug>
 #include <QFile>
@@ -22,6 +25,9 @@ extern "C" {
 
 namespace {
 
+// Conversion helpers centralize the packed-RGB storage contract required by
+// swscale's SIMD writers. Dependency-audit helpers below deliberately prefer a
+// false "incomplete" result to overlooking an indirectly loaded source file.
 AVPixelFormat decodedOutputPixelFormat(const QString& forcedFormat,
                                        int sourceBitDepth,
                                        bool sourceHasAlpha) {
@@ -66,6 +72,110 @@ bool isUsableFrameRate(AVRational rate) {
 int boundedFrameCount(int64_t count) {
     if (count <= 0) return 0;
     return static_cast<int>(std::min<int64_t>(count, std::numeric_limits<int>::max()));
+}
+
+constexpr qsizetype kConversionAlignment = 64;
+constexpr qsizetype kConversionTailPadding = 64;
+
+struct PackedConversionLayout {
+    int visibleRowBytes = 0;
+    int alignedRowBytes = 0;
+    qsizetype allocationBytes = 0;
+};
+
+bool calculatePackedConversionLayout(AVPixelFormat format,
+                                     int width,
+                                     int height,
+                                     PackedConversionLayout *layout) {
+    if (!layout || format == AV_PIX_FMT_NONE || width <= 0 || height <= 0
+        || av_pix_fmt_count_planes(format) != 1) {
+        return false;
+    }
+
+    const int visibleRowBytes = av_image_get_linesize(format, width, 0);
+    if (visibleRowBytes <= 0) return false;
+
+    const qsizetype alignedRowBytes =
+        (static_cast<qsizetype>(visibleRowBytes) + kConversionAlignment - 1)
+        & ~(kConversionAlignment - 1);
+    const qsizetype maximumSize = std::numeric_limits<qsizetype>::max();
+    if (alignedRowBytes <= 0
+        || alignedRowBytes > std::numeric_limits<int>::max()
+        || alignedRowBytes
+               > (maximumSize - kConversionTailPadding
+                  - (kConversionAlignment - 1)) / height) {
+        return false;
+    }
+
+    layout->visibleRowBytes = visibleRowBytes;
+    layout->alignedRowBytes = static_cast<int>(alignedRowBytes);
+    layout->allocationBytes = alignedRowBytes * height
+        + kConversionTailPadding + (kConversionAlignment - 1);
+    return true;
+}
+
+uint8_t *alignedConversionPixels(void *allocation) {
+    const uintptr_t rawAddress = reinterpret_cast<uintptr_t>(allocation);
+    const uintptr_t alignedAddress =
+        (rawAddress + static_cast<uintptr_t>(kConversionAlignment - 1))
+        & ~static_cast<uintptr_t>(kConversionAlignment - 1);
+    return reinterpret_cast<uint8_t *>(alignedAddress);
+}
+
+bool allocatePackedConversionStorage(AVFrame *frame,
+                                     AVPixelFormat format,
+                                     int width,
+                                     int height,
+                                     uint8_t **allocation,
+                                     QString *errorMessage,
+                                     const QString& description) {
+    PackedConversionLayout layout;
+    if (!frame || !allocation
+        || !calculatePackedConversionLayout(format, width, height, &layout)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Invalid %1 dimensions or pixel format.")
+                                .arg(description);
+        }
+        return false;
+    }
+
+    auto *newAllocation = static_cast<uint8_t *>(
+        av_malloc(static_cast<size_t>(layout.allocationBytes)));
+    if (!newAllocation) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Could not allocate %1 bytes for %2.")
+                                .arg(layout.allocationBytes)
+                                .arg(description);
+        }
+        return false;
+    }
+
+    uint8_t *pixels = alignedConversionPixels(newAllocation);
+    const int fillResult = av_image_fill_arrays(
+        frame->data, frame->linesize, pixels, format, width, height,
+        static_cast<int>(kConversionAlignment));
+    const qsizetype imageBytes = static_cast<qsizetype>(layout.alignedRowBytes)
+        * height;
+    if (fillResult < 0 || frame->data[0] != pixels
+        || frame->linesize[0] != layout.alignedRowBytes
+        || fillResult > imageBytes) {
+        if (errorMessage) {
+            *errorMessage = fillResult < 0
+                ? avOperationError(
+                      QStringLiteral("Could not initialize %1").arg(description),
+                      fillResult)
+                : QStringLiteral("FFmpeg returned an invalid layout for %1.")
+                      .arg(description);
+        }
+        av_free(newAllocation);
+        return false;
+    }
+
+    frame->format = format;
+    frame->width = width;
+    frame->height = height;
+    *allocation = newAllocation;
+    return true;
 }
 
 QMutex& aviSynthWorkingDirectoryMutex() {
@@ -334,6 +444,10 @@ void collectScriptDependencies(const QString& scriptPath,
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Global decoder preferences, construction, and script dependency inspection
+// ---------------------------------------------------------------------------
+
 qsizetype VDQtVideoDecoder::getFrameCacheBudgetKiB() {
     return static_cast<qsizetype>(
         gFrameCacheBudgetMiB.load(std::memory_order_relaxed)) * 1024;
@@ -517,24 +631,10 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
             // exact end of Qt's allocation and corrupts the heap. Use an
             // aligned row stride plus a padded allocation, then copy only the
             // visible bytes into the image.
-            constexpr qsizetype kConversionAlignment = 64;
-            constexpr qsizetype kConversionTailPadding = 64;
-            const int visibleRowBytes = av_image_get_linesize(
-                mOutputPixelFormat, w, 0);
-            const qsizetype alignedRowBytes = visibleRowBytes > 0
-                ? (static_cast<qsizetype>(visibleRowBytes)
-                    + kConversionAlignment - 1)
-                    & ~(kConversionAlignment - 1)
-                : 0;
-            const qsizetype maximumSize = std::numeric_limits<qsizetype>::max();
-            const bool invalidSize = visibleRowBytes <= 0
-                || img.bytesPerLine() < visibleRowBytes
-                || alignedRowBytes > std::numeric_limits<int>::max()
-                || h <= 0
-                || alignedRowBytes >
-                    (maximumSize - kConversionTailPadding
-                     - (kConversionAlignment - 1)) / h;
-            if (invalidSize) {
+            PackedConversionLayout layout;
+            if (!calculatePackedConversionLayout(
+                    mOutputPixelFormat, w, h, &layout)
+                || img.bytesPerLine() < layout.visibleRowBytes) {
                 mLastError = QStringLiteral(
                     "Invalid RGB conversion buffer size for AviSynth frame %1.")
                                  .arg(frameIndex);
@@ -542,18 +642,12 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
                 return QImage();
             }
 
-            const qsizetype bufferSize = alignedRowBytes * h
-                + kConversionTailPadding + (kConversionAlignment - 1);
-            mAvsConversionBuffer.resize(bufferSize);
-            const uintptr_t rawAddress = reinterpret_cast<uintptr_t>(
+            mAvsConversionBuffer.resize(layout.allocationBytes);
+            auto *conversionPixels = alignedConversionPixels(
                 mAvsConversionBuffer.data());
-            const uintptr_t alignedAddress = (rawAddress
-                + static_cast<uintptr_t>(kConversionAlignment - 1))
-                & ~static_cast<uintptr_t>(kConversionAlignment - 1);
-            auto *conversionPixels = reinterpret_cast<uint8_t *>(alignedAddress);
 
             uint8_t *dstSlice[4] = { conversionPixels, nullptr, nullptr, nullptr };
-            int dstStride[4] = { static_cast<int>(alignedRowBytes), 0, 0, 0 };
+            int dstStride[4] = { layout.alignedRowBytes, 0, 0, 0 };
             const int scaledRows = sws_scale(
                 mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
             avs_release_video_frame(frame);
@@ -562,8 +656,8 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
                     std::memcpy(
                         img.scanLine(row),
                         conversionPixels + static_cast<qsizetype>(row)
-                            * alignedRowBytes,
-                        static_cast<size_t>(visibleRowBytes));
+                            * layout.alignedRowBytes,
+                        static_cast<size_t>(layout.visibleRowBytes));
                 }
                 return img;
             }
@@ -579,6 +673,10 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
     avs_release_video_frame(frame);
     return QImage();
 }
+
+// ---------------------------------------------------------------------------
+// Pixel-conversion policy and transactional source opening
+// ---------------------------------------------------------------------------
 
 bool VDQtVideoDecoder::setupSwsContext(AVPixelFormat sourceFormat,
                                        int sourceWidth,
@@ -925,24 +1023,9 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     const QImage::Format outputImageFormat = decodedOutputImageFormat(
         mForcedFormatName, sourceBitDepth, sourceHasAlpha);
 
-    const int bufferSize = av_image_get_buffer_size(outputPixelFormat, width, height, 1);
-    if (bufferSize <= 0) {
-        mLastError = avOperationError(QStringLiteral("Could not calculate RGB frame buffer size"), bufferSize);
-        releaseLocals();
-        return false;
-    }
-
-    newBuffer = static_cast<uint8_t *>(av_malloc(static_cast<size_t>(bufferSize)));
-    if (!newBuffer) {
-        mLastError = QStringLiteral("Could not allocate %1 bytes for RGB frame conversion.").arg(bufferSize);
-        releaseLocals();
-        return false;
-    }
-
-    error = av_image_fill_arrays(newRgbFrame->data, newRgbFrame->linesize, newBuffer,
-                                 outputPixelFormat, width, height, 1);
-    if (error < 0) {
-        mLastError = avOperationError(QStringLiteral("Could not initialize RGB frame storage"), error);
+    if (!allocatePackedConversionStorage(
+            newRgbFrame, outputPixelFormat, width, height, &newBuffer,
+            &mLastError, QStringLiteral("RGB frame conversion storage"))) {
         releaseLocals();
         return false;
     }
@@ -1050,6 +1133,10 @@ void VDQtVideoDecoder::clearCache() {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     mFrameCache.clear();
 }
+
+// ---------------------------------------------------------------------------
+// Resource teardown and dynamic conversion-storage replacement
+// ---------------------------------------------------------------------------
 
 void VDQtVideoDecoder::cacheFrame(int frameIndex, const QImage& image) {
     if (frameIndex < 0 || image.isNull()) return;
@@ -1211,27 +1298,10 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
             return false;
         }
 
-        const int bufferSize = av_image_get_buffer_size(
-            outputPixelFormat, sourceWidth, sourceHeight, 1);
-        if (bufferSize <= 0) {
-            mLastError = avOperationError(QStringLiteral("Could not size resized RGB frame storage"), bufferSize);
-            av_frame_free(&replacementFrame);
-            return false;
-        }
-
-        replacementBuffer = static_cast<uint8_t *>(av_malloc(static_cast<size_t>(bufferSize)));
-        if (!replacementBuffer) {
-            mLastError = QStringLiteral("Could not allocate %1 bytes for a resized RGB frame.").arg(bufferSize);
-            av_frame_free(&replacementFrame);
-            return false;
-        }
-
-        const int fillResult = av_image_fill_arrays(
-            replacementFrame->data, replacementFrame->linesize, replacementBuffer,
-            outputPixelFormat, sourceWidth, sourceHeight, 1);
-        if (fillResult < 0) {
-            mLastError = avOperationError(QStringLiteral("Could not initialize resized RGB frame storage"), fillResult);
-            av_free(replacementBuffer);
+        if (!allocatePackedConversionStorage(
+                replacementFrame, outputPixelFormat, sourceWidth, sourceHeight,
+                &replacementBuffer, &mLastError,
+                QStringLiteral("resized RGB frame conversion storage"))) {
             av_frame_free(&replacementFrame);
             return false;
         }
@@ -1320,6 +1390,10 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
     mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Seek/decode state machine and presentation-order frame indexing
+// ---------------------------------------------------------------------------
 
 bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
@@ -1614,6 +1688,10 @@ bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {
     }
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// Navigation/timing queries, decoder error policy, and full-stream analysis
+// ---------------------------------------------------------------------------
 
 int VDQtVideoDecoder::getPreviousKeyFrame(int frameIndex) {
     if (!mIsOpen) return -1;

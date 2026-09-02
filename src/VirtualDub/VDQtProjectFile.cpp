@@ -1,3 +1,6 @@
+// Versioned JSON serialization for processing settings, editing projects, and
+// job queues. Helper functions below keep enum/config encoding symmetric and
+// validate bounded values before public loaders commit a reconstructed state.
 #include "VDQtProjectFile.h"
 
 #include <QDir>
@@ -18,6 +21,9 @@ constexpr int kDocumentVersion = 6;
 constexpr int kOldestSupportedDocumentVersion = 1;
 constexpr qint64 kMaximumDocumentBytes = qint64{4} * 1024 * 1024;
 
+// JSON helpers are paired to make format evolution reviewable. New optional
+// keys need defaults in the corresponding parser; incompatible structural
+// changes require a document-version bump and migration handling.
 void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
 }
@@ -31,6 +37,9 @@ bool isSafeImageExtension(const QString& extension) {
 }
 
 QJsonObject videoCodecToJson(const VDVideoCodecParams& value) {
+    // Field names are intentionally descriptive rather than matching FFmpeg
+    // flags. This file format represents editor intent; VDQtCodecEngine owns
+    // the separate translation to the command line used by the installed build.
     QJsonObject object;
     object["codecId"] = value.codecId;
     object["rateMode"] = value.rateMode;
@@ -105,6 +114,9 @@ VDAudioCodecParams audioCodecFromJson(const QJsonObject& object) {
 }
 
 QJsonObject processingToJson(const VDQtProcessingState& state) {
+    // Processing state is source-independent. It is reused by settings files,
+    // projects, and every queued job, so all three document types must pass
+    // through this single serializer/parser pair to avoid behavior drift.
     QJsonObject object;
     object["videoMode"] = state.videoMode;
     object["audioMode"] = state.audioMode;
@@ -195,6 +207,9 @@ bool parseProcessing(const QJsonObject& object,
         setError(errorMessage, QStringLiteral("No processing-state destination was provided."));
         return false;
     }
+    // Parse into a fresh value and publish only at the end. Besides making the
+    // operation transactional, this applies current defaults to keys absent in
+    // older documents before their explicitly stored values are overlaid.
     VDQtProcessingState result;
     result.videoMode = object.value("videoMode").toInt(result.videoMode);
     result.audioMode = object.value("audioMode").toInt(result.audioMode);
@@ -276,6 +291,8 @@ bool parseProcessing(const QJsonObject& object,
         return false;
     }
 
+    // Limits below defend both memory use and later UI/processing loops. Project
+    // files are user-editable JSON and therefore must be treated as untrusted.
     const QJsonArray filters = object.value("filters").toArray();
     if (filters.size() > 256) {
         setError(errorMessage, QStringLiteral("The processing file contains too many filters."));
@@ -406,6 +423,9 @@ bool writeDocument(const QString& path,
             "The settings document exceeds the 4 MiB safety limit."));
         return false;
     }
+    // QSaveFile writes beside the destination and renames on commit. A crash or
+    // full disk can therefore leave the previous valid project intact instead
+    // of replacing it with a truncated JSON document.
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly)) {
         setError(errorMessage, output.errorString());
@@ -433,6 +453,8 @@ bool readDocument(const QString& path,
         setError(errorMessage, QStringLiteral("The settings file is empty or unreasonably large."));
         return false;
     }
+    // Kind prevents accidentally treating a job list as a project merely
+    // because both are JSON; version bounds provide a clear migration boundary.
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(input.readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
@@ -454,6 +476,8 @@ bool readDocument(const QString& path,
 
 } // namespace
 
+// Public save/load functions add the document kind/version envelope and use
+// QSaveFile for atomic replacement. Loaders parse into local state first.
 bool VDQtProjectFile::saveProcessingSettings(
     const QString& path,
     const VDQtProcessingState& state,
@@ -480,6 +504,9 @@ bool VDQtProjectFile::saveProject(
     const QString& path,
     const VDQtProjectState& state,
     QString *errorMessage) {
+    // Project-specific fields describe the source, edited timeline, playhead,
+    // audio selection, and markers. The processing snapshot is appended once at
+    // the end so it remains identical to standalone processing settings.
     QJsonObject root;
     root["kind"] = QStringLiteral("VirtualDubQTProject");
     root["version"] = kDocumentVersion;
@@ -552,6 +579,8 @@ bool VDQtProjectFile::loadProject(
         setError(errorMessage, QStringLiteral("No project-state destination was provided."));
         return false;
     }
+    // Keep reconstructed state local until source lists, timeline segments, UI
+    // positions, and processing settings have all passed validation.
     QJsonObject root;
     if (!readDocument(path, QStringLiteral("VirtualDubQTProject"), &root, errorMessage))
         return false;
@@ -835,6 +864,9 @@ bool VDQtProjectFile::saveJobQueue(
         object["processing"] = processingToJson(job.processing);
         serializedJobs.append(object);
     }
+    // Job records intentionally contain their full processing snapshot. Queue
+    // execution must not depend on whichever options happen to be selected in
+    // the editor when the application is restarted later.
     QJsonObject root;
     root["kind"] = QStringLiteral("VirtualDubQTJobQueue");
     root["version"] = kDocumentVersion;
@@ -850,6 +882,8 @@ bool VDQtProjectFile::loadJobQueue(
         setError(errorMessage, QStringLiteral("No job-queue destination was provided."));
         return false;
     }
+    // As with projects, build a temporary list first. One malformed record
+    // rejects the document rather than leaving a partially replaced live queue.
     QJsonObject root;
     if (!readDocument(
             path, QStringLiteral("VirtualDubQTJobQueue"), &root, errorMessage))

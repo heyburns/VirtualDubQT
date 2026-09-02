@@ -29,6 +29,17 @@
 
 class VDQtJobControlWindow;
 
+// Top-level application controller. Besides constructing menus, this class is
+// the integration boundary between durable session state, the authoritative
+// decoder/audio player, the asynchronous interactive-preview worker, timeline
+// edits, exporters, automation, jobs, and the frame server.
+//
+// Decoder ownership is deliberately split: mVideoDecoder supplies metadata,
+// export, and shared native AviSynth access; mFrameDecodeWorker owns a second
+// decoder on mFrameDecodeThread for responsive scrubbing. AVS is the exception:
+// both paths share mVideoDecoder because evaluating third-party script graphs
+// twice is unsafe. closeInteractiveDecoder() is synchronous and must run before
+// the authoritative decoder or AVS environment is released.
 class VDQtMainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -172,6 +183,7 @@ private Q_SLOTS:
     void reloadQueuedJob(int row);
 
 private:
+    // UI construction and display scheduling.
     void createMenus();
     void createStatusBar();
     void applyTheme();
@@ -182,6 +194,7 @@ private:
     void syncInteractiveFilterChain();
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
+    // Source/session persistence and special input materialization.
     bool loadProjectFile(const QString& path);
     bool appendVideoSegments(const QStringList& additions,
                              QString *errorMessage);
@@ -223,6 +236,8 @@ private:
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
     void findSceneChange(bool forward);
+    // Queue and command-script execution reuse the same export functions as UI
+    // actions, but unattended mode converts modal failures into returned text.
     VDQtJobState currentJobTemplate() const;
     bool executeQueuedJob(int row, QString *errorMessage);
     bool executeImageSequenceJob(VDQtJobState& job,
@@ -242,15 +257,20 @@ private:
                                   QString *errorMessage);
     void exportAnimatedImage(bool animatedPng);
 
+    // Core widgets and authoritative media owners.
     QSplitter *mVideoSplitter;
     VDVideoDisplayWidget *mInputDisplay;
     VDVideoDisplayWidget *mOutputDisplay;
     VDQtPositionControlWidget *mPositionControl;
     VDQtVideoDecoder mVideoDecoder;
     VDQtAudioPlayer mAudioPlayer;
+    // Interactive preview thread. Generations invalidate stale queued results;
+    // only the newest requested frame is ever allowed to update the display.
     QThread *mFrameDecodeThread = nullptr;
     VDQtFrameDecodeWorker *mFrameDecodeWorker = nullptr;
     quint64 mFrameRequestGeneration = 0;
+    // Playback clock. Audio presentation time is preferred when audio exists;
+    // elapsed wall time is the fallback. Filter phases support doubled output.
     QTimer *mPlaybackTimer;
     QTimer *mRecoveryTimer = nullptr;
     QString mRecoveryPath;
@@ -266,6 +286,7 @@ private:
     QList<QImage> mDecodedPreviewFrames;
     int mDecodedPreviewTimelineFrame = -1;
 
+    // Actions whose checked/enabled state mirrors the session model.
     QMenu *mFileMenu;
     QAction *actFileOpen;
     QAction *actFileReopen;
@@ -299,12 +320,15 @@ private:
     QAction *actEditCrop = nullptr;
     QAction *actEditReset = nullptr;
 
+    // Serializable processing configuration.
     VDFrameRateConfig mFrameRateConfig;
     VDDecompressionFormatConfig mDecompressionFormatConfig;
     VDDecoderErrorModeConfig mDecoderErrorModeConfig;
     VDRawVideoExportConfig mRawVideoExportConfig;
     VDPreferencesConfig mPreferencesConfig;
     QMap<QString, QString> mTextMetadata;
+    // Loaded-source/edit-session state. Temporary concat/raw manifests live in
+    // mTimelineTempDirectory for exactly as long as this main-window session.
     QString mCurrentProjectPath;
     QTemporaryDir mTimelineTempDirectory;
     QStringList mTimelineSources;
@@ -320,6 +344,7 @@ private:
     int mRequestedTimelineFrame = 0;
     bool mFrameRequestPending = false;
     int mQueuedPlaybackFrame = -1;
+    // Long-running controllers and queue state.
     VDQtJobQueue *mJobQueue = nullptr;
     VDQtJobControlWindow *mJobControlWindow = nullptr;
     bool mQueueStopRequested = false;
@@ -328,6 +353,7 @@ private:
     int mActiveJobIndex = -1;
     VDQtFrameServer *mFrameServer = nullptr;
     QString mFrameServerAudioPath;
+    // Current mode/source selections and automation return state.
     int mVideoMode = VideoMode_FullProcessing;
     bool mSmartRendering = false;
     bool mPreserveEmptyFrames = true;

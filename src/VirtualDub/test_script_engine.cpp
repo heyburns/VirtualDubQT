@@ -1,3 +1,5 @@
+// Parser-only tests for accepted VCF/Sylia syntax, source diagnostics, scalar
+// expressions, and rejection of unsupported/arbitrary-code constructs.
 #include "VDQtScriptEngine.h"
 
 #include <QCoreApplication>

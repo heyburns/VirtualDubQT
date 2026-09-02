@@ -11,6 +11,10 @@
 #include <QMouseEvent>
 #include <QPoint>
 
+// One of the main window's input/output preview panes. The widget owns a
+// detached QImage and handles presentation only: zoom, pixel aspect ratio,
+// alpha visualization, interpolation, and panning. Decoding and filtering must
+// stay outside paintEvent so exposing/resizing the window remains inexpensive.
 class VDVideoDisplayWidget : public QWidget {
     Q_OBJECT
 public:
@@ -76,7 +80,7 @@ private:
     QString mInfoText;
     QImage mFrameImage;
 
-    double mZoomLevel; // -1.0 = Auto Size
+    double mZoomLevel; // -1.0 = fit image to available widget area.
     AspectRatioMode mAspectRatioMode;
     FilterMode mFilterMode;
     DisplayMode mDisplayMode;

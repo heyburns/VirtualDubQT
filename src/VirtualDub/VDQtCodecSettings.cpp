@@ -1,3 +1,6 @@
+// Process-lifetime Save-dialog preferences. No QSettings calls occur here on
+// purpose: codec/filter choices persist while the app is open and reset on the
+// next launch, matching the session-only behavior expected by the UI.
 #include "VDQtCodecSettings.h"
 #include <QDir>
 

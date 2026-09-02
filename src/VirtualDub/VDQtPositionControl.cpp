@@ -1,3 +1,6 @@
+// VirtualDub-style transport/timeline widget. It paints selection/marker
+// overlays and converts user gestures into semantic transport signals; actual
+// timeline mapping, seeking, and playback remain in the main window.
 #include "VDQtPositionControl.h"
 #include <QStylePainter>
 #include <QStyleOptionSlider>
@@ -23,6 +26,9 @@ void VDTimelineSlider::setMarkers(const QList<qint64>& markers) {
 }
 
 void VDTimelineSlider::paintEvent(QPaintEvent *) {
+    // Reproduce the platform slider ourselves only to insert the overlays
+    // between its groove and handle; letting QStyle paint those primitives
+    // retains the active desktop theme and correct handle geometry.
     QStylePainter p(this);
     QStyleOptionSlider opt;
     initStyleOption(&opt);
@@ -146,6 +152,8 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
 
     mainLayout->addLayout(controlLayout);
 
+    // valueChanged fires for every mouse-motion step. The single pending value
+    // plus timer bounds decode requests while keeping the label visually live.
     mScrubTimer.setSingleShot(true);
     connect(&mScrubTimer, &QTimer::timeout,
             this, &VDQtPositionControlWidget::DispatchPendingScrub);
@@ -161,6 +169,8 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
 }
 
 void VDQtPositionControlWidget::SetRange(qint64 lo, qint64 hi, bool updateNow) {
+    // The editor currently caps usable timelines at INT_MAX in VDQtTimeline, so
+    // conversion to QSlider's int coordinate system is safe at this boundary.
     mRangeLo = lo;
     mRangeHi = hi;
     if (mZoomEnabled) {
@@ -223,6 +233,8 @@ void VDQtPositionControlWidget::SetPositionSilent(qint64 pos) {
 }
 
 void VDQtPositionControlWidget::SetSelection(qint64 start, qint64 end, bool updateNow) {
+    // Selection is half-open: end may be one past the last legal playhead frame.
+    // That convention is shared by timeline edits and export ranges.
     start = std::clamp(start, mRangeLo, mRangeHi + 1);
     end = std::clamp(end, mRangeLo, mRangeHi + 1);
     if (start > end) std::swap(start, end);
@@ -248,6 +260,8 @@ void VDQtPositionControlWidget::DispatchPendingScrub() {
     if (mPendingScrubPos < 0)
         return;
 
+    // Clear before emitting because a synchronous receiver may cause another
+    // slider update and publish the next request reentrantly.
     const int position = mPendingScrubPos;
     mPendingScrubPos = -1;
     Q_EMIT positionChanged(position);

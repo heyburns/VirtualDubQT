@@ -1,3 +1,6 @@
+// Generated application-icon payload. The base64 text below is the original
+// multi-resolution VirtualDub2 ICO; vdqtApplicationIcon() decodes each embedded
+// PNG/DIB representation into a QIcon at startup. Do not hand-edit the payload.
 #include "VDQtApplicationIcon.h"
 
 #include <QBuffer>

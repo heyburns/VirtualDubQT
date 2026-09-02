@@ -1,3 +1,6 @@
+// Minimal Linux-native VDX module used only by plugin_host_tests. Its behavior
+// is deliberately simple and deterministic so failures implicate ABI/lifetime
+// adaptation rather than a complex third-party filter.
 #include <vd2/plugin/vdvideofilt.h>
 
 #include <cstring>

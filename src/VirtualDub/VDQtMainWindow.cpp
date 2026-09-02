@@ -1,3 +1,7 @@
+// Main application coordinator. Code is arranged broadly by menu/workflow:
+// construction and source loading, projects/automation/jobs, export variants,
+// timeline editing, view/processing controls, tools/capture, then asynchronous
+// preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtBatchWizard.h"
@@ -66,6 +70,9 @@ extern "C" {
 
 namespace {
 
+// Helpers in this namespace are workflow-neutral building blocks used by more
+// than one menu action: overwrite protection, transactional replacement,
+// concat manifests, and stream compatibility probing.
 VDQtOutputSafetyReport loadedOutputSafety(const QString& outputPath,
                                           const VDQtVideoDecoder& decoder,
                                           const VDQtAudioPlayer& audioPlayer,
@@ -291,6 +298,10 @@ bool writeImageSequenceManifest(const QString& path,
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Window construction and persistent UI-only state
+// ---------------------------------------------------------------------------
 
 VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     : QMainWindow(parent) {
@@ -705,6 +716,10 @@ void VDQtMainWindow::createMenus() {
 void VDQtMainWindow::createStatusBar() {
     statusBar()->showMessage("VirtualDub Ready | Pipeline: Idle | Codec: Uncompressed RGB24 | 1920x1080 @ 29.97 fps");
 }
+
+// ---------------------------------------------------------------------------
+// Source lifecycle: ordinary files, image sequences, raw input, and appends
+// ---------------------------------------------------------------------------
 
 bool VDQtMainWindow::openVideoFile(const QString& filePath) {
     if (filePath.isEmpty()) return false;
@@ -1296,6 +1311,10 @@ void VDQtMainWindow::onFileSetTextInformation() {
     statusBar()->showMessage(
         QString("Text information updated (%1 field(s))").arg(mTextMetadata.size()));
 }
+
+// ---------------------------------------------------------------------------
+// Session snapshots, projects, and processing settings
+// ---------------------------------------------------------------------------
 
 VDQtProcessingState VDQtMainWindow::captureProcessingState() const {
     VDQtProcessingState state;
@@ -2234,6 +2253,10 @@ void VDQtMainWindow::onFileSaveAudio() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Analysis and safe Sylia/VCF automation
+// ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onFileRunAnalysisPass() {
     if (!mVideoDecoder.isOpen()) {
@@ -3997,6 +4020,11 @@ void VDQtMainWindow::onFileBatchWizard() {
     onFileJobControl();
 }
 
+// ---------------------------------------------------------------------------
+// Job queue runner. Jobs are serialized records, but execution deliberately
+// reuses the interactive application's validated source/export paths.
+// ---------------------------------------------------------------------------
+
 void VDQtMainWindow::onFileJobControl() {
     if (!mJobControlWindow)
         mJobControlWindow = new VDQtJobControlWindow(mJobQueue, this);
@@ -4780,6 +4808,10 @@ void VDQtMainWindow::onFileStartFrameServer() {
         QString("Frame server waiting for a reader: %1").arg(pipePath));
 }
 
+// ---------------------------------------------------------------------------
+// Local frame server and orderly application shutdown
+// ---------------------------------------------------------------------------
+
 void VDQtMainWindow::onFileStopFrameServer() {
     if (!mFrameServer || !mFrameServer->isRunning()) {
         statusBar()->showMessage("No frame server is running");
@@ -5047,6 +5079,10 @@ void VDQtMainWindow::onFileSaveAVI() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Standard and specialized export front ends
+// ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onFileSaveSegmentedAVI() {
     if (!mVideoDecoder.isOpen()) {
@@ -6326,6 +6362,10 @@ void VDQtMainWindow::onFileQuit() {
     qApp->quit();
 }
 
+// ---------------------------------------------------------------------------
+// Non-destructive timeline editing, selections, markers, and scene navigation
+// ---------------------------------------------------------------------------
+
 void VDQtMainWindow::onEditSetSelectionStart() {
     qint64 position = mPositionControl->GetPosition();
     qint64 end = mPositionControl->GetSelectionEnd();
@@ -6931,6 +6971,10 @@ void VDQtMainWindow::onViewDualView() {
     mOutputDisplay->setVisible(true);
     autoFitWindowToVideo();
 }
+
+// ---------------------------------------------------------------------------
+// View, video, and audio session controls
+// ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onViewInputOnly() {
     mInputDisplay->setVisible(true);
@@ -7792,6 +7836,10 @@ void VDQtMainWindow::onOptionsPreferences() {
                      : QString::number(mPreferencesConfig.decoderThreads))
             .arg(mPreferencesConfig.playbackTimerIntervalMs));
 }
+
+// ---------------------------------------------------------------------------
+// Inspection tools and Linux V4L2/ALSA capture
+// ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onToolsHistogram() {
     if (!mVideoDecoder.isOpen()) {
@@ -8738,6 +8786,10 @@ void VDQtMainWindow::onHelpAbout() {
     dlg.exec();
 }
 
+// ---------------------------------------------------------------------------
+// Transport, playback clock, and asynchronous interactive frame delivery
+// ---------------------------------------------------------------------------
+
 void VDQtMainWindow::onPositionChanged(int frame) {
     if (mIsExporting) return;
     if (!mPlaybackTimer->isActive() && frame != mPlaybackPausedFrame)
@@ -9270,6 +9322,9 @@ void VDQtMainWindow::addRecentFile(const QString& filePath) {
     settings.setValue("recentFiles", files);
     updateRecentFilesMenu();
 }
+
+// Recent-file history is intentionally the only media-related preference kept
+// across launches; processing/filter/codec state is session-only.
 
 void VDQtMainWindow::updateRecentFilesMenu() {
     QSettings settings("VirtualDub", "VirtualDub_Port");

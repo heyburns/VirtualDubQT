@@ -8,7 +8,8 @@
 
 struct VDAudioCodecConfig;
 
-// Video Codec Definitions
+// User-facing encoder capabilities. This is a curated catalog over the system
+// FFmpeg installation, not a codec implementation of our own.
 struct VDVideoCodecInfo {
     QString id;                 // e.g. "libx264", "prores_ks", "ffv1", "huffyuv", "cfhd"
     QString name;               // e.g. "FFmpeg H.264 / AVC (libx264)"
@@ -60,7 +61,7 @@ struct VDVideoCodecParams {
     int cineformQuality = 3;            // 0: medium+, 1: high+, 2: film1+, 3: film2+, 4: film3+
 };
 
-// Audio Codec Definitions
+// Audio counterpart to VDVideoCodecInfo/VDVideoCodecParams.
 struct VDAudioCodecInfo {
     QString id;                 // e.g. "aac", "libmp3lame", "libopus", "ac3", "flac", "pcm_s16le"
     QString name;
@@ -80,6 +81,10 @@ struct VDAudioCodecParams {
     int bitDepth = 16;                  // 16, 24, 32
 };
 
+// Session codec registry. It remembers a separate option set per video codec
+// so switching H.264 -> FFV1 -> H.264 restores the previous H.264 choices.
+// Exporters ask this class for normalized FFmpeg command-line arguments; they
+// should not reproduce codec-specific option mapping themselves.
 class VDQtCodecEngine {
 public:
     VDQtCodecEngine();

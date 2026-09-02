@@ -1,3 +1,6 @@
+// Paint-only input/output preview widget. Rendering honors zoom, pixel/frame
+// aspect, alpha visualization, interpolation, and pan without performing decode
+// or filter work on the GUI thread.
 #include "VDQtVideoDisplay.h"
 #include <QStyleOption>
 #include <QFontMetrics>
@@ -102,6 +105,8 @@ QSize VDVideoDisplayWidget::calculateScaledSize() const {
         break;
     }
 
+    // PAR changes presentation width only; the stored QImage remains untouched
+    // so display choices can never leak into filters or exported pixels.
     double displayW = srcW * par;
     double displayH = srcH;
 
@@ -154,6 +159,9 @@ void VDVideoDisplayWidget::paintEvent(QPaintEvent *event) {
     }
 
     if (!mFrameImage.isNull()) {
+        // Scaling is presentation work and intentionally occurs here. Decoder
+        // frames stay at source resolution and may be shared implicitly by
+        // QImage with the output display or other read-only consumers.
         QSize drawSize = calculateScaledSize();
 
         QImage renderImg = mFrameImage;
@@ -194,6 +202,9 @@ void VDVideoDisplayWidget::paintEvent(QPaintEvent *event) {
 }
 
 void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
+    // Menus are assembled on demand because all options are cheap and local to
+    // this widget. QActionGroup supplies exclusive check state without keeping
+    // a long-lived action graph for every display pane.
     QMenu menu(this);
     menu.setStyleSheet(
         "QMenu { background-color: #1e1e24; color: #e0e0e0; border: 1px solid #3c3c46; padding: 4px; }"
@@ -331,6 +342,8 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
 }
 
 void VDVideoDisplayWidget::mousePressEvent(QMouseEvent *event) {
+    // Panning is meaningful only at fixed zoom. Auto-fit continually recenters
+    // the image and therefore deliberately ignores drag gestures.
     if (event->button() == Qt::LeftButton && mZoomLevel > 0) {
         mIsDragging = true;
         mLastMousePos = event->pos();

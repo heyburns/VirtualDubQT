@@ -1,3 +1,6 @@
+// Safe parser for VirtualDub's command-oriented Sylia/VCF subset. It tokenizes
+// statements, scalar variables, and basic expressions into an inert command
+// list; no media action or arbitrary native code executes in this module.
 #include "VDQtScriptEngine.h"
 
 #include <QDir>
@@ -80,6 +83,10 @@ bool decodeQuotedString(const QString& token, QString *value,
     return true;
 }
 
+// Recursive-descent evaluator for the deliberately small scalar expression
+// grammar accepted in VCF files. It has no function calls, loops, filesystem,
+// or object access; identifiers resolve only against previously assigned scalar
+// variables supplied by parseText().
 class ValueExpressionParser {
 public:
     ValueExpressionParser(const QString& text,
@@ -100,6 +107,10 @@ public:
     }
 
 private:
+    // Recursive-descent levels follow Sylia/C operator precedence from bitwise
+    // OR down through unary and primary expressions. Only literals, previously
+    // declared scalar variables, and bounded arithmetic are accepted; there is
+    // no general code execution, file access, or function dispatch here.
     bool fail(const QString& message) {
         setError(mErrorMessage, message);
         return false;
@@ -447,6 +458,8 @@ bool parseArguments(const QString& text,
     bool quoted = false;
     bool escaped = false;
     int nested = 0;
+    // Split commas only at top level. Quoted strings and nested expressions can
+    // legally contain commas that belong to a single argument.
     const auto finish = [&]() {
         QVariant value;
         if (!parseValue(current, variables, &value, errorMessage)) return false;
@@ -488,6 +501,8 @@ bool parseArguments(const QString& text,
     return finish();
 }
 
+// Statement splitter preserves starting line/source text so errors reported by
+// the later argument parser still point at the user's original script.
 struct Statement {
     QString text;
     int line = 0;
@@ -566,6 +581,8 @@ bool splitStatements(const QString& text, QList<Statement> *statements,
 
 } // namespace
 
+// parseFile only supplies bytes/base-directory; parseText contains all syntax,
+// resource-limit, variable-assignment, and command-normalization logic.
 bool VDQtScriptEngine::parseFile(const QString& path,
                                  VDQtScriptProgram *program,
                                  QString *errorMessage) {
@@ -603,6 +620,9 @@ bool VDQtScriptEngine::parseText(const QString& text,
     // curves.  We do not execute arbitrary Sylia expressions, but retaining
     // this one object alias lets the command-oriented interpreter consume the
     // exact project form emitted by Job.cpp.
+    // Parsing occurs in one pass because later commands may refer to variables
+    // declared earlier. Object aliases and scalar values remain separate: an
+    // object alias may receive only the narrowly supported AddPoint method.
     QMap<QString, QString> objectAliases;
     QMap<QString, QVariant> scalarVariables;
     int videoFilterCount = 0;
@@ -624,6 +644,8 @@ bool VDQtScriptEngine::parseText(const QString& text,
             expressionText = declarationMatch.captured(2).trimmed();
         }
 
+        // A statement is either a VirtualDub command, a supported object-alias
+        // call emitted by upstream project scripts, or a scalar declaration.
         const int root = expressionText.indexOf(QStringLiteral("VirtualDub."));
         if (root < 0) {
             const QRegularExpressionMatch aliasMatch =
@@ -700,6 +722,9 @@ bool VDQtScriptEngine::parseText(const QString& text,
                          .arg(statement.line));
             return false;
         }
+        // Store normalized commands rather than executing during parsing. This
+        // lets callers reject the entire program before any project state is
+        // changed and preserves line/source data for execution-time diagnostics.
         VDQtScriptCommand command;
         command.name = expressionText.mid(root + 11, open - root - 11).trimmed();
         static const QRegularExpression indexedVariableExpression(

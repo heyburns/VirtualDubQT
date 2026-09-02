@@ -12,6 +12,10 @@ class QPushButton;
 class QRadioButton;
 class QTableWidget;
 
+// Converts a list of dropped/selected input files into independent queue jobs.
+// mTemplate captures the main window's current codec, filter, and processing
+// settings; buildJobs() copies it per row and changes only source/destination
+// fields. No encoding occurs in this dialog.
 class VDQtBatchWizardDialog final : public QDialog {
     Q_OBJECT
 public:
@@ -20,6 +24,7 @@ public:
         const QList<VDQtJobState>& existingJobs,
         QWidget *parent = nullptr);
 
+    // Valid only after the dialog has been accepted.
     QList<VDQtJobState> jobs() const { return mJobs; }
     void addSourceFiles(const QStringList& paths);
 
@@ -44,9 +49,9 @@ private:
     void setRowOutputName(int row, const QString& name);
     QList<VDQtJobState> buildJobs(QString *errorMessage) const;
 
-    VDQtJobState mTemplate;
+    VDQtJobState mTemplate;             // Immutable processing defaults.
     QList<VDQtJobState> mExistingJobs;
-    QList<VDQtJobState> mJobs;
+    QList<VDQtJobState> mJobs;          // Accepted result returned to caller.
     QRadioButton *mRelativeOutput = nullptr;
     QRadioButton *mAbsoluteOutput = nullptr;
     QLineEdit *mOutputDirectory = nullptr;

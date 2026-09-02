@@ -1,3 +1,5 @@
+// Decoder playback regression: sequential requests must decode forward without
+// degenerating into one random seek per displayed frame.
 #include "VDQtVideoDecoder.h"
 
 #include <array>

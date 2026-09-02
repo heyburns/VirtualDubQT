@@ -1,3 +1,6 @@
+// Non-destructive segment-list editor. All ranges are half-open and arithmetic
+// is overflow-checked because malformed project/job files can reach this layer.
+// Normalization merges adjacent compatible source ranges after every edit.
 #include "VDQtTimeline.h"
 
 #include <algorithm>
@@ -32,6 +35,9 @@ void VDQtTimeline::reset(qint64 sourceFrameCount, bool exactFrameCount) {
 
 void VDQtTimeline::setSourceFrameCount(qint64 sourceFrameCount,
                                        bool exactFrameCount) {
+    // Extend an untouched identity timeline when a decoder refines an estimated
+    // length. Once the user has edited, changing segments would corrupt their
+    // edit decisions; only the source boundary metadata is then updated.
     sourceFrameCount = std::max<qint64>(0, sourceFrameCount);
     const bool identityBeforeUpdate = isIdentity();
     mSourceFrameCount = sourceFrameCount;
@@ -92,6 +98,9 @@ QList<VDQtTimelineSegment> VDQtTimeline::normalized(
     const QList<VDQtTimelineSegment>& segments) {
     QList<VDQtTimelineSegment> result;
     result.reserve(segments.size());
+    // Adjacent segments that remain contiguous in the source are equivalent to
+    // one larger segment. Keeping the representation compact makes mapping and
+    // project serialization deterministic after repeated edits.
     for (const VDQtTimelineSegment& segment : segments) {
         if (segment.frameCount <= 0) continue;
         if (!result.isEmpty()) {
@@ -157,6 +166,9 @@ qint64 VDQtTimeline::mapSourceToOutput(qint64 sourceFrame,
                                        bool searchForward) const {
     if (sourceFrame < 0) return -1;
     qint64 outputCursor = 0;
+    // A source frame may occur multiple times after paste/insert operations.
+    // outputHint plus direction selects the occurrence appropriate for current
+    // navigation instead of always jumping to the first copy.
     qint64 bestBeforeHint = -1;
     for (const VDQtTimelineSegment& segment : mSegments) {
         if (sourceFrame >= segment.sourceStartFrame
@@ -175,6 +187,9 @@ qint64 VDQtTimeline::mapSourceToOutput(qint64 sourceFrame,
 QList<VDQtTimelineSegment> VDQtTimeline::slice(
     qint64 startFrame,
     qint64 endFrameExclusive) const {
+    // Translate an output-space interval back into the source-space segment
+    // fragments it overlaps. All higher-level edit operations are compositions
+    // of this primitive, which keeps boundary behavior consistent.
     QList<VDQtTimelineSegment> result;
     qint64 outputCursor = 0;
     for (const VDQtTimelineSegment& segment : mSegments) {
@@ -210,6 +225,8 @@ bool VDQtTimeline::applyEdit(const QList<VDQtTimelineSegment>& segments,
     const QList<VDQtTimelineSegment> compact = normalized(segments);
     if (!validateSegments(compact, errorMessage)) return false;
     if (compact == mSegments) return true;
+    // Store complete, compact segment lists. They are small in normal editing
+    // and make undo atomic even when one command spans several source ranges.
     mUndoStack.append(mSegments);
     while (mUndoStack.size() > kMaximumHistoryEntries) mUndoStack.removeFirst();
     mRedoStack.clear();
