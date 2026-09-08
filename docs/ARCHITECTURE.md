@@ -102,6 +102,12 @@ All selection/edit ranges use `[start, end)` semantics. Masked segments retain
 duration while holding the preceding visible frame. Every edit validates bounds,
 normalizes adjacent compatible segments, and stores a bounded undo snapshot.
 
+The bottom position label is an interactive control as well as a display. It
+emits a jump request to `VDQtMainWindow`, which pauses playback, opens the
+frame/time entry dialog, exits timeline zoom when necessary, and then uses the
+ordinary `SetPosition()` path. Frame and time values in that dialog refer to the
+edited timeline, not necessarily the underlying source-frame number.
+
 Exports receive a copy of the timeline segments. An empty segment list in export
 options means identity mapping for backward compatibility.
 

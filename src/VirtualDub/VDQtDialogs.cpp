@@ -11,6 +11,8 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QDir>
+#include <QGridLayout>
+#include <limits>
 
 // Style sheet snippet for dark polished Qt dialog look matching VirtualDub2 aesthetics
 static const char* kDialogStyle =
@@ -4202,6 +4204,274 @@ VDRawVideoExportConfig VDRawVideoExportDialog::getConfig() const {
     config.colorMatrix = mColorMatrixCombo->currentData().toString();
     config.fullRange = mRangeCombo->currentData().toBool();
     return config;
+}
+
+// -----------------------------------------------------------------------------
+// Jump to frame/time
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// Resolve an absolute magnitude or a signed offset without allowing integer
+// overflow. Range checking is done here so every parser has identical behavior.
+bool resolveJumpPosition(qint64 magnitude,
+                         int relativeDirection,
+                         qint64 currentFrame,
+                         qint64 minimumFrame,
+                         qint64 maximumFrame,
+                         qint64 *result) {
+    if (!result || magnitude < 0 || minimumFrame > maximumFrame)
+        return false;
+
+    qint64 position = magnitude;
+    if (relativeDirection > 0) {
+        if (currentFrame > maximumFrame
+            || magnitude > maximumFrame - currentFrame)
+            return false;
+        position = currentFrame + magnitude;
+    } else if (relativeDirection < 0) {
+        if (currentFrame < minimumFrame
+            || magnitude > currentFrame - minimumFrame)
+            return false;
+        position = currentFrame - magnitude;
+    }
+
+    if (position < minimumFrame || position > maximumFrame)
+        return false;
+    *result = position;
+    return true;
+}
+
+// Remove an optional leading sign. A sign means relative movement, matching
+// VirtualDub's dialog; unsigned values are absolute timeline positions.
+bool splitRelativeText(const QString& text,
+                       int *direction,
+                       QString *magnitudeText) {
+    if (!direction || !magnitudeText) return false;
+    QString value = text.trimmed();
+    if (value.isEmpty()) return false;
+    *direction = 0;
+    if (value.startsWith(QLatin1Char('+'))) {
+        *direction = 1;
+        value.remove(0, 1);
+    } else if (value.startsWith(QLatin1Char('-'))) {
+        *direction = -1;
+        value.remove(0, 1);
+    }
+    value = value.trimmed();
+    if (value.isEmpty()) return false;
+    *magnitudeText = value;
+    return true;
+}
+
+bool parseUnsignedTime(const QString& text, double *seconds) {
+    if (!seconds) return false;
+    QString value = text.trimmed();
+    if (value.isEmpty()) return false;
+
+    double unitMultiplier = 1.0;
+    const QString lower = value.toLower();
+    if (lower.endsWith(QStringLiteral("ms"))) {
+        unitMultiplier = 0.001;
+        value.chop(2);
+    } else if (lower.endsWith(QLatin1Char('s'))) {
+        value.chop(1);
+    } else if (lower.endsWith(QLatin1Char('m'))) {
+        unitMultiplier = 60.0;
+        value.chop(1);
+    }
+    value = value.trimmed();
+
+    const QStringList parts = value.split(QLatin1Char(':'), Qt::KeepEmptyParts);
+    if (parts.isEmpty() || parts.size() > 3
+        || (parts.size() > 1 && unitMultiplier != 1.0))
+        return false;
+
+    bool ok = false;
+    double total = 0.0;
+    if (parts.size() == 1) {
+        const double amount = parts.first().trimmed().toDouble(&ok);
+        if (!ok || !std::isfinite(amount) || amount < 0.0) return false;
+        total = amount * unitMultiplier;
+    } else {
+        const double finalSeconds = parts.last().trimmed().toDouble(&ok);
+        if (!ok || !std::isfinite(finalSeconds)
+            || finalSeconds < 0.0 || finalSeconds >= 60.0)
+            return false;
+
+        bool minutesOk = false;
+        const qint64 minutes = parts.at(parts.size() - 2).trimmed().toLongLong(
+            &minutesOk);
+        if (!minutesOk || minutes < 0 || (parts.size() == 3 && minutes >= 60))
+            return false;
+
+        qint64 hours = 0;
+        if (parts.size() == 3) {
+            bool hoursOk = false;
+            hours = parts.first().trimmed().toLongLong(&hoursOk);
+            if (!hoursOk || hours < 0) return false;
+        }
+        total = static_cast<double>(hours) * 3600.0
+            + static_cast<double>(minutes) * 60.0 + finalSeconds;
+    }
+
+    if (!std::isfinite(total) || total < 0.0) return false;
+    *seconds = total;
+    return true;
+}
+
+} // namespace
+
+VDJumpToPositionDialog::VDJumpToPositionDialog(
+    qint64 currentFrame,
+    qint64 minimumFrame,
+    qint64 maximumFrame,
+    double frameRate,
+    QWidget *parent)
+    : QDialog(parent)
+    , mCurrentFrame(currentFrame)
+    , mMinimumFrame(minimumFrame)
+    , mMaximumFrame(maximumFrame)
+    , mSelectedFrame(currentFrame)
+    , mFrameRate(frameRate) {
+    setWindowTitle(QStringLiteral("Jump to frame"));
+    setStyleSheet(kDialogStyle);
+    setModal(true);
+    setMinimumWidth(360);
+
+    auto *layout = new QVBoxLayout(this);
+    auto *fields = new QGridLayout;
+    mJumpToFrame = new QRadioButton(QStringLiteral("Jump to frame number:"), this);
+    mJumpToTime = new QRadioButton(QStringLiteral("Jump to frame at time:"), this);
+    mFrameNumber = new QLineEdit(QString::number(currentFrame), this);
+    mFrameTime = new QLineEdit(formatFrameTime(currentFrame, frameRate), this);
+    mFrameNumber->setObjectName(QStringLiteral("jumpFrameNumber"));
+    mFrameTime->setObjectName(QStringLiteral("jumpFrameTime"));
+    mFrameNumber->setMaxLength(30);
+    mFrameTime->setMaxLength(30);
+    mFrameNumber->setToolTip(
+        QStringLiteral("The current timeline frame is selected. Press Ctrl+C to copy it, or type a new frame."));
+    mFrameTime->setToolTip(
+        QStringLiteral("Use m:ss.mmm, h:mm:ss.mmm, seconds, or a value ending in m, s, or ms."));
+    fields->addWidget(mJumpToFrame, 0, 0);
+    fields->addWidget(mFrameNumber, 0, 1);
+    fields->addWidget(mJumpToTime, 1, 0);
+    fields->addWidget(mFrameTime, 1, 1);
+    fields->setColumnStretch(1, 1);
+    layout->addLayout(fields);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    connect(buttons, &QDialogButtonBox::accepted,
+            this, &VDJumpToPositionDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    connect(mFrameNumber, &QLineEdit::textEdited, this,
+            [this]() { mJumpToFrame->setChecked(true); });
+    connect(mFrameTime, &QLineEdit::textEdited, this,
+            [this]() { mJumpToTime->setChecked(true); });
+    connect(mJumpToFrame, &QRadioButton::clicked, this, [this]() {
+        mFrameNumber->setFocus();
+        mFrameNumber->selectAll();
+    });
+    connect(mJumpToTime, &QRadioButton::clicked, this, [this]() {
+        mFrameTime->setFocus();
+        mFrameTime->selectAll();
+    });
+
+    mJumpToFrame->setChecked(true);
+    mFrameNumber->setFocus();
+    mFrameNumber->selectAll();
+}
+
+bool VDJumpToPositionDialog::parseFramePosition(
+    const QString& text,
+    qint64 currentFrame,
+    qint64 minimumFrame,
+    qint64 maximumFrame,
+    qint64 *result) {
+    int direction = 0;
+    QString magnitudeText;
+    if (!splitRelativeText(text, &direction, &magnitudeText)) return false;
+    bool ok = false;
+    const qint64 magnitude = magnitudeText.toLongLong(&ok);
+    return ok && magnitude >= 0
+        && resolveJumpPosition(magnitude, direction, currentFrame,
+                               minimumFrame, maximumFrame, result);
+}
+
+bool VDJumpToPositionDialog::parseTimePosition(
+    const QString& text,
+    qint64 currentFrame,
+    qint64 minimumFrame,
+    qint64 maximumFrame,
+    double frameRate,
+    qint64 *result) {
+    if (!std::isfinite(frameRate) || frameRate <= 0.0) return false;
+    int direction = 0;
+    QString magnitudeText;
+    if (!splitRelativeText(text, &direction, &magnitudeText)) return false;
+    double seconds = 0.0;
+    if (!parseUnsignedTime(magnitudeText, &seconds)) return false;
+    const long double scaled = static_cast<long double>(seconds)
+        * static_cast<long double>(frameRate);
+    if (scaled < 0.0L
+        || scaled > static_cast<long double>(
+            std::numeric_limits<qint64>::max()))
+        return false;
+    const qint64 magnitude = static_cast<qint64>(std::llround(scaled));
+    return resolveJumpPosition(magnitude, direction, currentFrame,
+                               minimumFrame, maximumFrame, result);
+}
+
+QString VDJumpToPositionDialog::formatFrameTime(qint64 frame,
+                                                double frameRate) {
+    if (frame < 0 || !std::isfinite(frameRate) || frameRate <= 0.0)
+        return QStringLiteral("0:00.000");
+    const qint64 totalMilliseconds = static_cast<qint64>(std::llround(
+        static_cast<long double>(frame) * 1000.0L / frameRate));
+    qint64 ticks = std::max<qint64>(0, totalMilliseconds);
+    const int milliseconds = static_cast<int>(ticks % 1000);
+    ticks /= 1000;
+    const int seconds = static_cast<int>(ticks % 60);
+    ticks /= 60;
+    const int minutes = static_cast<int>(ticks % 60);
+    const qint64 hours = ticks / 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3.%4")
+            .arg(hours)
+            .arg(minutes, 2, 10, QLatin1Char('0'))
+            .arg(seconds, 2, 10, QLatin1Char('0'))
+            .arg(milliseconds, 3, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2.%3")
+        .arg(minutes)
+        .arg(seconds, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds, 3, 10, QLatin1Char('0'));
+}
+
+void VDJumpToPositionDialog::accept() {
+    qint64 targetFrame = mCurrentFrame;
+    const bool valid = mJumpToFrame->isChecked()
+        ? parseFramePosition(mFrameNumber->text(), mCurrentFrame,
+                             mMinimumFrame, mMaximumFrame, &targetFrame)
+        : parseTimePosition(mFrameTime->text(), mCurrentFrame,
+                            mMinimumFrame, mMaximumFrame, mFrameRate,
+                            &targetFrame);
+    if (!valid) {
+        QLineEdit *edit = mJumpToFrame->isChecked()
+            ? mFrameNumber : mFrameTime;
+        QMessageBox::warning(
+            this, QStringLiteral("Jump to frame"),
+            QString("Enter a position between frames %1 and %2.")
+                .arg(mMinimumFrame).arg(mMaximumFrame));
+        edit->setFocus();
+        edit->selectAll();
+        return;
+    }
+    mSelectedFrame = targetFrame;
+    QDialog::accept();
 }
 
 // -----------------------------------------------------------------------------

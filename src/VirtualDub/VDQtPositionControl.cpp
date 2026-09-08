@@ -2,6 +2,9 @@
 // overlays and converts user gestures into semantic transport signals; actual
 // timeline mapping, seeking, and playback remain in the main window.
 #include "VDQtPositionControl.h"
+#include <QEvent>
+#include <QKeyEvent>
+#include <QMouseEvent>
 #include <QStylePainter>
 #include <QStyleOptionSlider>
 #include <cstdio>
@@ -147,7 +150,14 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
     controlLayout->addSpacing(12);
 
     mStatusLabel = new QLabel("Frame 0 (0:00:00.000)", this);
+    mStatusLabel->setObjectName(QStringLiteral("positionStatusLabel"));
     mStatusLabel->setStyleSheet("color: #00bcd4; font-family: monospace; font-size: 12px; font-weight: bold; padding: 2px 8px; background: #1a1a22; border-radius: 4px;");
+    mStatusLabel->setCursor(Qt::PointingHandCursor);
+    mStatusLabel->setFocusPolicy(Qt::StrongFocus);
+    mStatusLabel->setToolTip(
+        QStringLiteral("Click to copy the current frame number or jump to another frame or time (Ctrl+G)."));
+    mStatusLabel->setAccessibleName(QStringLiteral("Current frame; jump to position"));
+    mStatusLabel->installEventFilter(this);
     controlLayout->addWidget(mStatusLabel, 1);
 
     mainLayout->addLayout(controlLayout);
@@ -166,6 +176,27 @@ VDQtPositionControlWidget::VDQtPositionControlWidget(QWidget *parent)
             DispatchPendingScrub();
         }
     });
+}
+
+bool VDQtPositionControlWidget::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == mStatusLabel) {
+        if (event->type() == QEvent::MouseButtonRelease) {
+            const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                Q_EMIT jumpToPositionRequested();
+                return true;
+            }
+        } else if (event->type() == QEvent::KeyPress) {
+            const auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Return
+                || keyEvent->key() == Qt::Key_Enter
+                || keyEvent->key() == Qt::Key_Space) {
+                Q_EMIT jumpToPositionRequested();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void VDQtPositionControlWidget::SetRange(qint64 lo, qint64 hi, bool updateNow) {

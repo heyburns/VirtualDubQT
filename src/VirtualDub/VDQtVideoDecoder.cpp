@@ -1768,12 +1768,17 @@ double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
             }
         }
 
-        // The final presentation duration is the stream end minus its PTS.
-        // Demuxers commonly report this boundary correctly even when the last
-        // decoded AVFrame inherited the preceding packet's duration.
+        // The true final presentation duration is the stream end minus its PTS.
+        // mFrameIndex is populated lazily, however, so its last entry is usually
+        // just the newest frame decoded -- not the final frame in the source.
+        // Use the stream boundary only when the source length is exact and this
+        // entry is known to be that final source frame. Otherwise frame 0 alone
+        // would appear to last for the entire movie and playback would freeze.
         const int64_t streamDuration =
             mFormatCtx->streams[mVideoStreamIndex]->duration;
-        if (entry.timestamp != AV_NOPTS_VALUE && frameIndex + 1 == mFrameIndex.size()
+        if (entry.timestamp != AV_NOPTS_VALUE
+            && mFrameCountStatus == FrameCountStatus::Exact
+            && mFrameCount > 0 && frameIndex + 1 == mFrameCount
             && streamDuration != AV_NOPTS_VALUE && streamDuration > 0) {
             int64_t origin = mStreamStartTimestamp;
             if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE)

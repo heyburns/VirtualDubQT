@@ -93,6 +93,10 @@ Q_SIGNALS:
     void selectionChanged(qint64 startFrame, qint64 endFrameExclusive);
     void transportActionTriggered(int actionCode);
     void userScrubStarted();
+    void jumpToPositionRequested();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private Q_SLOTS:
     void onSliderValueChanged(int value);

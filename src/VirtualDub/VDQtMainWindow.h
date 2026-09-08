@@ -108,6 +108,7 @@ private Q_SLOTS:
     void onEditPaste();
     void onEditDelete();
     void onEditCropToSelection();
+    void onEditJumpToPosition();
     void onEditResetTimeline();
     void onEditPreviousSceneChange();
     void onEditNextSceneChange();
@@ -318,6 +319,7 @@ private:
     QAction *actEditPaste = nullptr;
     QAction *actEditDelete = nullptr;
     QAction *actEditCrop = nullptr;
+    QAction *actEditJump = nullptr;
     QAction *actEditReset = nullptr;
 
     // Serializable processing configuration.

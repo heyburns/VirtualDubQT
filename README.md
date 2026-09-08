@@ -20,7 +20,7 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
 
 ## What Works
 
-- Open common video files, play them, scrub the timeline, step through frames, and move between keyframes.
+- Open common video files, play them, scrub the timeline, jump directly to a frame or time, step through frames, and move between keyframes.
 - Mark a range and cut, copy, paste, delete, crop, undo, redo, append clips, mask ranges, add markers, and zoom the timeline.
 - View the original and filtered video side by side. Play Preview follows filter timing, including bob-doubled output and variable-rate sources.
 - Use 47 built-in video filters and 10 audio filters. The heavier filters use optimized native code, and all audio filters can be heard during preview.

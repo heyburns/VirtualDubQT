@@ -13,6 +13,7 @@
 #include "VDQtAudioPlayer.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtCodecSettings.h"
+#include "VDQtDialogs.h"
 #include "VDQtPositionControl.h"
 #include "VDQtProjectFile.h"
 #include "VDQtJobQueue.h"
@@ -95,6 +96,48 @@ int main(int argc, char **argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     qputenv("VD_DISABLE_AUDIO_OUTPUT", "1");
     QApplication application(argc, argv);
+
+    {
+        qint64 frame = -1;
+        VDJumpToPositionDialog dialog(100, 0, 5000, 25.0);
+        const QLineEdit *frameEdit =
+            dialog.findChild<QLineEdit *>(QStringLiteral("jumpFrameNumber"));
+        if (!require(frameEdit && frameEdit->selectedText() == QStringLiteral("100"),
+                     "jump dialog selects the current frame for immediate copying")
+            || !require(VDJumpToPositionDialog::parseFramePosition(
+                         QStringLiteral("486"), 100, 0, 5000, &frame)
+                         && frame == 486,
+                     "jump dialog parses an absolute frame")
+            || !require(VDJumpToPositionDialog::parseFramePosition(
+                            QStringLiteral("+25"), 100, 0, 5000, &frame)
+                            && frame == 125,
+                        "jump dialog parses a forward relative frame")
+            || !require(VDJumpToPositionDialog::parseFramePosition(
+                            QStringLiteral("-25"), 100, 0, 5000, &frame)
+                            && frame == 75,
+                        "jump dialog parses a backward relative frame")
+            || !require(!VDJumpToPositionDialog::parseFramePosition(
+                            QStringLiteral("-101"), 100, 0, 5000, &frame),
+                        "jump dialog rejects a frame before the timeline")
+            || !require(VDJumpToPositionDialog::parseTimePosition(
+                            QStringLiteral("1:00.000"), 100, 0, 5000,
+                            25.0, &frame)
+                            && frame == 1500,
+                        "jump dialog parses minute-second time")
+            || !require(VDJumpToPositionDialog::parseTimePosition(
+                            QStringLiteral("+2 s"), 100, 0, 5000,
+                            25.0, &frame)
+                            && frame == 150,
+                        "jump dialog parses relative time with units")
+            || !require(!VDJumpToPositionDialog::parseTimePosition(
+                            QStringLiteral("1:60.000"), 100, 0, 5000,
+                            25.0, &frame),
+                        "jump dialog rejects malformed clock time")
+            || !require(VDJumpToPositionDialog::formatFrameTime(2425, 25.0)
+                            == QStringLiteral("1:37.000"),
+                        "jump dialog formats the current frame time"))
+            return 1;
+    }
 
     {
         VDQtAudioFilterSystem& audioFilters = VDQtAudioFilterSystem::instance();

@@ -557,6 +557,52 @@ private:
     QComboBox *mRangeCombo;
 };
 
+// VirtualDub-compatible position entry. Positions are expressed in edited
+// timeline coordinates; a leading + or - makes either field relative to the
+// current frame. The frame edit is selected initially for quick copy/replace.
+class VDJumpToPositionDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit VDJumpToPositionDialog(
+        qint64 currentFrame,
+        qint64 minimumFrame,
+        qint64 maximumFrame,
+        double frameRate,
+        QWidget *parent = nullptr);
+
+    qint64 selectedFrame() const { return mSelectedFrame; }
+
+    // Public for focused parser tests and for any future command-line/UI reuse.
+    static bool parseFramePosition(
+        const QString& text,
+        qint64 currentFrame,
+        qint64 minimumFrame,
+        qint64 maximumFrame,
+        qint64 *result);
+    static bool parseTimePosition(
+        const QString& text,
+        qint64 currentFrame,
+        qint64 minimumFrame,
+        qint64 maximumFrame,
+        double frameRate,
+        qint64 *result);
+    static QString formatFrameTime(qint64 frame, double frameRate);
+
+public Q_SLOTS:
+    void accept() override;
+
+private:
+    qint64 mCurrentFrame = 0;
+    qint64 mMinimumFrame = 0;
+    qint64 mMaximumFrame = 0;
+    qint64 mSelectedFrame = 0;
+    double mFrameRate = 0.0;
+    QRadioButton *mJumpToFrame = nullptr;
+    QRadioButton *mJumpToTime = nullptr;
+    QLineEdit *mFrameNumber = nullptr;
+    QLineEdit *mFrameTime = nullptr;
+};
+
 // Performance settings applied immediately to decoder instances and future
 // worker snapshots. decoderThreads=0 delegates thread choice to FFmpeg.
 struct VDPreferencesConfig {

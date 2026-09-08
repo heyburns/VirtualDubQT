@@ -411,6 +411,9 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     connect(mPositionControl, &VDQtPositionControlWidget::selectionChanged,
             this, [this](qint64, qint64) { updateEditActions(); });
     connect(mPositionControl, &VDQtPositionControlWidget::transportActionTriggered, this, &VDQtMainWindow::onTransportAction);
+    connect(mPositionControl,
+            &VDQtPositionControlWidget::jumpToPositionRequested,
+            this, &VDQtMainWindow::onEditJumpToPosition);
     connect(mPositionControl, &VDQtPositionControlWidget::userScrubStarted, this, [this]() {
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
@@ -566,6 +569,9 @@ void VDQtMainWindow::createMenus() {
                                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X),
                                     this, &VDQtMainWindow::onEditCropToSelection);
     mEdit->addSeparator();
+    actEditJump = mEdit->addAction(
+        "&Go to frame...", QKeySequence(Qt::CTRL | Qt::Key_G),
+        this, &VDQtMainWindow::onEditJumpToPosition);
     mEdit->addAction("Set selection &start", QKeySequence(Qt::Key_BracketLeft), this, &VDQtMainWindow::onEditSetSelectionStart);
     mEdit->addAction("Set selection &end", QKeySequence(Qt::Key_BracketRight), this, &VDQtMainWindow::onEditSetSelectionEnd);
     mEdit->addAction("Select &All", QKeySequence::SelectAll, this, &VDQtMainWindow::onEditSelectAll);
@@ -6388,6 +6394,44 @@ void VDQtMainWindow::onEditSelectAll() {
     mPositionControl->SetSelection(mPositionControl->GetRangeBegin(), mPositionControl->GetRangeEnd() + 1);
 }
 
+void VDQtMainWindow::onEditJumpToPosition() {
+    if (mIsExporting || !mVideoDecoder.isOpen()
+        || mTimeline.frameCount() <= 0)
+        return;
+
+    // A modal dialog continues processing Qt timers. Pause first so playback
+    // cannot move the current-frame value underneath the user's edit or race
+    // the accepted seek.
+    if (mPlaybackTimer->isActive()) {
+        mPlaybackTimer->stop();
+        mAudioPlayer.pause();
+        mPlaybackPausedFrame = static_cast<int>(
+            mPositionControl->GetPosition());
+    }
+
+    VDJumpToPositionDialog dialog(
+        mPositionControl->GetPosition(),
+        0,
+        mTimeline.frameCount() - 1,
+        mVideoDecoder.getFps(),
+        this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const qint64 target = dialog.selectedFrame();
+    if (mPositionControl->HasZoomRange()
+        && (target < mPositionControl->GetZoomStart()
+            || target > mPositionControl->GetZoomEnd())) {
+        // Windows VirtualDub leaves timeline zoom when an explicit jump lands
+        // outside the visible subsection. It also prevents QSlider from
+        // visually clamping a valid target to the old zoom boundary.
+        mPositionControl->ClearZoomRange();
+    }
+    mPlaybackPausedFrame = -1;
+    mPositionControl->SetPosition(target);
+    statusBar()->showMessage(
+        QString("Jumped to timeline frame %1.").arg(target));
+}
+
 void VDQtMainWindow::updateEditActions() {
     const bool open = mVideoDecoder.isOpen();
     const bool selection = open && mPositionControl
@@ -6399,6 +6443,7 @@ void VDQtMainWindow::updateEditActions() {
     if (actEditPaste) actEditPaste->setEnabled(open && !mTimelineClipboard.isEmpty());
     if (actEditDelete) actEditDelete->setEnabled(selection);
     if (actEditCrop) actEditCrop->setEnabled(selection);
+    if (actEditJump) actEditJump->setEnabled(open);
     if (actEditReset) actEditReset->setEnabled(open && mTimeline.isModified());
 }
 

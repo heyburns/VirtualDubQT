@@ -57,6 +57,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // The presentation index is lazy. With only frame zero decoded, it must not
+    // be mistaken for the true final frame and assigned the whole stream length
+    // as its duration; that freezes GUI playback at the first image.
+    if (decoder.getFrameImage(0, true).isNull()) {
+        std::cerr << "FAIL: could not decode the isolated first frame\n";
+        return 1;
+    }
+    const double firstFrameDuration = decoder.getFrameDurationSeconds(0);
+    if (!(firstFrameDuration > 0.0 && firstFrameDuration < 0.1)) {
+        std::cerr << "FAIL: isolated first frame has invalid duration "
+                  << firstFrameDuration << " seconds\n";
+        return 1;
+    }
+
     constexpr int sequentialFrames = 180;
     decoder.resetPerformanceCounters();
     QElapsedTimer sequentialTimer;
