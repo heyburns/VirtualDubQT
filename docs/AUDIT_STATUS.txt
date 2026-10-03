@@ -57,8 +57,9 @@ Remaining execution sequence
 [x] C06: share identical application/controller-test compilation in a static core.
 [ ] C02/C03/C04/C07: confirmed unused state, menu ownership, duplication, diagnostics
     and overflow-safe progress. Common multi-output transactions are already extracted.
+[x] Q03 follow-up: repeatable real-binary MP4/AVS decode/export smoke test.
 [ ] Q01/Q02/Q03: command-tool packaging, CMake/Release documentation, PR CI and clean
-    package decode/export smoke checks. Local regression infrastructure already exists.
+    package runtime checks. Local regression infrastructure already exists.
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
 

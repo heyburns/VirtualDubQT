@@ -433,3 +433,22 @@ then the complete Release 34/34 and sanitizer 30/30 suites passed. Regular
 build/VirtualDubQt rebuilt and exported the generated eight-frame FFV1 fixture to
 98,304 BGRA bytes. Physical-device and leak-check limitations remain unchanged;
 the standalone codec troubleshooting suite remains excluded.
+
+Real-binary media smoke (Q03 follow-up)
+--------------------------------------
+
+  ctest --preset release-checks -R 'cli_media_smoke|generated_vcf|application_baseline'
+  ctest --preset sanitizer-checks -R 'cli_media_smoke|generated_vcf|application_baseline'
+  build-release-checks/cli_media_smoke_tests /absolute/path/to/VirtualDubQt
+
+cli_media_smoke_tests launches the actual application twice, opening generated
+eight-frame MP4 and native AviSynth sources and exporting BGRA raw video through
+the command-line controller. Each output must be exactly 98,304 bytes; the AVS
+output's first BGRA pixel must match its specified color. Config/data directories
+are isolated per subprocess, audio output is disabled, deadlines are bounded and
+QTemporaryDir owns all files. It never stops a user's running editor.
+
+Validation: selected Release 3/3 and sanitizer 3/3 regressions passed; the same
+maintained harness also passed against regular build/VirtualDubQt. No production
+code was changed. This adds reusable real-media smoke evidence; it is not yet a
+clean DEB/RPM/AppImage runtime test or physical-device coverage.

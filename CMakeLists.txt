@@ -523,6 +523,16 @@ if (BUILD_TESTING)
 
     # Final smoke test crosses the process boundary and exercises main.cpp's
     # unattended script path under an isolated configuration directory.
+    add_executable(cli_media_smoke_tests
+        tests/test_cli_media_smoke.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(cli_media_smoke_tests PRIVATE Qt6::Core Qt6::Gui)
+    vdqt_enable_diagnostics(cli_media_smoke_tests)
+    add_test(NAME cli_media_smoke_tests
+        COMMAND cli_media_smoke_tests $<TARGET_FILE:VirtualDubQt>)
+    set_tests_properties(cli_media_smoke_tests PROPERTIES
+        LABELS "integration;cli;smoke" TIMEOUT 90)
+
     add_test(NAME generated_vcf_execution_test
         COMMAND VirtualDubQt
             --script ${CMAKE_CURRENT_SOURCE_DIR}/tests/parity/generated-processing.vcf
