@@ -51,6 +51,32 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // A sparse seek observes the tail but does not index the missing middle.
+    // EOF must not turn the one-frame prefix into an exact one-frame source.
+    {
+        VDQtVideoDecoder sparse;
+        if (!sparse.openFile(fixture)
+            || sparse.getFrameImage(0).isNull()
+            || sparse.getFrameImage(340).isNull()
+            || sparse.getFrameImage(359).isNull()
+            || !sparse.getFrameImage(360, true).isNull()) {
+            std::cerr << "FAIL: sparse-tail fixture decode did not reach EOF\n";
+            return 1;
+        }
+        if (sparse.isFrameCountExact() || sparse.getFrameCount() < 360) {
+            std::cerr << "FAIL: sparse EOF promoted the incomplete prefix: count="
+                      << sparse.getFrameCount() << ", exact="
+                      << sparse.isFrameCountExact() << '\n';
+            return 1;
+        }
+        const auto scanned = sparse.scanVideoStream();
+        if (scanned.cancelled || !scanned.errorMessage.isEmpty()
+            || scanned.totalFrames != 360 || !sparse.isFrameCountExact()) {
+            std::cerr << "FAIL: full traversal did not verify the true source length\n";
+            return 1;
+        }
+    }
+
     VDQtVideoDecoder decoder;
     if (!decoder.openFile(fixture)) {
         std::cerr << decoder.getLastError().toStdString() << '\n';

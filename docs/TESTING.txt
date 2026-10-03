@@ -411,3 +411,25 @@ Validation: full Release 33/33 and sanitizer 29/29 passed before adding the next
 sparse-EOF regression. The rebuilt regular binary passed the VCF smoke and opened
 the generated FFV1 fixture to export exactly 98,304 raw BGRA bytes. Source-level
 behavior is unchanged by this checkpoint; build-time duplication is reduced.
+
+Sparse EOF and verified frame counts (H03)
+-----------------------------------------
+
+playback_performance_tests now requests frames 0, 340, 359 and EOF from a generated
+360-frame MP4. Before repair, EOF promoted its one-frame index prefix to an exact
+one-frame clip. A full scan must still verify all 360 frames after the sparse seek.
+The controller operation_sparse_eof likewise reproduced timeline collapse before
+repair: its 48-frame source jumped to zero after playing from the last frame.
+It now stops without an exact count, preserves the provisional range, retains the
+last decoded pixels and restores the displayed playhead without a spurious seek.
+
+Only traversal from the start or a verified prefix anchor can prove complete
+length. Sparse timestamp seeks, unexpected index discontinuities and decode errors
+invalidate that proof; worker EOF is reported independently. Exact VFR seeking,
+timestamp deduplication and index performance/reuse remain separate open work.
+
+Validation: focused Release and sanitizer decoder/GUI/CLI checks passed (4/4 each),
+then the complete Release 34/34 and sanitizer 30/30 suites passed. Regular
+build/VirtualDubQt rebuilt and exported the generated eight-frame FFV1 fixture to
+98,304 BGRA bytes. Physical-device and leak-check limitations remain unchanged;
+the standalone codec troubleshooting suite remains excluded.

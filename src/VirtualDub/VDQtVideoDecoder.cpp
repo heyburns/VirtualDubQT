@@ -256,6 +256,7 @@ VDQtVideoDecoder::VDQtVideoDecoder()
       mDemuxEof(false),
       mDrainSent(false),
       mLastDecodeReachedEof(false),
+      mIndexTraversalContiguous(false),
       mDiscardUntilKeyFrame(false),
       mSeekCount(0),
       mDecodedFrameCount(0),
@@ -853,6 +854,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
+    mIndexTraversalContiguous = true;
     mDiscardUntilKeyFrame = false;
     mSeekCount = 0;
     mDecodedFrameCount = 0;
@@ -984,6 +986,7 @@ void VDQtVideoDecoder::close() {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
+    mIndexTraversalContiguous = false;
     mDiscardUntilKeyFrame = false;
     mSeekCount = 0;
     mDecodedFrameCount = 0;
@@ -1131,6 +1134,7 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
+    mIndexTraversalContiguous = true;
     mDiscardUntilKeyFrame = false;
     mCurrentFrameIndex = -1;
     mNextDecodeFrameIndex = 0;
@@ -1191,6 +1195,7 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
+    mIndexTraversalContiguous = anchorIndex >= 0;
     mDiscardUntilKeyFrame = false;
     mCurrentFrameIndex = (anchorIndex >= 0) ? (anchorIndex - 1) : -1;
     mNextDecodeFrameIndex = (anchorIndex >= 0) ? anchorIndex : frameIndex;
@@ -1203,6 +1208,8 @@ bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors) {
     if (!mCodecCtx || !mFormatCtx || !mFrame || !mPacket) return false;
 
     auto recordDecodeError = [&](const QString& operation, int error) {
+        // Skipped/failed packets cannot verify a complete ordinal traversal.
+        mIndexTraversalContiguous = false;
         if (decodeErrors) ++*decodeErrors;
         mLastError = avOperationError(operation, error);
         qWarning() << "[VDQtVideoDecoder]" << mLastError;
@@ -1333,6 +1340,9 @@ int VDQtVideoDecoder::registerDecodedFrame() {
 
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
 
+    if (frameIndex != mNextDecodeFrameIndex || frameIndex > indexedCount)
+        mIndexTraversalContiguous = false;
+
     FrameIndexEntry entry;
     entry.timestamp = timestamp;
     entry.duration = mFrame->duration;
@@ -1370,7 +1380,11 @@ QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
 }
 
 void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
-    if (mFrameIndex.isEmpty()) return;
+    // Only a verified traversal from the start, or from a known prefix anchor,
+    // can extend that prefix to EOF and establish the total. An approximate
+    // timestamp seek must never relabel its incomplete prefix as the full clip.
+    if (!mLastDecodeReachedEof || !mIndexTraversalContiguous
+        || mFrameIndex.isEmpty() || mNextDecodeFrameIndex != mFrameIndex.size()) return;
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
 }

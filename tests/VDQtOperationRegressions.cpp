@@ -803,6 +803,37 @@ bool unknownTimeline(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool sparseEof(VDQtTestFixtures& fixtures) {
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(fixtures.mp4)) return false;
+    const auto scan = reference.scanVideoStream();
+    if (scan.totalFrames != 48 || !scan.errorMessage.isEmpty()) return false;
+    const QImage lastImage = reference.getFrameImage(47);
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    if (!position || panes.size() != 2
+        || !waitFor([&] { return !panes.first()->frameImage().isNull(); })) return false;
+    position->SetPosition(47);
+    if (!check(waitFor([&] { return panes.first()->frameImage() == lastImage; }),
+               "sparse GUI seek displays the actual last image")) return false;
+    QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                              Q_ARG(int, VDQT_PCN_PLAY));
+    QTimer *playback = nullptr;
+    for (auto *timer : window.findChildren<QTimer*>()) {
+        if (timer->isActive() && timer->timerType() == Qt::PreciseTimer)
+            playback = timer;
+    }
+    if (!check(playback && waitFor([&] { return !playback->isActive(); }),
+               "sparse EOF stops playback even without an exact frame count")) return false;
+    return check(position->GetRangeEnd() >= 47 && position->GetPosition() == 47
+                 && panes.first()->frameImage() == lastImage,
+                 "sparse EOF retains the timeline and last displayed playhead");
+}
+
 bool emptyTimeline(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1043,6 +1074,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "outputs") return outputFamilies(fixtures);
     if (scenario == "safety") return sourceProtection(fixtures);
     if (scenario == "unknown_timeline") return unknownTimeline(fixtures);
+    if (scenario == "sparse_eof") return sparseEof(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

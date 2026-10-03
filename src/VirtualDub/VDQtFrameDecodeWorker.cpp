@@ -198,7 +198,8 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                     generation,
                     decoder->getLastError(),
                     decoder->getFrameCount(),
-                    status);
+                    status,
+                    decoder->reachedEndOfStream());
             }
         }
     }

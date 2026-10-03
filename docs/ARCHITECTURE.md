@@ -99,6 +99,15 @@ state, and decodes dependency frames forward. Sequential playback avoids random
 seeks even when presentation drops a late frame. Best-effort timestamps populate
 the presentation-order index and provide VFR frame durations.
 
+EOF and verified length are separate facts. `mIndexTraversalContiguous` records
+whether the current traversal started at the beginning or a verified prefix
+anchor; approximate timestamp seeks and decode errors invalidate that proof.
+Only a contiguous traversal whose next ordinal equals the indexed prefix length
+can promote decoder EOF to an exact frame count. The worker independently reports
+EOF so playback can stop and restore the last displayed playhead without shrinking
+an incomplete timeline. Efficient exact seeking and index sharing remain separate
+audit work; an approximate time seek is not proof of a VFR ordinal.
+
 FFmpeg/AviSynth frames are converted to packed RGB QImages. Optimized swscale
 paths may finish rows with full SIMD stores, so conversion storage uses a
 64-byte-aligned stride plus explicit tail padding. The allocation owner and the

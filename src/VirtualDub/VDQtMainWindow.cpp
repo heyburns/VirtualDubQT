@@ -9669,7 +9669,8 @@ void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
                                                quint64 generation,
                                                const QString& errorMessage,
                                                int frameCount,
-                                               int frameCountStatus) {
+                                               int frameCountStatus,
+                                               bool reachedEndOfStream) {
     if (mOperationDepth > 0 || mSourceTransitionActive
         || generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
 
@@ -9677,18 +9678,25 @@ void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
 
     const bool exact = frameCountStatus
         == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Exact);
-    if (mPlaybackTimer->isActive() && exact) {
+    if (mPlaybackTimer->isActive() && (exact || reachedEndOfStream)) {
         mPlaybackTimer->stop();
         mAudioPlayer.stop();
-        if (frameCount > 0) {
+        if (exact && frameCount > 0) {
             mTimeline.setSourceFrameCount(frameCount, true);
             const int lastFrame = static_cast<int>(
                 std::max<qint64>(0, mTimeline.frameCount() - 1));
             mPositionControl->SetRange(0, lastFrame);
             if (mPositionControl->GetPosition() != lastFrame)
                 mPositionControl->SetPosition(lastFrame);
+        } else if (mDecodedPreviewTimelineFrame >= 0) {
+            // The clock may already have advanced past the last decoded image.
+            // Restore the displayed playhead without inventing an exact length
+            // or enqueueing another doomed decode at the provisional end.
+            const QSignalBlocker blocker(mPositionControl);
+            mPositionControl->SetPosition(mDecodedPreviewTimelineFrame);
         }
-    } else if (!errorMessage.isEmpty()) {
+    }
+    if (!errorMessage.isEmpty()) {
         statusBar()->showMessage(
             QString("Unable to decode frame %1: %2").arg(frameIndex).arg(errorMessage));
     }

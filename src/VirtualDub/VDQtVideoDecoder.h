@@ -52,6 +52,9 @@ public:
     int getFrameCount() const { return mFrameCount; }
     FrameCountStatus getFrameCountStatus() const { return mFrameCountStatus; }
     bool isFrameCountExact() const { return mFrameCountStatus == FrameCountStatus::Exact; }
+    // EOF describes the last decode attempt, not proof of the entire source's
+    // length. A sparse timestamp seek can reach EOF with only a prefix indexed.
+    bool reachedEndOfStream() const { return mLastDecodeReachedEof; }
     bool isKeyFrame(int frameIndex);
     int getPreviousKeyFrame(int frameIndex);
     int getNextKeyFrame(int frameIndex);
@@ -187,6 +190,7 @@ private:
     bool mDemuxEof;
     bool mDrainSent;
     bool mLastDecodeReachedEof;
+    bool mIndexTraversalContiguous;
     bool mDiscardUntilKeyFrame;
     quint64 mSeekCount;
     quint64 mDecodedFrameCount;

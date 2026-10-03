@@ -180,7 +180,8 @@ private Q_SLOTS:
                                    quint64 generation,
                                    const QString& errorMessage,
                                    int frameCount,
-                                   int frameCountStatus);
+                                   int frameCountStatus,
+                                   bool reachedEndOfStream);
     void runPendingJobs();
     void stopJobQueue();
     void abortCurrentJob();

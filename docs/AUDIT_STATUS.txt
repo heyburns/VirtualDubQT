@@ -27,7 +27,7 @@ Remaining execution sequence
 [ ] Legacy projects: estimated identity lists remain intrinsically ambiguous.
 [x] S09: preserve and roll back complete Append
     state, audio choices, markers, zoom, selection, edits and source intent.
-[ ] H03: sparse EOF must not promote an incomplete prefix to exact source length.
+[x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
 [ ] H04/H05/P01/P02/M16: exact cancellable seeks, efficient and reusable indexes,
     variable-rate frame identity and shared keyframe/navigation knowledge.
 [ ] S04: preserve all imported sequence images at the requested rational frame rate.

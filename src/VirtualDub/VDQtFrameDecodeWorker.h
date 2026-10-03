@@ -52,7 +52,8 @@ Q_SIGNALS:
                           quint64 generation,
                           const QString& errorMessage,
                           int frameCount,
-                          int frameCountStatus);
+                          int frameCountStatus,
+                          bool reachedEndOfStream);
 
 private Q_SLOTS:
     void processPendingRequest();
