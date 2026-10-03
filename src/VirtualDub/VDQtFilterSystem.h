@@ -91,6 +91,17 @@ struct VDFilterFrameContext {
     double frameRate = 0.0;
 };
 
+// Pipeline-local diagnostic: configuration identity is separate from the
+// human-readable error, so callers need not parse a logged warning.
+struct VDFilterProcessingError {
+    QString filterId;
+    QString filterName;
+    QString message;
+    QString text() const {
+        return filterName.isEmpty() ? message : QString("%1: %2").arg(filterName, message);
+    }
+};
+
 // Ordered video-filter pipeline used by preview and full-processing export.
 // Each decoder worker owns a private instance/snapshot; instance() is the
 // editable session chain. This separation prevents temporal history, plug-in
@@ -154,8 +165,12 @@ public:
                               QList<QImage>& outputFrames,
                               const VDFilterFrameContext& context);
     VDFilterTimingInfo getTimingInfo() const;
+    const VDFilterProcessingError& processingError() const { return mProcessingError; }
+    QString lastError() const { return mProcessingError.text(); }
 
 private:
+    QImage failProcessing(const QString& message, const VDFilterInstance *filter = nullptr);
+    VDFilterProcessingError mProcessingError;
     void forgetRuntimeInstances();
     QString runtimeInstanceId(const QString& filterId) const;
     // Serialized IDs describe configuration, not runtime ownership. Two

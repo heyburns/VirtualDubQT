@@ -274,7 +274,7 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio queue outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence log_lifetime recovery edit_preview project_validation append_state)
+    foreach(operation_case IN ITEMS source snapshot audio queue outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure log_lifetime recovery edit_preview project_validation append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -285,7 +285,7 @@ if (BUILD_TESTING)
     add_executable(filter_contract_tests tests/test_filter_contracts.cpp)
     target_link_libraries(filter_contract_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_contract_tests)
-    foreach(filter_contract IN ITEMS field layout)
+    foreach(filter_contract IN ITEMS field layout failure)
         add_test(NAME filter_contract_${filter_contract}
             COMMAND filter_contract_tests ${filter_contract})
         set_tests_properties(filter_contract_${filter_contract} PROPERTIES

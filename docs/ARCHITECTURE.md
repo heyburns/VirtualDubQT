@@ -206,6 +206,13 @@ bob deinterlacing may emit multiple temporal phases for one source image.
 `processFrame()` exists for older single-image callers and returns only phase
 zero.
 
+Required effects must not be silently omitted. A failed sequence discards every
+output phase, resets partial runtime history, and records a pipeline-local
+`VDFilterProcessingError` (filter ID/name and actionable message). Preview keeps
+the valid input but clears stale output and shows the error in the status bar;
+export/server callers propagate it and do not publish partial output. Missing
+image reads are not cached, so restoring an asset allows a retry.
+
 Reserved `_sylia.*` numeric parameters preserve VirtualDub script range,
 clipping, and opacity metadata without changing the public filter-instance
 structure. Do not expose those reserved keys as ordinary user parameters.

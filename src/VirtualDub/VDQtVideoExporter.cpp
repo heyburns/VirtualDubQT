@@ -1200,7 +1200,8 @@ bool VDQtVideoExporter::exportRawVideo(
     QImage filteredSample = filters.processFrame(
         sampleFrame, sampleContext);
     if (sampleFrame.isNull() || filteredSample.isNull()) {
-        reportError(QStringLiteral("The first selected frame could not be decoded and filtered."));
+        reportError(filters.lastError().isEmpty()
+            ? QStringLiteral("The first selected frame could not be decoded and filtered.") : filters.lastError());
         return false;
     }
 
@@ -1284,6 +1285,7 @@ bool VDQtVideoExporter::exportRawVideo(
             || filteredFrames.size() != timing.outputFramesPerInput) {
             writeError = QString("Frame %1 could not be decoded and filtered.")
                 .arg(sourceFrame);
+            if (!filters.lastError().isEmpty()) writeError += '\n' + filters.lastError();
             failed = true;
             break;
         }
@@ -2359,7 +2361,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         QImage filteredSample = filters.processFrame(
             sampleFrame, sampleContext);
         if (filteredSample.isNull()) {
-            if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", "The filter chain rejected the first frame.");
+            mLastError = filters.lastError().isEmpty()
+                ? QStringLiteral("The filter chain rejected the first frame.") : filters.lastError();
+            if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", mLastError);
             return false;
         }
         outW = filteredSample.width();
@@ -2801,7 +2805,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             if (!filters.processFrameSequence(
                     rawFrame, filteredFrames, filterContext)
                 || filteredFrames.size() != filterFramesPerInput) {
-                appendBounded(diagnostics, QString("The temporal filter chain failed at source frame %1.\n").arg(f).toUtf8());
+                appendBounded(diagnostics, QString("The filter chain failed at source frame %1: %2\n")
+                    .arg(f).arg(filters.lastError()).toUtf8());
                 writeFailed = true;
                 break;
             }

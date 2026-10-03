@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QTransform>
+#include <QTemporaryDir>
 #include <cmath>
 #include <iostream>
 
@@ -71,6 +72,42 @@ bool rotatedLayout() {
     }
     return true;
 }
+
+bool requiredEffects() {
+    QImage input(17, 9, QImage::Format_RGBA8888);
+    input.fill(QColor(100, 80, 60, 150));
+    VDFilterInstance missing;
+    missing.id = "missing-effect-instance";
+    missing.name = "Required missing effect";
+    missing.type = VDFilterType::Plugin;
+    missing.enabled = true;
+    missing.pluginId = "vdqt-regression-unavailable-plugin";
+    VDQtFilterSystem filters;
+    filters.replaceActiveChain({missing});
+    QList<QImage> outputs{input};
+    if (!check(!filters.processFrameSequence(input, outputs) && outputs.isEmpty(),
+               "enabled missing plugin must fail, not silently produce unchanged output")) return false;
+    if (!check(filters.processingError().filterId == missing.id
+               && filters.lastError().contains(missing.name),
+               "processing error retains the failed configuration identity")) return false;
+    filters.clearFilters();
+    filters.addFilter(VDFilterType::Logo);
+    QTemporaryDir assets;
+    if (!assets.isValid()) return false;
+    const QString assetPath = assets.filePath("required-logo.png");
+    filters.updateFilterStringParams(0, {{"path", assetPath}});
+    if (!check(!filters.processFrameSequence(input, outputs) && outputs.isEmpty(),
+               "missing required logo asset must fail, not disappear from output")) return false;
+    if (!check(filters.lastError().contains(assetPath), "asset failure reports the exact path")) return false;
+    filters.setFilterEnabled(0, false);
+    if (!check(filters.processFrameSequence(input, outputs) && outputs.size() == 1
+               && outputs.first() == input && filters.lastError().isEmpty(),
+               "explicitly disabled missing effect is harmless")) return false;
+    filters.setFilterEnabled(0, true);
+    if (!input.save(assetPath)) return false;
+    return check(filters.processFrameSequence(input, outputs) && outputs.size() == 1,
+                 "creating a previously missing asset permits retry without stale negative cache");
+}
 }
 
 int main(int argc, char **argv) {
@@ -78,5 +115,6 @@ int main(int argc, char **argv) {
     const QStringList args = app.arguments();
     if (args.contains("field")) return fieldHistory() ? 0 : 1;
     if (args.contains("layout")) return rotatedLayout() ? 0 : 1;
-    return fieldHistory() && rotatedLayout() ? 0 : 1;
+    if (args.contains("failure")) return requiredEffects() ? 0 : 1;
+    return fieldHistory() && rotatedLayout() && requiredEffects() ? 0 : 1;
 }

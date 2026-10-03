@@ -195,6 +195,7 @@ void VDQtFrameServer::run(Config config) {
         if (first.isNull() || !filters.processFrameSequence(first, firstImages, context)
             || firstImages.isEmpty() || firstImages.first().isNull()) {
             error = QStringLiteral("Could not prepare the first served frame.");
+            if (!filters.lastError().isEmpty()) error += '\n' + filters.lastError();
         }
     }
 
@@ -262,6 +263,7 @@ void VDQtFrameServer::run(Config config) {
             if (frame.isNull() || !filters.processFrameSequence(frame, images, context)
                 || images.isEmpty()) {
                 error = QString("Could not decode frame %1.").arg(frameIndex);
+                if (!filters.lastError().isEmpty()) error += '\n' + filters.lastError();
                 break;
             }
         }

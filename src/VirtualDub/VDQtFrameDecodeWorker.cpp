@@ -173,14 +173,17 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         QImage inputImage = decoder->getFrameImage(
             frameIndex, preserveSequentialDecode, stillRequested);
         QList<QImage> outputImages;
+        QString filterError;
         if (!inputImage.isNull() && renderFilteredOutput && stillRequested()) {
             VDFilterFrameContext context;
             context.frameNumber = frameIndex;
             context.timestampSeconds =
                 decoder->getFrameTimestampSeconds(frameIndex);
             context.frameRate = decoder->getFps();
-            if (!mFilters.processFrameSequence(inputImage, outputImages, context))
+            if (!mFilters.processFrameSequence(inputImage, outputImages, context)) {
                 outputImages.clear();
+                filterError = mFilters.lastError();
+            }
         }
 
         // Packet/frame decoding is cancellable as newer generations arrive.
@@ -210,7 +213,8 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                     decoder->getFrameCount(),
                     status,
                     decoder->getSeekCount(),
-                    decoder->getDecodedFrameCount());
+                    decoder->getDecodedFrameCount(),
+                    filterError);
             } else {
                 Q_EMIT frameUnavailable(
                     frameIndex,

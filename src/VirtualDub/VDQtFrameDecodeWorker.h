@@ -50,7 +50,8 @@ Q_SIGNALS:
                     int frameCount,
                     int frameCountStatus,
                     quint64 seekCount,
-                    quint64 decodedFrameCount);
+                    quint64 decodedFrameCount,
+                    const QString& filterError);
     void frameUnavailable(int frameIndex,
                           quint64 generation,
                           const QString& errorMessage,

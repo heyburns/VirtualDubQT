@@ -579,12 +579,25 @@ QImage VDQtFilterSystem::processFrame(const QImage& inputFrame) {
     // The historical API can return only one image. Use the first field phase
     // so preview remains deterministic; rate-aware pipelines must call
     // processFrameSequence() and consume every returned frame.
-    return processFrameForPhase(inputFrame, 0, {});
+    return processFrame(inputFrame, {});
 }
 
 QImage VDQtFilterSystem::processFrame(
     const QImage& inputFrame, const VDFilterFrameContext& context) {
-    return processFrameForPhase(inputFrame, 0, context);
+    mProcessingError = {};
+    QImage output = processFrameForPhase(inputFrame, 0, context);
+    if (output.isNull()) {
+        if (mProcessingError.message.isEmpty())
+            failProcessing(QStringLiteral("The filter chain could not produce an output frame."));
+        resetRuntimeState();
+    }
+    return output;
+}
+
+QImage VDQtFilterSystem::failProcessing(const QString& message, const VDFilterInstance *filter) {
+    mProcessingError = {filter ? filter->id : QString(),
+                        filter ? filter->name : QString(), message};
+    return {};
 }
 
 VDFilterTimingInfo VDQtFilterSystem::getTimingInfo() const {
@@ -610,18 +623,26 @@ bool VDQtFilterSystem::processFrameSequence(
     const QImage& inputFrame, QList<QImage>& outputFrames,
     const VDFilterFrameContext& context) try {
     outputFrames.clear();
+    mProcessingError = {};
 
-    if (inputFrame.isNull()) return false;
+    if (inputFrame.isNull()) {
+        failProcessing(QStringLiteral("There is no input frame to filter."));
+        return false;
+    }
 
     const VDFilterTimingInfo timing = getTimingInfo();
-    if (!timing.sequenceSupported)
+    if (!timing.sequenceSupported) {
+        failProcessing(QStringLiteral("The configured temporal output sequence is not supported."));
         return false;
+    }
 
     outputFrames.reserve(timing.outputFramesPerInput);
     for (int phase = 0; phase < timing.outputFramesPerInput; ++phase) {
         QImage output = processFrameForPhase(
             inputFrame, static_cast<quint64>(phase), context);
         if (output.isNull()) {
+            if (mProcessingError.message.isEmpty())
+                failProcessing(QStringLiteral("The filter chain could not produce an output frame."));
             // Allocation/processing failure is not a successful sequence of
             // null images. Discard any earlier phases and their temporal state
             // so a retry cannot reuse a partially advanced filter history.
@@ -636,6 +657,7 @@ bool VDQtFilterSystem::processFrameSequence(
 } catch (const std::bad_alloc&) {
     outputFrames.clear();
     resetRuntimeState();
+    failProcessing(QStringLiteral("Not enough memory to process the filter sequence."));
     return false;
 }
 
@@ -723,11 +745,12 @@ QImage VDQtFilterSystem::processFrameForPhase(
             if (!VDQtPluginHost::instance().processVideoFilter(
                     filter.pluginId, runtimeInstanceId(filter.id), filter.pluginConfiguration,
                     result, &pluginResult, &errorMessage)) {
-                qWarning().noquote() << QStringLiteral("Plugin filter '%1' failed: %2")
-                    .arg(filter.name, errorMessage);
-                break;
+                return failProcessing(errorMessage.isEmpty()
+                    ? QStringLiteral("The native plugin could not process this frame.") : errorMessage, &filter);
             }
             result = pluginResult.convertToFormat(QImage::Format_RGBA8888);
+            if (result.isNull())
+                return failProcessing(QStringLiteral("The native plugin returned no valid image."), &filter);
             break;
         }
         case VDFilterType::Fill: {
@@ -1179,11 +1202,18 @@ QImage VDQtFilterSystem::processFrameForPhase(
         }
         case VDFilterType::Logo: {
             const QString path = filter.stringParams.value("path");
-            if (path.isEmpty()) break;
+            if (path.isEmpty())
+                return failProcessing(QStringLiteral("Choose an image for the enabled logo filter."), &filter);
             auto asset = mAssetCache.find(path);
-            if (asset == mAssetCache.end())
-                asset = mAssetCache.insert(path, QImage(path));
-            if (!asset->isNull()) {
+            if (asset == mAssetCache.end()) {
+                QImage loaded(path);
+                if (loaded.isNull())
+                    return failProcessing(QString("Could not load the required image: %1").arg(path), &filter);
+                // Do not retain failed reads: the user may restore the asset
+                // and retry without replacing the chain or restarting.
+                asset = mAssetCache.insert(path, loaded);
+            }
+            {
                 QPainter painter(&result);
                 painter.setOpacity(std::clamp(
                     filter.params.value("opacity", 1.0), 0.0, 1.0));
@@ -2491,5 +2521,6 @@ QImage VDQtFilterSystem::processFrameForPhase(
     // bookkeeping can throw. Both mean this phase failed, including legacy
     // callers that consume processFrame() rather than processFrameSequence().
     resetRuntimeState();
+    failProcessing(QStringLiteral("Not enough memory to process the filter frame."));
     return {};
 }

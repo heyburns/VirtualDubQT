@@ -975,6 +975,60 @@ bool importedImageTiming(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool failedFilterPreview(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    // Splitter reparenting changes QObject child order; identify roles explicitly.
+    auto *input = window.findChild<VDVideoDisplayWidget*>("inputPreview");
+    auto *output = window.findChild<VDVideoDisplayWidget*>("outputPreview");
+    if (!input || !output
+        || !check(waitFor([&] { return !output->frameImage().isNull(); }),
+                   "filter failure test begins with a successful output preview")) return false;
+    QString error;
+    if (!window.runAutomationText(
+            "VirtualDub.video.filters.Clear();\nVirtualDub.video.filters.Add(\"logo\");\n"
+            "VirtualDub.video.filters.instance[0].Config(\"missing-logo.png\",0,0,\"\",0,0,0,65536);",
+            fixtures.directory.path(), &error)) return false;
+    if (!check(waitFor([&] { return output->frameImage().isNull()
+               && window.statusBar()->currentMessage().contains("logo", Qt::CaseInsensitive); })
+               && !input->frameImage().isNull(),
+               "failed filtering clears stale output and shows its actionable error beside valid input")) {
+        std::cerr << "Input null=" << input->frameImage().isNull()
+                  << ", output null=" << output->frameImage().isNull()
+                  << ", status=" << window.statusBar()->currentMessage().toStdString() << '\n';
+        for (const auto& filter : VDQtFilterSystem::instance().getActiveChain())
+            std::cerr << filter.name.toStdString() << ": "
+                      << filter.stringParams.value("path").toStdString() << '\n';
+        return false;
+    }
+    VDQtVideoDecoder decoder;
+    if (!decoder.openFile(fixtures.mp4)) return false;
+    VDQtVideoExporter exporter;
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = fixtures.mp4;
+    raw.outputPath = fixtures.directory.filePath("missing-effect.raw");
+    raw.endFrame = 3;
+    raw.unattended = true;
+    if (!check(!exporter.exportRawVideo(raw, &decoder)
+               && exporter.lastError().contains("logo", Qt::CaseInsensitive)
+               && !QFile::exists(raw.outputPath),
+               "raw export propagates a missing effect without publishing partial output")) return false;
+    VDQtVideoExporter::ExportOptions video;
+    video.inputPath = fixtures.mp4;
+    video.outputPath = fixtures.directory.filePath("missing-effect.mkv");
+    video.includeAudio = false;
+    video.endFrame = 3;
+    video.videoCodecOverride = "ffv1";
+    video.unattended = true;
+    video.videoMode = VideoMode_FullProcessing;
+    return check(!exporter.exportVideo(video, &decoder)
+                 && exporter.lastError().contains("logo", Qt::CaseInsensitive)
+                 && !QFile::exists(video.outputPath),
+                 "rendered video export propagates the required-effect error");
+}
+
 bool emptyTimeline(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1219,6 +1273,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "index_reuse") return indexReuse(fixtures);
     if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
     if (scenario == "image_sequence") return importedImageTiming(fixtures);
+    if (scenario == "filter_failure") return failedFilterPreview(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

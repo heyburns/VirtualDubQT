@@ -6,6 +6,7 @@
 #include <QGuiApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QTemporaryDir>
 
 #include <algorithm>
 #include <iostream>
@@ -37,12 +38,15 @@ int main(int argc, char **argv) {
     QGuiApplication application(argc, argv);
 
     // Every advertised built-in must be constructible and produce a valid
-    // image with its defaults. This catches catalog entries that are UI-only
+    // image with valid settings/assets. This catches catalog entries that are UI-only
     // placeholders or switch cases that were omitted as the catalog grows.
     VDQtFilterSystem catalogSystem;
     const auto catalog = catalogSystem.getAvailableFilters();
     std::set<int> builtInTypes;
     const QImage catalogSource = makeGradient(96, 64);
+    QTemporaryDir assets;
+    const QString logoPath = assets.filePath("catalog-logo.png");
+    if (!require(assets.isValid() && catalogSource.save(logoPath), "create required catalog asset")) return 1;
     for (const auto& info : catalog) {
         if (!info.pluginId.isEmpty()) continue;
         builtInTypes.insert(static_cast<int>(info.type));
@@ -51,6 +55,8 @@ int main(int argc, char **argv) {
         if (!require(single.getActiveChain().size() == 1,
                      "catalog filter is constructible"))
             return 1;
+        if (info.type == VDFilterType::Logo)
+            single.updateFilterStringParams(0, {{"path", logoPath}});
         VDFilterFrameContext context;
         context.frameNumber = 0;
         context.timestampSeconds = 1.25;

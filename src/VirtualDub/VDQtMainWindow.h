@@ -175,7 +175,8 @@ private Q_SLOTS:
                              int frameCount,
                              int frameCountStatus,
                              quint64 seekCount,
-                             quint64 decodedFrameCount);
+                             quint64 decodedFrameCount,
+                             const QString& filterError);
     void onDecodedFrameUnavailable(int frameIndex,
                                    quint64 generation,
                                    const QString& errorMessage,

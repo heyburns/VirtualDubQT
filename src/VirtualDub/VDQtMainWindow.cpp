@@ -607,6 +607,8 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     mVideoSplitter = new QSplitter(Qt::Horizontal, this);
     mInputDisplay = new VDVideoDisplayWidget("Input Frame", this);
     mOutputDisplay = new VDVideoDisplayWidget("Output Frame (Filtered)", this);
+    mInputDisplay->setObjectName(QStringLiteral("inputPreview"));
+    mOutputDisplay->setObjectName(QStringLiteral("outputPreview"));
 
     mVideoSplitter->addWidget(mInputDisplay);
     mVideoSplitter->addWidget(mOutputDisplay);
@@ -9590,7 +9592,8 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
                                          int frameCount,
                                          int frameCountStatus,
                                          quint64 seekCount,
-                                         quint64 decodedFrameCount) {
+                                         quint64 decodedFrameCount,
+                                         const QString& filterError) {
     Q_UNUSED(seekCount);
     Q_UNUSED(decodedFrameCount);
     if (mOperationDepth > 0 || mSourceTransitionActive
@@ -9608,6 +9611,10 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
             ? std::clamp(mPlaybackOutputPhase, 0,
                          static_cast<int>(outputImages.size()) - 1) : 0;
         mOutputDisplay->setFrameImage(outputImages.at(phase));
+    } else if (!filterError.isEmpty()) {
+        // A new valid input plus an old successful output falsely implies this
+        // filter chain succeeded. Keep the input, but invalidate its output.
+        mOutputDisplay->setFrameImage(QImage());
     }
     if (mPlaybackTimer->isActive() && timelineFrame == mPlaybackClockFrame) {
         double adjustedDuration = durationSeconds;
@@ -9683,6 +9690,9 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
         .arg(inputImage.width())
         .arg(inputImage.height())
         .arg(fps, 0, 'f', 2));
+
+    if (!filterError.isEmpty())
+        statusBar()->showMessage(QString("Output preview unavailable: %1").arg(filterError));
 
     const int queuedFrame = std::exchange(mQueuedPlaybackFrame, -1);
     if (mPlaybackTimer->isActive() && queuedFrame >= 0

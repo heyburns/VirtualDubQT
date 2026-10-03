@@ -646,3 +646,25 @@ Equivalent high-depth algorithms (M10) and original temporal/rate semantics
 
 Post-layout validation: full Release 41/41 and sanitizer 37/37 passed; the regular
 binary rebuilt and passed maintained MP4/native-AVS export smoke.
+
+Required filter failures (H10/M25)
+--------------------------------
+
+The new missing-plugin and missing-logo regressions failed before repair:
+processing reported success while omitting the required effect. Errors now carry
+configuration identity and an actionable message through the private pipeline,
+worker preview, raw/rendered export and frame serving. Failure clears every phase
+and partial history. Missing asset reads are not cached; restoring an image allows
+retry, and explicitly disabled effects remain harmless.
+
+The controller test verifies valid input with cleared output and visible error,
+then checks raw and FFV1 export fail without publishing a destination. Preview
+roles have stable object names: splitter reparenting makes child-list order an
+unreliable way to identify panes. Catalog smoke supplies a valid temporary logo;
+it no longer assumes an enabled logo with no asset should succeed. A new test
+fixture's enabled flag was initially uninitialized; sanitizer validation exposed
+that nondeterminism and the fixture now initializes it explicitly.
+
+Validation: full Release 43/43 passed (then the corrected fixture's focused 5/5);
+full sanitizer 39/39 passed. The regular binary rebuilt and passed real MP4/native
+AVS export smoke. No physical playback-device result is inferred from these checks.
