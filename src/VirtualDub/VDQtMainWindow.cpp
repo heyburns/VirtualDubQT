@@ -1507,6 +1507,16 @@ QString VDQtMainWindow::primarySessionSourcePath() const {
         ? mVideoDecoder.getFilePath() : mTimelineSources.first();
 }
 
+QString VDQtMainWindow::outputDirectoryForSource(const QFileInfo& source) const {
+    return mLastOutputDirectory.isEmpty()
+        ? source.dir().absolutePath() : mLastOutputDirectory;
+}
+
+void VDQtMainWindow::rememberOutputDirectory(const QString& outputPath) {
+    if (!outputPath.isEmpty())
+        mLastOutputDirectory = QFileInfo(outputPath).absolutePath();
+}
+
 void VDQtMainWindow::onFileLoadProject() {
     const QString path = QFileDialog::getOpenFileName(
         this, "Load Project", QString(),
@@ -1842,7 +1852,7 @@ void VDQtMainWindow::onFileSaveAudio() {
     }
 
     QFileInfo srcInfo(primarySessionSourcePath());
-    QString defaultDir = srcInfo.dir().absolutePath();
+    QString defaultDir = outputDirectoryForSource(srcInfo);
     QString baseName = srcInfo.baseName().isEmpty() ? "test" : srcInfo.baseName();
     QString defaultName = baseName + ".wav";
 
@@ -1852,6 +1862,7 @@ void VDQtMainWindow::onFileSaveAudio() {
     VDSaveAudioDialog dlg(defaultDir, defaultName, compStr, layoutStr, this);
     if (dlg.exec() == QDialog::Accepted) {
         QString outPath = dlg.getSelectedFilePath();
+        rememberOutputDirectory(outPath);
         VDAudioCodecConfig audioCfg = dlg.getAudioConfig();
 
         const VDQtOutputSafetyReport audioSafety =
@@ -4991,7 +5002,7 @@ void VDQtMainWindow::onFileSaveAVI() {
     }
 
     QFileInfo srcInfo(primarySessionSourcePath());
-    QString defaultDir = srcInfo.dir().absolutePath();
+    QString defaultDir = outputDirectoryForSource(srcInfo);
     QString baseName = srcInfo.completeBaseName();
     if (baseName.isEmpty()) baseName = "output";
 
@@ -4999,6 +5010,7 @@ void VDQtMainWindow::onFileSaveAVI() {
     if (dlg.exec() == QDialog::Accepted) {
         QString savePath = dlg.getSelectedFilePath();
         if (savePath.isEmpty()) return;
+        rememberOutputDirectory(savePath);
 
         const VDQtOutputSafetyReport videoSafety =
             loadedOutputSafety(
@@ -5099,11 +5111,13 @@ void VDQtMainWindow::onFileSaveSegmentedAVI() {
     const QFileInfo source(primarySessionSourcePath());
     QString outputPath = QFileDialog::getSaveFileName(
         this, QStringLiteral("Save Segmented AVI"),
-        source.dir().filePath(source.completeBaseName() + QStringLiteral(".avi")),
+        QDir(outputDirectoryForSource(source)).filePath(
+            source.completeBaseName() + QStringLiteral(".avi")),
         QStringLiteral("AVI files (*.avi);;All Files (*)"));
     if (outputPath.isEmpty()) return;
     if (QFileInfo(outputPath).suffix().isEmpty())
         outputPath += QStringLiteral(".avi");
+    rememberOutputDirectory(outputPath);
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Segment Limits"));
@@ -5364,13 +5378,14 @@ void VDQtMainWindow::onFileExportRawVideo() {
     const QFileInfo sourceInfo(primarySessionSourcePath());
     VDRawVideoExportDialog dialog(
         mRawVideoExportConfig,
-        sourceInfo.dir().absolutePath(),
+        outputDirectoryForSource(sourceInfo),
         sourceInfo.completeBaseName(),
         this);
     if (dialog.exec() != QDialog::Accepted) return;
 
     const QString outputPath = dialog.getSelectedFilePath();
     if (outputPath.isEmpty()) return;
+    rememberOutputDirectory(outputPath);
 
     mPlaybackTimer->stop();
     mAudioPlayer.stop();
@@ -5487,11 +5502,13 @@ void VDQtMainWindow::onFileExportFilmstrip() {
     const QFileInfo source(primarySessionSourcePath());
     QString outputPath = QFileDialog::getSaveFileName(
         this, QStringLiteral("Save Adobe Filmstrip"),
-        source.dir().filePath(source.completeBaseName() + QStringLiteral(".flm")),
+        QDir(outputDirectoryForSource(source)).filePath(
+            source.completeBaseName() + QStringLiteral(".flm")),
         QStringLiteral("Adobe Filmstrip (*.flm);;All Files (*)"));
     if (outputPath.isEmpty()) return;
     if (QFileInfo(outputPath).suffix().isEmpty())
         outputPath += QStringLiteral(".flm");
+    rememberOutputDirectory(outputPath);
     if (!loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
                             mTimelineSources).isSafe()) {
         QMessageBox::critical(this, QStringLiteral("Unsafe Filmstrip Path"),
@@ -5770,11 +5787,13 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
     const QFileInfo source(primarySessionSourcePath());
     QString outputPath = QFileDialog::getSaveFileName(
         this, QStringLiteral("External Encoder Output"),
-        source.dir().filePath(source.completeBaseName() + QLatin1Char('.') + suffix),
+        QDir(outputDirectoryForSource(source)).filePath(
+            source.completeBaseName() + QLatin1Char('.') + suffix),
         QStringLiteral("All Files (*)"));
     if (outputPath.isEmpty()) return;
     if (QFileInfo(outputPath).suffix().isEmpty())
         outputPath += QLatin1Char('.') + suffix;
+    rememberOutputDirectory(outputPath);
     const QFileInfo target(outputPath);
     if (target.exists() || target.isSymLink()) {
         const auto answer = QMessageBox::warning(
@@ -5939,7 +5958,7 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
                                           : QStringLiteral(".gif");
     const QString formatName = animatedPng ? QStringLiteral("Animated PNG")
                                            : QStringLiteral("Animated GIF");
-    const QString suggestedPath = sourceInfo.dir().filePath(
+    const QString suggestedPath = QDir(outputDirectoryForSource(sourceInfo)).filePath(
         sourceInfo.completeBaseName() + extension);
     QString outputPath = QFileDialog::getSaveFileName(
         this, QStringLiteral("Export %1").arg(formatName), suggestedPath,
@@ -5947,6 +5966,7 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
                     : QStringLiteral("Animated GIF (*.gif);;All Files (*)"));
     if (outputPath.isEmpty()) return;
     if (QFileInfo(outputPath).suffix().isEmpty()) outputPath += extension;
+    rememberOutputDirectory(outputPath);
 
     QDialog animationOptions(this);
     animationOptions.setWindowTitle(
@@ -6135,11 +6155,12 @@ void VDQtMainWindow::onFileSaveImageSequence() {
     }
 
     const QFileInfo sourceInfo(primarySessionSourcePath());
-    QString defaultFile = sourceInfo.dir().filePath(
+    QString defaultFile = QDir(outputDirectoryForSource(sourceInfo)).filePath(
         sourceInfo.completeBaseName() + QStringLiteral("_frame.png"));
     QString filter = "PNG Images (*.png);;Windows Bitmap (*.bmp);;JPEG Images (*.jpg *.jpeg);;TIFF Images (*.tif *.tiff);;Targa Images (*.tga)";
     QString savePath = QFileDialog::getSaveFileName(this, "Save Image Sequence (Select Base Name and Format)", defaultFile, filter);
     if (savePath.isEmpty()) return;
+    rememberOutputDirectory(savePath);
 
     QFileInfo fi(savePath);
     QString dir = fi.absolutePath();

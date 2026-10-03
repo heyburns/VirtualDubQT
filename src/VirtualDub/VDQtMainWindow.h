@@ -8,6 +8,7 @@
 #include <QAction>
 #include <QStatusBar>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
@@ -228,6 +229,8 @@ private:
         bool fastStart,
         bool fullSourceRange = false) const;
     QString primarySessionSourcePath() const;
+    QString outputDirectoryForSource(const QFileInfo& source) const;
+    void rememberOutputDirectory(const QString& outputPath);
     void updateEditActions();
     void updateTimelineView(qint64 preferredPosition, bool clearSelection);
     void refreshTimelineMarkers();
@@ -329,6 +332,9 @@ private:
     VDRawVideoExportConfig mRawVideoExportConfig;
     VDPreferencesConfig mPreferencesConfig;
     QMap<QString, QString> mTextMetadata;
+    // A save destination belongs to this application run, not to a source
+    // session or persistent preferences. Keep it across Open/Close cycles.
+    QString mLastOutputDirectory;
     // Loaded-source/edit-session state. Temporary concat/raw manifests live in
     // mTimelineTempDirectory for exactly as long as this main-window session.
     QString mCurrentProjectPath;
