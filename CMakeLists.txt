@@ -260,6 +260,14 @@ if (BUILD_TESTING)
     set_tests_properties(decode_color_contract_tests PROPERTIES
         LABELS "decoder;color;contracts" TIMEOUT 120)
 
+    add_executable(avs_pixel_format_tests
+        tests/test_avs_pixel_formats.cpp tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(avs_pixel_format_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(avs_pixel_format_tests)
+    add_test(NAME avs_pixel_format_tests COMMAND avs_pixel_format_tests)
+    set_tests_properties(avs_pixel_format_tests PROPERTIES
+        LABELS "decoder;avs;precision;contracts" TIMEOUT 120)
+
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp
         src/VirtualDub/VDQtTimeline.cpp)

@@ -69,7 +69,9 @@ Remaining execution sequence
 [x] M08: consistent BT.2020 matrix conversion, separate valid color tags and saved settings.
 [x] M12: source/per-frame matrices and ranges precede resolution guesses in RGB decoding.
     Explicit user overrides remain authoritative; unsupported matrices report an error.
-[ ] M09/M11/M13: AVS formats, aspect metadata and effective codec controls.
+[x] M11: native integer AVS grayscale/planar RGB/YUV/alpha layouts render at 8-16 bits.
+    Unsupported floating-point video fails clearly at open, not as a null preview.
+[ ] M09/M13: aspect metadata and effective codec controls.
 [x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
 [ ] M21: safe numeric conversion throughout execution, saved inputs and runtime calculations.
     Project/job positions, segments and raw offsets now reject unsafe casts,

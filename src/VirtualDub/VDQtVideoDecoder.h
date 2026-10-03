@@ -90,22 +90,7 @@ public:
     // and evaluating the script a second time is even less safe for plugins
     // with process-global state.
     QRecursiveMutex* getAvsAccessMutex() { return &mAvsAccessMutex; }
-    QString getPixFormat() const {
-        if (mIsAvsNative && mAvsVi) {
-            if (avs_is_yv12(mAvsVi)) return "YV12";
-            if (avs_is_yv16(mAvsVi)) return "YV16";
-            if (avs_is_yv24(mAvsVi)) return "YV24";
-            if (avs_is_yuy2(mAvsVi)) return "YUY2";
-            if (avs_is_rgb32(mAvsVi)) return "RGBA32";
-            if (avs_is_rgb24(mAvsVi)) return "RGB24";
-            return "YUV420";
-        }
-        if (mCodecCtx) {
-            const char* name = av_get_pix_fmt_name(mCodecCtx->pix_fmt);
-            if (name) return QString::fromUtf8(name).toUpper();
-        }
-        return "YUV420";
-    }
+    QString getPixFormat() const;
 
     // preserveSequentialDecode is used by playback: a late presentation may
     // skip image conversion, but dependency frames are still decoded in order

@@ -124,6 +124,78 @@ int nativeFrameProperty(AVS_ScriptEnvironment *environment, const AVS_VideoFrame
         && value <= std::numeric_limits<int>::max() ? static_cast<int>(value) : fallback;
 }
 
+struct NativePixelLayout {
+    AVPixelFormat format = AV_PIX_FMT_NONE;
+    int planes[3] = {AVS_PLANAR_Y, AVS_PLANAR_U, AVS_PLANAR_V};
+    int planeCount = 0;
+    int bits = 8;
+    bool bottomUp = false;
+    bool separateAlpha = false;
+    QString name;
+};
+
+// All native consumers (preview, filtering, raw/processed export, serving)
+// pull images through this decoder. Opening, plane conversion and source-info
+// display share this one support table, rather than accepting formats that
+// fail later. AviSynth planar RGB is R/G/B; FFmpeg's plane order is G/B/R.
+NativePixelLayout nativePixelLayout(const AVS_VideoInfo *info) {
+    NativePixelLayout result;
+    if (!info) return result;
+    result.bits = avs_bits_per_component(info);
+    if (result.bits != 8 && result.bits != 10 && result.bits != 12
+        && result.bits != 14 && result.bits != 16) return result;
+    QString format;
+    if (avs_is_rgb24(info) || avs_is_rgb32(info) || avs_is_rgb48(info) || avs_is_rgb64(info)) {
+        format = avs_is_rgb64(info) ? "bgra64" : avs_is_rgb48(info) ? "bgr48"
+            : avs_is_rgb32(info) ? "bgra" : "bgr24";
+        result.name = avs_is_rgb64(info) ? "RGB64" : avs_is_rgb48(info) ? "RGB48"
+            : avs_is_rgb32(info) ? "RGBA32" : "RGB24";
+        result.bottomUp = true;
+        result.planeCount = 1;
+        result.planes[0] = 0;
+    } else if (avs_is_yuy2(info)) {
+        format = "yuyv422";
+        result.name = "YUY2";
+        result.planeCount = 1;
+        result.planes[0] = 0;
+    } else if (avs_is_y(info)) {
+        format = result.bits == 8 ? "gray" : QString("gray%1").arg(result.bits);
+        result.name = QString("Y%1").arg(result.bits);
+        result.planeCount = 1;
+    } else if (avs_is_planar_rgb(info) || avs_is_planar_rgba(info)) {
+        format = result.bits == 8 ? "gbrp" : QString("gbrp%1").arg(result.bits);
+        result.planes[0] = AVS_PLANAR_G;
+        result.planes[1] = AVS_PLANAR_B;
+        result.planes[2] = AVS_PLANAR_R;
+        result.planeCount = 3;
+        result.separateAlpha = avs_is_planar_rgba(info);
+        result.name = QString("%1%2").arg(result.separateAlpha ? "RGBAP" : "RGBP").arg(result.bits);
+    } else if (avs_is_planar(info) && (avs_is_yuv(info) || avs_is_yuva(info))) {
+        const QString subsampling = avs_is_420(info) ? "420" : avs_is_422(info) ? "422"
+            : avs_is_444(info) ? "444" : avs_is_yv411(info) ? "411" : QString();
+        if (subsampling.isEmpty()) return result;
+        format = QString("yuv%1p").arg(subsampling);
+        if (result.bits > 8) format += QString::number(result.bits);
+        result.planeCount = 3;
+        // Convert color without alpha, then copy alpha at native precision.
+        // swscale has no layout for several 12/14-bit YUVA/GBRA variants.
+        result.separateAlpha = avs_is_yuva(info);
+        result.name = QString("%1%2P%3").arg(result.separateAlpha ? "YUVA" : "YUV",
+                                            subsampling).arg(result.bits);
+    }
+    if (result.bits > 8) {
+#if Q_BYTE_ORDER == Q_LITTLE_ENDIAN
+        format += "le";
+#else
+        format += "be";
+#endif
+    }
+    result.format = av_get_pix_fmt(format.toUtf8().constData());
+    if (result.format != AV_PIX_FMT_NONE && !sws_isSupportedInput(result.format))
+        result.format = AV_PIX_FMT_NONE;
+    return result;
+}
+
 bool isUsableFrameRate(AVRational rate) {
     if (rate.num <= 0 || rate.den <= 0) return false;
     const double value = av_q2d(rate);
@@ -371,6 +443,15 @@ QString VDQtVideoDecoder::getInputFormatName() const {
         ? QString::fromLatin1(mFormatCtx->iformat->name) : QString();
 }
 
+QString VDQtVideoDecoder::getPixFormat() const {
+    if (mIsAvsNative && mAvsVi) return nativePixelLayout(mAvsVi).name;
+    if (mCodecCtx) {
+        const char *name = av_get_pix_fmt_name(mCodecCtx->pix_fmt);
+        if (name) return QString::fromUtf8(name).toUpper();
+    }
+    return QStringLiteral("Unknown");
+}
+
 QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
     if (!mAvsClip || !mAvsVi) return QImage();
 
@@ -393,53 +474,29 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
         return QImage();
     }
 
-    AVPixelFormat srcFmt = AV_PIX_FMT_NONE;
+    const NativePixelLayout nativeLayout = nativePixelLayout(mAvsVi);
+    const AVPixelFormat srcFmt = nativeLayout.format;
     const uint8_t *srcSlice[4] = { nullptr };
     int srcStride[4] = { 0 };
-
-    if (avs_is_yv12(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_YUV420P;
-        srcSlice[0] = avs_get_read_ptr_p(frame, AVS_PLANAR_Y);
-        srcStride[0] = avs_get_pitch_p(frame, AVS_PLANAR_Y);
-        srcSlice[1] = avs_get_read_ptr_p(frame, AVS_PLANAR_U);
-        srcStride[1] = avs_get_pitch_p(frame, AVS_PLANAR_U);
-        srcSlice[2] = avs_get_read_ptr_p(frame, AVS_PLANAR_V);
-        srcStride[2] = avs_get_pitch_p(frame, AVS_PLANAR_V);
-    } else if (avs_is_yv16(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_YUV422P;
-        srcSlice[0] = avs_get_read_ptr_p(frame, AVS_PLANAR_Y);
-        srcStride[0] = avs_get_pitch_p(frame, AVS_PLANAR_Y);
-        srcSlice[1] = avs_get_read_ptr_p(frame, AVS_PLANAR_U);
-        srcStride[1] = avs_get_pitch_p(frame, AVS_PLANAR_U);
-        srcSlice[2] = avs_get_read_ptr_p(frame, AVS_PLANAR_V);
-        srcStride[2] = avs_get_pitch_p(frame, AVS_PLANAR_V);
-    } else if (avs_is_yv24(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_YUV444P;
-        srcSlice[0] = avs_get_read_ptr_p(frame, AVS_PLANAR_Y);
-        srcStride[0] = avs_get_pitch_p(frame, AVS_PLANAR_Y);
-        srcSlice[1] = avs_get_read_ptr_p(frame, AVS_PLANAR_U);
-        srcStride[1] = avs_get_pitch_p(frame, AVS_PLANAR_U);
-        srcSlice[2] = avs_get_read_ptr_p(frame, AVS_PLANAR_V);
-        srcStride[2] = avs_get_pitch_p(frame, AVS_PLANAR_V);
-    } else if (avs_is_yuy2(mAvsVi)) {
-        srcFmt = AV_PIX_FMT_YUYV422;
-        srcSlice[0] = avs_get_read_ptr_p(frame, 0);
-        srcStride[0] = avs_get_pitch_p(frame, 0);
-    } else if (avs_is_rgb64(mAvsVi) || avs_is_rgb48(mAvsVi)
-               || avs_is_rgb32(mAvsVi) || avs_is_rgb24(mAvsVi)) {
-        if (avs_is_rgb64(mAvsVi)) srcFmt = AV_PIX_FMT_BGRA64LE;
-        else if (avs_is_rgb48(mAvsVi)) srcFmt = AV_PIX_FMT_BGR48LE;
-        else if (avs_is_rgb32(mAvsVi)) srcFmt = AV_PIX_FMT_BGRA;
-        else srcFmt = AV_PIX_FMT_BGR24;
-        const uint8_t *base = avs_get_read_ptr_p(frame, 0);
-        const int pitch = avs_get_pitch_p(frame, 0);
-        // AviSynth's packed RGB24/RGB32 convention is bottom-up even though
-        // planar YUV and YUY2 are top-down. Present the visual top scanline to
-        // swscale and walk toward the visual bottom with a negative stride.
-        if (base && pitch > 0) {
-            srcSlice[0] = base + static_cast<ptrdiff_t>(h - 1) * pitch;
-            srcStride[0] = -pitch;
+    const AVPixFmtDescriptor *sourceDescriptor = av_pix_fmt_desc_get(srcFmt);
+    for (int plane = 0; sourceDescriptor && plane < nativeLayout.planeCount; ++plane) {
+        const int id = nativeLayout.planes[plane];
+        const int expectedRowBytes = av_image_get_linesize(srcFmt, w, plane);
+        const bool chroma = plane > 0 && !(sourceDescriptor->flags & AV_PIX_FMT_FLAG_RGB);
+        const int expectedHeight = chroma ? AV_CEIL_RSHIFT(h, sourceDescriptor->log2_chroma_h) : h;
+        srcSlice[plane] = avs_get_read_ptr_p(frame, id);
+        srcStride[plane] = avs_get_pitch_p(frame, id);
+        if (!srcSlice[plane] || expectedRowBytes <= 0 || srcStride[plane] < expectedRowBytes
+            || avs_get_row_size_p(frame, id) < expectedRowBytes
+            || avs_get_height_p(frame, id) < expectedHeight) {
+            mLastError = QStringLiteral("AviSynth returned an invalid %1 plane layout.").arg(nativeLayout.name);
+            avs_release_video_frame(frame);
+            return {};
         }
+    }
+    if (nativeLayout.bottomUp && srcSlice[0]) {
+        srcSlice[0] += static_cast<ptrdiff_t>(h - 1) * srcStride[0];
+        srcStride[0] = -srcStride[0];
     }
 
     if (srcFmt != AV_PIX_FMT_NONE && srcSlice[0]) {
@@ -484,7 +541,6 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
             int dstStride[4] = { layout.alignedRowBytes, 0, 0, 0 };
             const int scaledRows = sws_scale(
                 mSwsCtx, srcSlice, srcStride, 0, h, dstSlice, dstStride);
-            avs_release_video_frame(frame);
             if (scaledRows == h) {
                 for (int row = 0; row < h; ++row) {
                     std::memcpy(
@@ -493,9 +549,40 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
                             * layout.alignedRowBytes,
                         static_cast<size_t>(layout.visibleRowBytes));
                 }
+                // Keep the frame alive until the separately stored alpha has
+                // been copied. RGB24 is an explicit user-requested reduction.
+                if (nativeLayout.separateAlpha && img.hasAlphaChannel()) {
+                    const int bits = nativeLayout.bits;
+                    const uint8_t *alpha = avs_get_read_ptr_p(frame, AVS_PLANAR_A);
+                    const int pitch = avs_get_pitch_p(frame, AVS_PLANAR_A);
+                    if (!alpha || pitch < w * (bits > 8 ? 2 : 1)
+                        || avs_get_row_size_p(frame, AVS_PLANAR_A) < w * (bits > 8 ? 2 : 1)
+                        || avs_get_height_p(frame, AVS_PLANAR_A) < h) {
+                        mLastError = QStringLiteral("AviSynth returned an invalid alpha plane.");
+                        avs_release_video_frame(frame);
+                        return {};
+                    }
+                    const quint32 maximum = (quint32(1) << bits) - 1;
+                    for (int row = 0; row < h; ++row) {
+                        const uint8_t *samples = alpha + static_cast<ptrdiff_t>(row) * pitch;
+                        if (img.format() == QImage::Format_RGBA64) {
+                            auto *pixels = reinterpret_cast<QRgba64*>(img.scanLine(row));
+                            for (int x = 0; x < w; ++x) {
+                                quint16 sample = 0;
+                                std::memcpy(&sample, samples + x * 2, sizeof(sample));
+                                const quint32 bounded = std::min(quint32(sample), maximum);
+                                pixels[x].setAlpha(static_cast<quint16>((bounded * 65535 + maximum / 2) / maximum));
+                            }
+                        } else {
+                            uint8_t *pixels = img.scanLine(row);
+                            for (int x = 0; x < w; ++x) pixels[x * 4 + 3] = samples[x];
+                        }
+                    }
+                }
+                avs_release_video_frame(frame);
                 return img;
             }
-
+            avs_release_video_frame(frame);
             mLastError = QStringLiteral("Pixel conversion failed for AviSynth frame %1.").arg(frameIndex);
             return QImage();
         }
@@ -648,6 +735,14 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
             if (newClip) avs_release_clip(newClip);
             avs_delete_script_environment(newEnvironment);
             qWarning() << "[VDQtVideoDecoder] AviSynth+ script evaluation failed:" << mLastError;
+            return false;
+        }
+        if (nativePixelLayout(newVideoInfo).format == AV_PIX_FMT_NONE) {
+            mLastError = avs_bits_per_component(newVideoInfo) == 32
+                ? QStringLiteral("Floating-point AviSynth video is not supported by the integer preview/filter pipeline. Convert the script output to an 8-16-bit integer format.")
+                : QStringLiteral("The AviSynth output pixel format is not supported by this application's conversion pipeline.");
+            avs_release_clip(newClip);
+            avs_delete_script_environment(newEnvironment);
             return false;
         }
 

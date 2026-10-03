@@ -1089,3 +1089,27 @@ follow the official AviSynth+ property conventions:
 https://avisynthplus.readthedocs.io/en/master/avisynthdoc/syntax/syntax_internal_functions_frame_properties.html
 Focused decoder/color/context/media checks passed Release 5/5 and ASan/UBSan
 5/5. The rebuilt regular application independently passed MP4/native-AVS smoke.
+
+Native AviSynth integer layouts (M11)
+------------------------------------
+
+The regression reproduced successful opens followed by null previews for Y8,
+YUV420P10, planar RGB, higher-depth grayscale/YUV and alpha variants. Opening,
+native plane conversion and the source-info name now share one format table.
+FFmpeg's G/B/R plane order is mapped from native RGB planes; packed RGB remains
+bottom-up. Native alpha is copied separately at its full precision, including
+formats for which swscale has no matching alpha layout. Plane sizes/strides are
+checked before conversion. Float AVS output is explicitly rejected at open;
+preserving floating-point/HDR values through the integer filter pipeline is
+still not an implemented feature and is not claimed here.
+
+The built-in-only matrix exercises 51 integer layouts and three explicit float
+rejections. It checks RGB order, neutral chroma/grayscale, straight alpha,
+non-8-bit detail, preview/raw-export byte agreement, and 648-pixel/odd-width
+conversion buffers. Exact fixture values use AviSynth+'s documented BlankClip
+colors array:
+https://avisynthplus.readthedocs.io/en/latest/avisynthdoc/corefilters/blankclip.html
+After the final strengthened checks, full Release 58/58 and ASan/UBSan 54/54
+passed. The rebuilt regular binary independently passed MP4/native-AVS smoke.
+Hardware audio/capture, arbitrary plugins and the user's unreproduced progressive
+ProRes slowdown remain separate gates; leak-sanitizer coverage is not claimed.
