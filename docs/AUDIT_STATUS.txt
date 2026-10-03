@@ -70,7 +70,7 @@ Remaining execution sequence
     Project/job positions, segments and raw offsets now reject unsafe casts,
     fractions and wrong types before conversion; script execution is still open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
-[ ] Batch naming: preserve filenames across analysis/export operation changes.
+[x] Batch naming: preserve filenames across analysis/export operation changes.
 [ ] M07: timed capture stops independently of preview output (hardware verification pending).
 [ ] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
 [ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.

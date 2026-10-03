@@ -18,6 +18,8 @@
 #include "VDQtProjectFile.h"
 #include "VDQtJobQueue.h"
 #include "VDQtBatchWizard.h"
+#include <QComboBox>
+#include <QTableWidget>
 #include "VDQtJobControl.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoExporter.h"
@@ -682,6 +684,42 @@ int main(int argc, char **argv) {
                         && !wizard.jobs().first().options.includeAudio,
                         "batch jobs use each complete source and never inherit the loaded clip edit list"))
             return 1;
+
+        VDQtBatchWizardDialog namingWizard(batchTemplate, {});
+        namingWizard.addSourceFiles({batchSource});
+        auto *namingTable = namingWizard.findChild<QTableWidget*>();
+        QComboBox *operationPicker = nullptr;
+        for (auto *picker : namingWizard.findChildren<QComboBox*>()) {
+            if (picker->findText(QStringLiteral("Run video analysis pass")) >= 0)
+                operationPicker = picker;
+        }
+        if (!require(namingTable && operationPicker, "locate real batch naming controls")) return 1;
+        namingTable->item(0, 1)->setText(QStringLiteral("My.episode.final.mkv"));
+        operationPicker->setCurrentIndex(4);
+        if (!require(namingTable->item(0, 1)->text() == QStringLiteral("(none)")
+                     && !(namingTable->item(0, 1)->flags() & Qt::ItemIsEditable),
+                     "analysis displays a noneditable no-output placeholder")) return 1;
+        operationPicker->setCurrentIndex(3);
+        if (!require(namingTable->item(0, 1)->text() == QStringLiteral("My.episode.final.png"),
+                     "analysis preserves an edited dotted filename for later image export")) return 1;
+        operationPicker->setCurrentIndex(4);
+        operationPicker->setCurrentIndex(0);
+        if (!require(namingTable->item(0, 1)->text() == QStringLiteral("My.episode.final.mkv"),
+                     "repeated analysis/export switches preserve user naming")) return 1;
+        VDQtBatchWizardDialog analysisFirst(batchTemplate, {});
+        for (auto *picker : analysisFirst.findChildren<QComboBox*>()) {
+            if (picker->findText(QStringLiteral("Run video analysis pass")) >= 0) {
+                picker->setCurrentIndex(4);
+                operationPicker = picker;
+            }
+        }
+        analysisFirst.addSourceFiles({batchSource});
+        namingTable = analysisFirst.findChild<QTableWidget*>();
+        if (!require(namingTable->item(0, 1)->text() == QStringLiteral("(none)"),
+                     "sources added during analysis immediately show the placeholder")) return 1;
+        operationPicker->setCurrentIndex(0);
+        if (!require(namingTable->item(0, 1)->text() == QStringLiteral("batch-source_output.mkv"),
+                     "analysis-first naming still protects the original source")) return 1;
 
         VDQtJobTableModel jobModel(&queue);
         if (!require(jobModel.columnCount() == 6

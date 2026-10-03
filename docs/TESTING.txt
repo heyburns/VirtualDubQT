@@ -962,3 +962,18 @@ state/jobs after rejection. Focused Release 5/5 and ASan/UBSan 5/5 passed,
 including project, queue, stabilization and actual-app smoke. The rebuilt
 regular binary independently passed MP4/native-AVS decode/export smoke.
 Script execution and runtime numeric calculations remain separate M21 work.
+
+Batch analysis filename preservation
+------------------------------------
+
+The real wizard regression failed before repair: an edited dotted name became
+'(none).png' after Analysis -> Image export. The no-output text is now display
+only; the previous filename is retained in item data. Adding files while Analysis
+is selected immediately shows the noneditable placeholder and retains a safe
+prospective name. Filename filtering cannot edit the analysis placeholder.
+
+Tests switch repeatedly between analysis/video/images, preserve user-edited
+dotted names and protect a source with the same output extension. Focused
+Release 4/4 and ASan/UBSan 4/4 passed (queue, numeric inputs, stabilization and
+actual-app smoke). The rebuilt regular binary independently passed real
+MP4/native-AVS decode/export smoke.

@@ -223,11 +223,14 @@ void VDQtBatchWizardDialog::addSourceFiles(const QStringList& paths) {
         auto *sourceItem = new QTableWidgetItem(absolute);
         sourceItem->setFlags(sourceItem->flags() & ~Qt::ItemIsEditable);
         mTable->setItem(row, 0, sourceItem);
-        QString outputName =
-            source.completeBaseName() + QLatin1Char('.') + selectedExtension();
+        // Analysis has no extension, but retains a real prospective filename
+        // behind its display placeholder for a later operation change.
+        const QString extension = selectedOperation() == VDQtJobOperation::VideoAnalysis
+            ? QStringLiteral("mkv") : selectedExtension();
+        QString outputName = source.completeBaseName() + QLatin1Char('.') + extension;
         if (outputName.compare(source.fileName(), Qt::CaseInsensitive) == 0) {
             outputName = source.completeBaseName()
-                + QStringLiteral("_output.") + selectedExtension();
+                + QStringLiteral("_output.") + extension;
         }
         setRowOutputName(row, outputName);
         existing.insert(absolute);
@@ -246,7 +249,8 @@ void VDQtBatchWizardDialog::removeSelected() {
 }
 
 void VDQtBatchWizardDialog::filterOutputNames() {
-    if (mTable->rowCount() == 0) return;
+    if (mTable->rowCount() == 0
+        || selectedOperation() == VDQtJobOperation::VideoAnalysis) return;
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Filter Output Names"));
     auto *form = new QFormLayout(&dialog);
@@ -286,11 +290,16 @@ void VDQtBatchWizardDialog::updateOperation() {
     const QString extension = selectedExtension();
     for (int row = 0; row < mTable->rowCount(); ++row) {
         const QString source = mTable->item(row, 0)->text();
-        QString base = QFileInfo(mTable->item(row, 1)->text()).completeBaseName();
+        QTableWidgetItem *item = mTable->item(row, 1);
+        const QString savedName = item->flags() & Qt::ItemIsEditable
+            ? item->text() : item->data(Qt::UserRole).toString();
+        if (operation == VDQtJobOperation::VideoAnalysis) {
+            setRowOutputName(row, savedName);
+            continue;
+        }
+        QString base = QFileInfo(savedName).completeBaseName();
         if (base.isEmpty()) base = QFileInfo(source).completeBaseName();
-        QString outputName = operation == VDQtJobOperation::VideoAnalysis
-            ? QStringLiteral("(none)")
-            : base + QLatin1Char('.') + extension;
+        QString outputName = base + QLatin1Char('.') + extension;
         if (outputName.compare(QFileInfo(source).fileName(),
                                Qt::CaseInsensitive) == 0) {
             outputName = QFileInfo(source).completeBaseName()
@@ -349,11 +358,16 @@ void VDQtBatchWizardDialog::setRowOutputName(int row, const QString& name) {
         item = new QTableWidgetItem;
         mTable->setItem(row, 1, item);
     }
-    item->setText(name);
-    if (selectedOperation() == VDQtJobOperation::VideoAnalysis)
+    // Presentation is not filename data. In particular, never feed '(none)'
+    // back into name generation after an Analysis -> Export transition.
+    item->setData(Qt::UserRole, name);
+    if (selectedOperation() == VDQtJobOperation::VideoAnalysis) {
+        item->setText(QStringLiteral("(none)"));
         item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-    else
+    } else {
+        item->setText(name);
         item->setFlags(item->flags() | Qt::ItemIsEditable);
+    }
 }
 
 QList<VDQtJobState> VDQtBatchWizardDialog::buildJobs(
