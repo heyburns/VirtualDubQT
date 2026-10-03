@@ -20,6 +20,7 @@
 #include <new>
 #include <utility>
 #include <QDebug>
+#include <QSet>
 
 namespace {
 
@@ -160,9 +161,22 @@ void VDQtFilterSystem::clearFilters() {
     mTemporalStates.clear();
 }
 
+QList<VDFilterInstance> VDQtFilterSystem::normalizeChainIds(QList<VDFilterInstance> chain) {
+    QSet<QString> used;
+    for (auto& filter : chain) {
+        if (filter.id.trimmed().isEmpty() || used.contains(filter.id)) {
+            do {
+                filter.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            } while (used.contains(filter.id));
+        }
+        used.insert(filter.id);
+    }
+    return chain;
+}
+
 void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) {
     forgetRuntimeInstances();
-    mActiveChain = chain;
+    mActiveChain = normalizeChainIds(chain);
     mSixAxisLutCache.clear();
     mAssetCache.clear();
     mTemporalStates.clear();
@@ -174,7 +188,7 @@ void VDQtFilterSystem::replaceActiveChainTransient(
     // runtime state. Asset cache entries are retained here because changing a
     // numeric preview parameter should not reload unchanged logo files.
     forgetRuntimeInstances();
-    mActiveChain = chain;
+    mActiveChain = normalizeChainIds(chain);
     mSixAxisLutCache.clear();
     mTemporalStates.clear();
 }

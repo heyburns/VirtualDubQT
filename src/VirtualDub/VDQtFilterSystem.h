@@ -68,8 +68,8 @@ enum class VDFilterType {
 struct VDFilterInstance {
     QString id;
     QString name;
-    VDFilterType type;
-    bool enabled;
+    VDFilterType type = VDFilterType::NullTransform;
+    bool enabled = true;
     QMap<QString, double> params;
     QMap<QString, QString> stringParams;
     QString pluginId;
@@ -151,6 +151,9 @@ public:
     void moveFilterUp(int index);
     void moveFilterDown(int index);
     void clearFilters();
+    // Migrate legacy missing/duplicate identities once, before snapshots are
+    // saved or copied to workers. Valid unique identities remain unchanged.
+    static QList<VDFilterInstance> normalizeChainIds(QList<VDFilterInstance> chain);
     void replaceActiveChain(const QList<VDFilterInstance>& chain);
     // Worker-local preview chains are independent snapshots of the session chain.
     void replaceActiveChainTransient(const QList<VDFilterInstance>& chain);

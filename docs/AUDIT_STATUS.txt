@@ -50,7 +50,8 @@ Remaining execution sequence
 [x] S06/M06: consistent source/edited-timeline filter context in all consumers,
     including cumulative VFR time and advancing timing across held masks.
     Output-phase advancement downstream of Bob is tested separately under P05.
-[ ] M18/M26: unique filter IDs and typed finite/range/relationship validation.
+[x] M18: migrate empty/duplicate filter IDs without sharing temporal history.
+[ ] M26: typed finite/range/relationship validation.
 [ ] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
     Private pipeline runtime reset/destruction is already fixed.
 [x] P05: stage-wise expanded frame sequences, correct histories and memory budgets.

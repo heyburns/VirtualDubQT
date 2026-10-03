@@ -771,3 +771,18 @@ the 1080p benchmark measured 18.8 ms/input for heavy stages before duplicate-Bob
 versus 46.1 ms/input after Bob, with identical pixels (eight workers, five-run
 medians). This demonstrates avoided repeated work, not a prediction of physical
 playback or the still-unreproduced progressive ProRes slowdown.
+
+Independent filter identities (M18)
+----------------------------------
+
+The new duplicate-ID Motion Blur regression failed before repair. Missing or
+duplicate legacy IDs are assigned once during project parsing and at either
+pipeline replacement boundary. Existing first/unique IDs remain unchanged;
+normalized worker snapshots retain their identities. Default configuration
+construction now has a defined type and enabled flag rather than indeterminate
+values. Tests compare successive outputs with two independently identified stages
+and verify empty-ID migration and snapshot stability.
+
+Validation: focused Release 9/9 and ASan/UBSan 9/9 passed, including project-load,
+filter, plugin, stabilization and actual-app media smoke. The regular executable
+rebuilt and independently passed real MP4/native-AVS export smoke.

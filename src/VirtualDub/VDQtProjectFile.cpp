@@ -377,6 +377,10 @@ bool parseProcessing(const QJsonObject& object,
         result.filters.append(filter);
     }
 
+    // Assign legacy IDs in the configuration itself, so all later pipeline
+    // snapshots and saved projects refer to the same independent stages.
+    result.filters = VDQtFilterSystem::normalizeChainIds(std::move(result.filters));
+
     const QJsonArray audioFilters = object.value("audioFilters").toArray();
     if (audioFilters.size() > 256) {
         setError(errorMessage, QStringLiteral("The processing file contains too many audio filters."));

@@ -178,6 +178,35 @@ bool requiredEffects() {
     return check(filters.processFrameSequence(input, outputs) && outputs.size() == 1,
                  "creating a previously missing asset permits retry without stale negative cache");
 }
+
+bool uniqueIdentities() {
+    VDQtFilterSystem reference, migrated;
+    reference.addFilter(VDFilterType::MotionBlur);
+    reference.addFilter(VDFilterType::MotionBlur);
+    auto chain = reference.getActiveChain();
+    const QString preserved = chain.first().id;
+    chain.last().id = preserved;
+    migrated.replaceActiveChain(chain);
+    QImage input(17, 9, QImage::Format_RGB888);
+    for (int frame = 0; frame < 4; ++frame) {
+        input.fill(QColor(frame * 60, frame * 60, frame * 60));
+        if (!check(migrated.processFrame(input, {frame, frame / 25.0, 25})
+                   == reference.processFrame(input, {frame, frame / 25.0, 25}),
+                   "duplicate serialized IDs must not share temporal history")) return false;
+    }
+    const auto normalized = migrated.getActiveChain();
+    if (!check(normalized.first().id == preserved && normalized.last().id != preserved
+               && !normalized.last().id.isEmpty(), "migration preserves the first valid identity")) return false;
+    migrated.replaceActiveChainTransient(normalized);
+    if (!check(migrated.getActiveChain().last().id == normalized.last().id,
+               "normalized identities remain stable across worker snapshots")) return false;
+    chain.first().id.clear();
+    chain.last().id.clear();
+    migrated.replaceActiveChainTransient(chain);
+    return check(!migrated.getActiveChain().first().id.isEmpty()
+                 && migrated.getActiveChain().first().id != migrated.getActiveChain().last().id,
+                 "empty legacy IDs are assigned distinct identities");
+}
 }
 
 int main(int argc, char **argv) {
@@ -187,5 +216,7 @@ int main(int argc, char **argv) {
     if (args.contains("layout")) return rotatedLayout() ? 0 : 1;
     if (args.contains("failure")) return requiredEffects() ? 0 : 1;
     if (args.contains("sequence")) return expandedSequence() ? 0 : 1;
-    return fieldHistory() && rotatedLayout() && requiredEffects() && expandedSequence() ? 0 : 1;
+    if (args.contains("identity")) return uniqueIdentities() ? 0 : 1;
+    return fieldHistory() && rotatedLayout() && requiredEffects() && expandedSequence()
+        && uniqueIdentities() ? 0 : 1;
 }
