@@ -234,6 +234,14 @@ the valid input but clears stale output and shows the error in the status bar;
 export/server callers propagate it and do not publish partial output. Missing
 image reads are not cached, so restoring an asset allows a retry.
 
+Transient chain replacement resets temporal history and private plugin runtimes,
+but retains immutable parameter-keyed six-axis tables (at most eight). Asset
+images are pipeline-local and bounded by 64 entries / 64 MiB of decoded pixels;
+larger valid images are drawn without retention. Each use checks canonical path,
+size and modification time before reusing an image. This catches ordinary edits,
+replacement and deletion, not content changes that preserve all that metadata.
+Clear and persistent chain replacement release derived caches as well as history.
+
 `VDQtFilterContextForFrame()` is the common input clock contract. Filter position
 and time refer to the edited timeline; separate source fields identify the decoded
 picture. Masked ranges hold a picture while their underlying frame durations keep

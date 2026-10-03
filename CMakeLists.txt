@@ -268,6 +268,13 @@ if (BUILD_TESTING)
     set_tests_properties(avs_pixel_format_tests PROPERTIES
         LABELS "decoder;avs;precision;contracts" TIMEOUT 120)
 
+    add_executable(filter_cache_tests tests/test_filter_cache.cpp)
+    target_link_libraries(filter_cache_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(filter_cache_tests)
+    add_test(NAME filter_cache_tests COMMAND filter_cache_tests)
+    set_tests_properties(filter_cache_tests PROPERTIES
+        LABELS "filters;cache;performance;contracts" TIMEOUT 60)
+
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp
         src/VirtualDub/VDQtTimeline.cpp)

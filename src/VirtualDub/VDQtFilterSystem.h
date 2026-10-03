@@ -178,6 +178,14 @@ public:
     VDFilterTimingInfo getTimingInfo() const;
     const VDFilterProcessingError& processingError() const { return mProcessingError; }
     QString lastError() const { return mProcessingError.text(); }
+    // Lightweight diagnostics for regression/resource checks. Like processing,
+    // call only on the thread that owns this private pipeline.
+    struct CacheStatistics {
+        qsizetype sixAxisEntries = 0;
+        qsizetype assetEntries = 0;
+        qsizetype assetBytes = 0;
+    };
+    CacheStatistics cacheStatistics() const;
 
 private:
     QImage failProcessing(const QString& message, const VDFilterInstance *filter = nullptr);
@@ -201,7 +209,13 @@ private:
     // Expensive derived data are cached by parameter/asset key and reused
     // across frames. They are intentionally local to this pipeline instance.
     QHash<QString, QByteArray> mSixAxisLutCache;
-    QHash<QString, QImage> mAssetCache;
+    struct CachedAsset {
+        QImage image;
+        QString canonicalPath;
+        qint64 fileSize = -1;
+        qint64 modifiedMs = -1;
+    };
+    QHash<QString, CachedAsset> mAssetCache;
     QHash<QString, TemporalState> mTemporalStates;
 };
 

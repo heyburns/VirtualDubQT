@@ -82,8 +82,10 @@ Remaining execution sequence
 [x] M07: timed capture stops independently of preview output (hardware verification pending).
 [ ] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
 [ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.
-[ ] P04/P06/P07/P10/P11: measured filter/cache/display/log/buffer optimizations.
-    Source-owned Close caches and offline audio-device avoidance are already fixed.
+[x] P10: source-owned Close cleanup and bounded, metadata-checked bitmap caches.
+[x] P04 cache substep: reuse immutable six-axis tables across preview restarts.
+[ ] P04/P06/P07/P11: remaining measured filter/display/log/buffer optimizations.
+    Offline audio-device avoidance is already fixed; full playback gains are not implied.
 [ ] Progressive MP4/AVS -> ProRes slowdown: representative repeated-cycle profiling;
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
 [ ] M19/C07: correct existing resampling/temporal/warp choices and geometry predictions.

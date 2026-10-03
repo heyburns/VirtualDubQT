@@ -22,11 +22,16 @@
 #include <utility>
 #include <QDebug>
 #include <QSet>
+#include <QFileInfo>
+#include <QDateTime>
+#include <QImageReader>
 
 namespace {
 
 constexpr int kMaxSequencedBobFilters = 6;
 constexpr qint64 kParallelFilterPixelThreshold = 256 * 1024;
+constexpr qsizetype kMaximumAssetBytes = qsizetype{64} * 1024 * 1024;
+constexpr qsizetype kMaximumAssetEntries = 64;
 
 // Split independent rows across the global Qt thread pool only when the image
 // is large enough to repay task scheduling. Callers must capture disjoint output
@@ -152,6 +157,14 @@ void VDQtFilterSystem::forgetRuntimeInstances() {
     }
 }
 
+VDQtFilterSystem::CacheStatistics VDQtFilterSystem::cacheStatistics() const {
+    CacheStatistics result;
+    result.sixAxisEntries = mSixAxisLutCache.size();
+    result.assetEntries = mAssetCache.size();
+    for (const auto& asset : std::as_const(mAssetCache)) result.assetBytes += asset.image.sizeInBytes();
+    return result;
+}
+
 void VDQtFilterSystem::clearFilters() {
     // A persistent-chain change invalidates plugin instances and every cache;
     // those objects may contain state tied to an entry that no longer exists.
@@ -190,7 +203,6 @@ void VDQtFilterSystem::replaceActiveChainTransient(
     // numeric preview parameter should not reload unchanged logo files.
     forgetRuntimeInstances();
     mActiveChain = normalizeChainIds(chain);
-    mSixAxisLutCache.clear();
     mTemporalStates.clear();
 }
 
@@ -567,7 +579,8 @@ void VDQtFilterSystem::setFilterEnabled(int index, bool enabled) {
 void VDQtFilterSystem::updateFilterParams(int index, const QMap<QString, double>& params) {
     if (index >= 0 && index < mActiveChain.size()) {
         mActiveChain[index].params = params;
-        mSixAxisLutCache.clear();
+        // Lookup tables are immutable and keyed by ALL parameter values. Keep
+        // recent keys for slider changes/restarts; insertion bounds the cache.
         mTemporalStates.clear();
     }
 }
@@ -1346,14 +1359,47 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const QString path = filter.stringParams.value("path");
             if (path.isEmpty())
                 return failProcessing(QStringLiteral("Choose an image for the enabled logo filter."), &filter);
-            auto asset = mAssetCache.find(path);
-            if (asset == mAssetCache.end()) {
-                QImage loaded(path);
-                if (loaded.isNull())
-                    return failProcessing(QString("Could not load the required image: %1").arg(path), &filter);
-                // Do not retain failed reads: the user may restore the asset
-                // and retry without replacing the chain or restarting.
-                asset = mAssetCache.insert(path, loaded);
+            const QFileInfo fileInfo(path);
+            const QString cacheKey = fileInfo.absoluteFilePath();
+            const QString canonical = fileInfo.canonicalFilePath();
+            const qint64 fileSize = fileInfo.size();
+            const qint64 modified = fileInfo.lastModified().toMSecsSinceEpoch();
+            const auto asset = mAssetCache.constFind(cacheKey);
+            QImage logo;
+            if (fileInfo.isFile() && asset != mAssetCache.cend()
+                && asset->canonicalPath == canonical && asset->fileSize == fileSize
+                && asset->modifiedMs == modified) {
+                logo = asset->image;
+            } else {
+                // The cache is reusable, not a substitute for the required
+                // file. Drop stale/missing entries so errors and restored files
+                // are observable without replacing the chain.
+                mAssetCache.remove(cacheKey);
+                QImageReader reader(cacheKey);
+                const QSize size = reader.size();
+                if (size.isValid() && (size.width() > 32768 || size.height() > 32768
+                    || static_cast<long double>(size.width()) * size.height() * 8
+                        > 512.0L * 1024 * 1024))
+                    return failProcessing(QStringLiteral("The required logo exceeds the filter image allocation budget."), &filter);
+                logo = reader.read();
+                if (logo.isNull())
+                    return failProcessing(QString("Could not load the required image: %1 (%2)")
+                        .arg(path, reader.errorString()), &filter);
+                // Larger valid images can be drawn, but are not retained. A
+                // chain can visit many filenames over a session; cap bytes AND
+                // entries instead of retaining each decoded bitmap forever.
+                const qsizetype bytes = logo.sizeInBytes();
+                if (bytes <= kMaximumAssetBytes) {
+                    qsizetype retained = cacheStatistics().assetBytes;
+                    while (!mAssetCache.isEmpty()
+                        && (mAssetCache.size() >= kMaximumAssetEntries
+                            || retained + bytes > kMaximumAssetBytes)) {
+                        auto victim = mAssetCache.begin();
+                        retained -= victim->image.sizeInBytes();
+                        mAssetCache.erase(victim);
+                    }
+                    mAssetCache.insert(cacheKey, CachedAsset{logo, canonical, fileSize, modified});
+                }
             }
             {
                 QPainter painter(&result);
@@ -1361,7 +1407,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     filter.params.value("opacity", 1.0), 0.0, 1.0));
                 painter.drawImage(
                     static_cast<int>(filter.params.value("x", 0)),
-                    static_cast<int>(filter.params.value("y", 0)), *asset);
+                    static_cast<int>(filter.params.value("y", 0)), logo);
             }
             break;
         }
@@ -1759,11 +1805,12 @@ QImage VDQtFilterSystem::processFilterForPhase(
             constexpr int gridSize = 33;
             constexpr int gridStrideG = gridSize * 3;
             constexpr int gridStrideR = gridSize * gridSize * 3;
-            auto cacheIt = mSixAxisLutCache.find(lutKey);
-            if (cacheIt == mSixAxisLutCache.end()) {
-                QByteArray lut(gridSize * gridSize * gridSize * 3,
-                               Qt::Uninitialized);
-                uchar *table = reinterpret_cast<uchar *>(lut.data());
+            // Retain a cheap implicitly shared value, not a hash iterator that
+            // insertion/eviction could invalidate. Its pixels outlive row tasks.
+            QByteArray lutBytes = mSixAxisLutCache.value(lutKey);
+            if (lutBytes.isEmpty()) {
+                lutBytes.resize(gridSize * gridSize * gridSize * 3);
+                uchar *table = reinterpret_cast<uchar *>(lutBytes.data());
                 parallelFor(gridSize,
                             static_cast<qint64>(gridSize) * gridSize * gridSize,
                             [&](int ri) {
@@ -1786,9 +1833,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 });
                 if (mSixAxisLutCache.size() >= 8)
                     mSixAxisLutCache.erase(mSixAxisLutCache.begin());
-                cacheIt = mSixAxisLutCache.insert(lutKey, std::move(lut));
+                mSixAxisLutCache.insert(lutKey, lutBytes);
             }
-            const uchar *lut = reinterpret_cast<const uchar *>(cacheIt.value().constData());
+            const uchar *lut = reinterpret_cast<const uchar *>(lutBytes.constData());
             uchar *resultBits = result.bits();
             const int resultStride = result.bytesPerLine();
             parallelFor(h, static_cast<qint64>(w) * h, [&](int y) {

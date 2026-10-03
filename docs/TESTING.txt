@@ -1113,3 +1113,24 @@ After the final strengthened checks, full Release 58/58 and ASan/UBSan 54/54
 passed. The rebuilt regular binary independently passed MP4/native-AVS smoke.
 Hardware audio/capture, arbitrary plugins and the user's unreproduced progressive
 ProRes slowdown remain separate gates; leak-sanitizer coverage is not claimed.
+
+Reusable filter caches (P04 cache substep / P10)
+----------------------------------------------
+
+The new cache regression reproduced unnecessary six-axis LUT rebuilding on
+transient chain replacement, stale logos after replacement/deletion, and decoded
+bitmap retention beyond 64 MiB. Immutable complete-parameter LUT keys now survive
+preview restarts (eight-table cap), while temporal history and private plugins
+still reset. Logo retention has both a 64-entry and 64-MiB pixel budget; required
+files are checked by canonical path, size and millisecond modification time.
+Files changed while preserving every checked property cannot be distinguished
+without an additional content/fingerprint policy and are not claimed here.
+
+Checks cover unchanged pixels, changed parameters against a fresh pipeline,
+history reset, same-size timestamp changes, deletion/recovery, many large and
+many tiny assets, and Clear releasing caches. A 128x96 synthetic benchmark of
+200 same-chain restart/process cycles measured 265 ms before and 36 ms after.
+This measures restart overhead, not a sevenfold overall playback improvement.
+Full Release 59/59 and ASan/UBSan 55/55 passed, plus the regular application's
+independent MP4/native-AVS decode/export smoke. Hardware/plugin and progressive
+ProRes slowdown coverage remains as described above.
