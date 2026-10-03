@@ -70,7 +70,8 @@ Remaining execution sequence
 [x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
 [ ] M21: safe numeric conversion throughout execution, saved inputs and runtime calculations.
     Project/job positions, segments and raw offsets now reject unsafe casts,
-    fractions and wrong types before conversion; script execution is still open.
+    fractions and wrong types before conversion. Script integer domains now
+    preflight before execution; remaining packed-color/runtime math is still open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
 [ ] M07: timed capture stops independently of preview output (hardware verification pending).

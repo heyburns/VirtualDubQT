@@ -2765,6 +2765,16 @@ bool VDQtMainWindow::exportAutomationRawVideo(
 
 bool VDQtMainWindow::executeAutomationProgram(
     const VDQtScriptProgram& program, QString *errorMessage) {
+    // Reject invalid numeric domains across the inert program before any Open,
+    // export, selection or preference command can mutate the current session.
+    for (const auto& command : program.commands) {
+        QString numericError;
+        if (!VDQtScriptEngine::validateExecutionNumbers(command, &numericError)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Line %1 (%2): %3")
+                .arg(command.line).arg(command.name, numericError);
+            return false;
+        }
+    }
     mAutomationRunning = true;
     const auto automationDone = qScopeGuard([this] {
         mAutomationRunning = false;
@@ -2871,9 +2881,17 @@ bool VDQtMainWindow::executeAutomationProgram(
             return false;
         }
         VDFilterInstance& filter = processing.filters[index];
+        bool integersValid = true;
         const auto integer = [&](int argument) {
-            return static_cast<int>(values.value(argument).toLongLong());
+            qint64 checked = 0;
+            if (!VDQtScriptEngine::readInteger(values.value(argument),
+                    std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), &checked)) {
+                integersValid = false;
+                return 0;
+            }
+            return static_cast<int>(checked);
         };
+        const auto configure = [&]() -> bool {
         switch (filter.type) {
         case VDFilterType::Resize:
             if (values.size() >= 14) {
@@ -2978,8 +2996,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                     values.at(4).toULongLong());
                 filter.params[QStringLiteral("x")] = x1;
                 filter.params[QStringLiteral("y")] = y1;
-                filter.params[QStringLiteral("width")] = std::max(0, x2 - x1);
-                filter.params[QStringLiteral("height")] = std::max(0, y2 - y1);
+                filter.params[QStringLiteral("width")] = std::max<qint64>(0, qint64(x2) - x1);
+                filter.params[QStringLiteral("height")] = std::max<qint64>(0, qint64(y2) - y1);
                 filter.params[QStringLiteral("red")] = color & 0xffU;
                 filter.params[QStringLiteral("green")] = (color >> 8) & 0xffU;
                 filter.params[QStringLiteral("blue")] = (color >> 16) & 0xffU;
@@ -3012,7 +3030,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                 filter.params[QStringLiteral("width")] = integer(0);
                 filter.params[QStringLiteral("power")] = integer(1);
                 filter.params[QStringLiteral("radius")] =
-                    std::max(0, integer(0) + integer(1) - 1);
+                    std::max<qint64>(0, qint64(integer(0)) + integer(1) - 1);
                 return true;
             }
             break;
@@ -3080,6 +3098,13 @@ bool VDQtMainWindow::executeAutomationProgram(
         if (filterError) *filterError = QStringLiteral(
             "The filter's Config() signature is not compatible with this implementation.");
         return false;
+        };
+        const bool configured = configure();
+        if (!integersValid) {
+            if (filterError) *filterError = QStringLiteral("A filter integer argument is out of range or fractional.");
+            return false;
+        }
+        return configured;
     };
     const auto addAudioFilter = [&](const QString& requested,
                                     QString *filterError) -> bool {
@@ -3282,7 +3307,8 @@ bool VDQtMainWindow::executeAutomationProgram(
         } else if (name == QStringLiteral("audio.SetConversion")) {
             if (!requireArguments(command, 3, 5)) return fail(command, QStringLiteral("SetConversion requires sample rate, precision, and channels."));
             processing.audioCodec.sampleRate = static_cast<int>(command.arguments.at(0).toLongLong());
-            processing.audioCodec.bitDepth = std::max(1, static_cast<int>(command.arguments.at(1).toLongLong()));
+            const int bitDepth = static_cast<int>(command.arguments.at(1).toLongLong());
+            if (bitDepth != 0) processing.audioCodec.bitDepth = bitDepth;
             processing.audioCodec.channels = static_cast<int>(command.arguments.at(2).toLongLong());
         } else if (name == QStringLiteral("audio.SetCompressionWithHint")) {
             if (!requireArguments(command, 6, 9)) return fail(command, QStringLiteral("SetCompressionWithHint has an invalid argument list."));
@@ -3294,7 +3320,8 @@ bool VDQtMainWindow::executeAutomationProgram(
             else return fail(command, QStringLiteral("The Windows audio format tag has no native encoder mapping."));
             processing.audioCodec.sampleRate = static_cast<int>(command.arguments.at(1).toLongLong());
             processing.audioCodec.channels = static_cast<int>(command.arguments.at(2).toLongLong());
-            processing.audioCodec.bitDepth = std::max(1, static_cast<int>(command.arguments.at(3).toLongLong()));
+            const int bitDepth = static_cast<int>(command.arguments.at(3).toLongLong());
+            if (bitDepth != 0) processing.audioCodec.bitDepth = bitDepth;
             const qint64 bytesPerSecond = command.arguments.at(4).toLongLong();
             if (bytesPerSecond > 0)
                 processing.audioCodec.bitrateKbps = static_cast<int>(bytesPerSecond * 8 / 1000);
@@ -3339,9 +3366,10 @@ bool VDQtMainWindow::executeAutomationProgram(
                 QStringLiteral("^video\\.filters\\.instance\\[(\\d+)\\]\\.([A-Za-z_][A-Za-z0-9_.]*)$"));
             const auto match = expression.match(name);
             if (!match.hasMatch()) return fail(command, QStringLiteral("The filter-instance command is malformed."));
-            const int index = match.captured(1).toInt();
+            bool indexOk = false;
+            const int index = match.captured(1).toInt(&indexOk);
             const QString method = match.captured(2);
-            if (index < 0 || index >= processing.filters.size())
+            if (!indexOk || index < 0 || index >= processing.filters.size())
                 return fail(command, QStringLiteral("The video filter index is out of range."));
             if (method == QStringLiteral("SetEnabled")) {
                 if (!requireArguments(command, 1, 1)) return fail(command, QStringLiteral("SetEnabled requires one value."));
@@ -3354,8 +3382,6 @@ bool VDQtMainWindow::executeAutomationProgram(
             } else if (method == QStringLiteral("Config")) {
                 QString filterError;
                 if (!configureVideoFilter(index, command.arguments, &filterError))
-                    return fail(command, filterError);
-                if (!VDQtValidateFilter(processing.filters.at(index), &filterError))
                     return fail(command, filterError);
             } else if (method == QStringLiteral("SetClipping")) {
                 if (!requireArguments(command, 4, 5))
@@ -3444,6 +3470,10 @@ bool VDQtMainWindow::executeAutomationProgram(
             } else {
                 return fail(command, QStringLiteral("This filter-instance operation is not implemented."));
             }
+            QString filterError;
+            if (method != QStringLiteral("Remove")
+                && !VDQtValidateFilter(processing.filters.at(index), &filterError))
+                return fail(command, filterError);
         } else if (name == QStringLiteral("audio.filters.Clear")) {
             processing.audioFilters.clear();
             audioFilterConnections.clear();
@@ -3475,9 +3505,10 @@ bool VDQtMainWindow::executeAutomationProgram(
             if (!match.hasMatch())
                 return fail(command, QStringLiteral(
                     "The audio filter-instance command is malformed."));
-            const int index = match.captured(1).toInt();
+            bool indexOk = false;
+            const int index = match.captured(1).toInt(&indexOk);
             const QString method = match.captured(2);
-            if (index < 0 || index >= processing.audioFilters.size())
+            if (!indexOk || index < 0 || index >= processing.audioFilters.size())
                 return fail(command, QStringLiteral(
                     "The audio filter index is out of range."));
             if (method == QStringLiteral("SetInt")
@@ -3509,7 +3540,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                 if (!configureAudioFilter(
                         index, static_cast<int>(
                             command.arguments.at(0).toLongLong()),
-                        parameter, &filterError))
+                        parameter, &filterError)
+                    || !VDQtValidateAudioFilters(processing.audioFilters, &filterError))
                     return fail(command, filterError);
             } else if (method == QStringLiteral("SetString")
                        || method == QStringLiteral("SetRaw")

@@ -30,6 +30,12 @@ public:
                           const QString& baseDirectory,
                           VDQtScriptProgram *program,
                           QString *errorMessage = nullptr);
+    // Execution is a separate type/domain boundary: valid floating expressions
+    // are not necessarily valid frame numbers, flags, rates or ABI integers.
+    static bool readInteger(const QVariant& value, qint64 minimum, qint64 maximum,
+                            qint64 *result = nullptr);
+    static bool validateExecutionNumbers(const VDQtScriptCommand& command,
+                                        QString *errorMessage = nullptr);
 };
 
 #endif // VDQTSCRIPTENGINE_H

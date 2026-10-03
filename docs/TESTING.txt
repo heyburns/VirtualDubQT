@@ -963,6 +963,29 @@ including project, queue, stabilization and actual-app smoke. The rebuilt
 regular binary independently passed MP4/native-AVS decode/export smoke.
 Script execution and runtime numeric calculations remain separate M21 work.
 
+Script execution numeric domains (M21 substep)
+---------------------------------------------
+
+The new real-controller regression failed before repair: SetMode(4294967299)
+wrapped to valid full processing mode 3. Numeric command domains are now checked
+on the inert program before execution; fractional integer operands cannot be
+rounded by QVariant coercion. Frame rates, selections, indices, bit-rate math,
+conversion settings and image/segmented export integers have checked limits.
+Per-filter integer Config operands are checked before narrowing; Fill differences
+and Blur radius sums use wide arithmetic. Filter metadata and audio parameters
+are validated immediately after configuration. Huge literal filter indices no
+longer fall back to index zero. Zero audio precision means keep the existing
+automatic/default precision, not manufacture unsupported one-bit PCM.
+
+Tests reject wrapped modes/rates, fractions, huge dimensions/indices, excessive
+byte rates, overflowing rectangle inputs and unsafe audio exponents. Valid
+uint32 colors, automatic audio conversion, rational rates and unused legacy
+64-bit audio fields still execute. Focused numeric/parser/parity/media tests
+passed Release 6/6 and ASan/UBSan 6/6; related controller/audio/filter tests
+passed another 5/5 in each configuration. The rebuilt regular binary passed
+MP4/native-AVS decode/export smoke. Remaining packed-color and runtime numeric
+edge cases are still tracked, not declared universally safe by these tests.
+
 Batch analysis filename preservation
 ------------------------------------
 

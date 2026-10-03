@@ -36,7 +36,13 @@ struct ScriptBudget {
 };
 
 qlonglong integerValue(const QVariant& value, bool *ok) {
-    if (value.typeId() != QMetaType::Double) return value.toLongLong(ok);
+    if (value.typeId() == QMetaType::ULongLong
+        && value.toULongLong() > static_cast<qulonglong>(std::numeric_limits<qlonglong>::max())) {
+        *ok = false;
+        return 0;
+    }
+    if (value.typeId() != QMetaType::Double && value.typeId() != QMetaType::Float)
+        return value.toLongLong(ok);
     const double number = value.toDouble();
     const long double extended = number;
     *ok = std::isfinite(number) && std::trunc(number) == number
@@ -652,6 +658,124 @@ bool splitStatements(const QString& text, QList<Statement> *statements,
 
 // parseFile only supplies bytes/base-directory; parseText contains all syntax,
 // resource-limit, variable-assignment, and command-normalization logic.
+bool VDQtScriptEngine::readInteger(const QVariant& value, qint64 minimum,
+                                   qint64 maximum, qint64 *result) {
+    if (!value.isValid() || value.isNull() || value.typeId() == QMetaType::QString) return false;
+    bool ok = false;
+    const qint64 integer = integerValue(value, &ok);
+    if (!ok || integer < minimum || integer > maximum) return false;
+    if (result) *result = integer;
+    return true;
+}
+
+bool VDQtScriptEngine::validateExecutionNumbers(const VDQtScriptCommand& command,
+                                               QString *errorMessage) {
+    constexpr qint64 intMin = std::numeric_limits<int>::min();
+    constexpr qint64 intMax = std::numeric_limits<int>::max();
+    constexpr qint64 uintMax = std::numeric_limits<quint32>::max();
+    const auto& args = command.arguments;
+    const QString& name = command.name;
+    const auto fail = [&](int index) {
+        setError(errorMessage, QStringLiteral("Argument %1 has an invalid numeric type or range.").arg(index + 1));
+        return false;
+    };
+    // Missing arguments remain the executor's signature error; present values
+    // must not silently round, wrap, or become zero through QVariant coercion.
+    const auto integer = [&](int index, qint64 minimum = std::numeric_limits<int>::min(),
+                             qint64 maximum = std::numeric_limits<int>::max()) {
+        return index >= args.size() || readInteger(args.at(index), minimum, maximum) || fail(index);
+    };
+    const auto integers = [&](int first, qint64 minimum = std::numeric_limits<int>::min(),
+                              qint64 maximum = std::numeric_limits<int>::max()) {
+        for (int index = first; index < args.size(); ++index)
+            if (!integer(index, minimum, maximum)) return false;
+        return true;
+    };
+    const auto real = [&](int index, double minimum, double maximum) {
+        if (index >= args.size()) return true;
+        bool ok = false;
+        const double value = args.at(index).toDouble(&ok);
+        return (args.at(index).typeId() != QMetaType::QString && ok
+                && std::isfinite(value) && value >= minimum && value <= maximum) || fail(index);
+    };
+    if (errorMessage) errorMessage->clear();
+    const bool videoInstance = name.startsWith(QStringLiteral("video.filters.instance["));
+    const bool audioInstance = name.startsWith(QStringLiteral("audio.filters.instance["));
+    if (videoInstance || audioInstance) {
+        const int start = name.indexOf('[') + 1, end = name.indexOf(']', start);
+        bool ok = false;
+        name.mid(start, end - start).toInt(&ok);
+        if (!ok) {
+            setError(errorMessage, QStringLiteral("The filter index cannot be represented."));
+            return false;
+        }
+    }
+    if (videoInstance && name.endsWith(QStringLiteral(".Config"))) {
+        // Per-filter integer signatures are checked by configureVideoFilter.
+        // This outer bound protects width rounding and packed uint32 colors
+        // while retaining floating sizes, path strings and interpolation names.
+        for (int index = 0; index < args.size(); ++index)
+            if (args.at(index).typeId() != QMetaType::QString
+                && !real(index, -double(uintMax), double(uintMax))) return false;
+    } else if (audioInstance && (name.endsWith(".SetInt") || name.endsWith(".SetLong") || name.endsWith(".SetDouble"))) {
+        if (!integer(0, 0, 65535)) return false;
+        if (args.size() == 3) return integer(1, intMin, uintMax) && integer(2, intMin, uintMax);
+        if (name.endsWith(".SetDouble"))
+            return real(1, std::numeric_limits<double>::lowest(), std::numeric_limits<double>::max());
+        if (name.endsWith(".SetLong"))
+            return integer(1, std::numeric_limits<qint64>::min(), std::numeric_limits<qint64>::max());
+        return integer(1);
+    } else if (videoInstance && name.endsWith(".OpacityCurve.AddPoint")) {
+        return real(0, 0, double(intMax)) && real(1, 0, 1) && integer(2, 0, 1);
+    } else if (videoInstance && (name.endsWith(".SetClipping") || name.endsWith(".SetOpacityClipping"))) {
+        for (int index = 0; index < std::min<qsizetype>(4, args.size()); ++index)
+            if (!integer(index, 0, 32768)) return false;
+        return integer(4, 0, 1);
+    } else if (name == "video.SetMode") return integer(0, 0, 3);
+    else if (name == "audio.SetMode") return integer(0, 0, 1);
+    else if (name == "video.SetFrameRate2" || name == "video.SetTargetFrameRate") {
+        const bool target = name == "video.SetTargetFrameRate";
+        if (!integer(0, target ? 1 : 0, intMax) || !integer(1, target ? 1 : 0, intMax)
+            || !integer(2, 1, 1000000)) return false;
+        if (args.size() >= 2 && args.at(1).toLongLong() > 0
+            && args.at(0).toDouble() / args.at(1).toLongLong() > 10000.0) return fail(0);
+    } else if (name == "video.SetCompression") {
+        if (!integer(0, 0, uintMax)) return false;
+        for (int index = 1; index < args.size(); ++index)
+            if (!integer(index, 0, index == 3 ? 125000000 : intMax)) return false;
+    } else if (name == "audio.SetConversion" || name == "audio.SetCompressionWithHint") {
+        const int offset = name == "audio.SetConversion" ? 0 : 1;
+        if (offset && !integer(0, 0, 65535)) return false;
+        if (!integer(offset, 0, 192000)) return false;
+        const int bitsIndex = offset ? 3 : 1, channelsIndex = 2;
+        if (!integer(bitsIndex, 0, 32) || !integer(channelsIndex, 0, 8)) return false;
+        if (args.size() > bitsIndex) {
+            const auto bits = args.at(bitsIndex).toLongLong();
+            if (bits != 0 && bits != 8 && bits != 16 && bits != 24 && bits != 32) return fail(bitsIndex);
+        }
+        if (offset && !integer(4, 0, 125000000)) return false;
+    } else if (name == "audio.SetSource") {
+        return (args.isEmpty() || args.first().typeId() == QMetaType::QString || integer(0, 0, 1))
+            && integer(1, -1, intMax);
+    } else if (name.startsWith("subset.Add")) {
+        if (!integer(0, 0, intMax) || !integer(1, 1, intMax)) return false;
+        if (args.size() >= 2 && args.at(0).toLongLong() > intMax - args.at(1).toLongLong()) return fail(1);
+    } else if (name == "video.SetRangeFrames" || name == "video.SetZoomFrames"
+               || (videoInstance && name.endsWith(".SetRangeFrames"))) {
+        return integer(0, 0, intMax) && integer(1, videoInstance ? -1 : 0, intMax);
+    } else if (name == "SaveAnimatedGIF" || name == "SaveAnimatedPNG"
+               || name == "SaveSegmentedAVI" || name == "SaveImageSequence" || name == "SaveImageSequence2") {
+        return integers(name.startsWith("SaveImage") ? 2 : 1, 0, intMax);
+    } else if (name == "SetPreferencesInt" || name == "SetPreferencesBool") return integer(1);
+    else if (name == "audio.filters.Connect" || name == "video.AddMarker" || name == "video.SetIVTC"
+             || name == "video.SetSmartRendering" || name == "video.SetPreserveEmptyFrames"
+             || name == "audio.EnableFilterGraph" || name == "audio.SetVolume"
+             || name == "video.SetInputFormat" || name == "video.SetOutputFormat"
+             || name == "video.SetInputMatrix" || name == "video.SetOutputMatrix"
+             || ((videoInstance || audioInstance) && name.endsWith(".SetEnabled"))) return integers(0);
+    return true;
+}
+
 bool VDQtScriptEngine::parseFile(const QString& path,
                                  VDQtScriptProgram *program,
                                  QString *errorMessage) {

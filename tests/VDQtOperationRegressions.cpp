@@ -1597,6 +1597,48 @@ bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool scriptIntegerInputs(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    QString error;
+    for (const auto& invalid : {
+        QString("VirtualDub.video.SetMode(4294967299);"),
+        QString("VirtualDub.audio.SetMode(4294967297);"),
+        QString("VirtualDub.video.SetMode(3.5);"),
+        QString("VirtualDub.audio.SetConversion(4295015296,16,2);"),
+        QString("VirtualDub.video.SetFrameRate2(1e100,1,1);"),
+        QString("VirtualDub.video.SetCompression(0x34363248,0,0,9223372036854775807);"),
+        QString("VirtualDub.audio.SetCompressionWithHint(1,48000,2,16,9223372036854775807,4);"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+                "VirtualDub.video.filters.instance[0].Config(1e100,24,\"point\");"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"fill\");"
+                "VirtualDub.video.filters.instance[0].Config(2147483647,0,-2147483648,10,0);"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+                "VirtualDub.video.filters.instance[9999999999999999999999].SetEnabled(0);"),
+        QString("VirtualDub.video.SetRangeFrames(0,1e100);"),
+        QString("VirtualDub.SaveImageSequence(\"bad\",\".png\",4294967298,3);"),
+        QString("VirtualDub.audio.filters.Clear();VirtualDub.audio.filters.Add(\"gain\");"
+                "VirtualDub.audio.filters.instance[0].SetDouble(0,1e100);"),
+        QString("VirtualDub.audio.filters.Clear();VirtualDub.audio.filters.Add(\"stretch\");"
+                "VirtualDub.audio.filters.instance[0].SetDouble(0,1e-300);")}) {
+        if (!check(!window.runAutomationText(invalid, fixtures.directory.path(), &error) && !error.isEmpty(),
+                   "unsafe script numbers cannot wrap into a valid command")) {
+            std::cerr << invalid.toStdString() << '\n'; return false;
+        }
+    }
+    return check(window.runAutomationText(
+        "VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+        "VirtualDub.video.filters.instance[0].Config(64,48,\"point\",80,60,0xFFFFFFFF);"
+        "VirtualDub.audio.SetConversion(0,0,0);"
+        "VirtualDub.audio.filters.Clear();VirtualDub.audio.filters.Add(\"gain\");"
+        "VirtualDub.audio.filters.instance[0].SetLong(2,1234567890123);"
+        "VirtualDub.video.SetFrameRate2(30000,1001,1);",
+        fixtures.directory.path(), &error),
+        "legitimate uint32 colors, auto conversion and unused 64-bit audio settings still execute");
+}
+
 bool sourceProtection(VDQtTestFixtures& fixtures) {
     const QString directory = fixtures.directory.path();
     const QString list = fixtures.directory.filePath("list.txt");
@@ -1714,6 +1756,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "edit_preview") return editPreview(fixtures);
     if (scenario == "project_validation") return projectValidation(fixtures);
     if (scenario == "numeric_json") return jsonIntegerInputs(fixtures);
+    if (scenario == "numeric_script") return scriptIntegerInputs(fixtures);
     if (scenario == "append_state") return appendState(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
