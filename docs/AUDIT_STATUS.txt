@@ -30,8 +30,9 @@ Remaining execution sequence
 [x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
 [x] H05: exact random frame identity, including variable-rate and duplicate-PTS media.
 [x] H04: packet/frame cancellation of obsolete seeks and nearby verified anchors.
-    The first uncached random seek can require one full index; further refinement
-    should retain cancelled indexing progress. Individual AVS/I/O calls are not preemptible.
+    The first uncached random seek can require one full index; replacement requests
+    resume cancelled indexing when the decoder still continues the verified prefix.
+    Individual AVS/I/O calls are not preemptible.
 [ ] M16: share verified indexes with editor/export/audio and keyframe controls;
     correct variable-rate jump-to-time and edited timeline time.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy

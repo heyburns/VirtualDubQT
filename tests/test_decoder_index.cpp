@@ -68,8 +68,11 @@ bool sequentialScaling(VDQtTestFixtures& fixtures) {
                && decoder.getDecodedFrameCount() < 200 && !decoder.hasCompleteFrameIndex()
                && !decoder.reachedEndOfStream(),
                "obsolete cold seek cancels indexing promptly without false EOF/completeness")) return false;
-    if (!check(!decoder.getFrameImage(0).isNull()
-               && decoder.ensureFrameIndex().totalFrames == frames,
+    decoder.resetPerformanceCounters();
+    if (!check(decoder.ensureFrameIndex().totalFrames == frames
+               && decoder.getDecodedFrameCount() < frames,
+               "a replacement index request resumes verified work instead of restarting")) return false;
+    if (!check(!decoder.getFrameImage(0).isNull(),
                "cancelled cold seek leaves the decoder reusable")) return false;
     decoder.clearCache();
     decoder.resetPerformanceCounters();

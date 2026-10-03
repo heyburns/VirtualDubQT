@@ -1688,7 +1688,7 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
             result.cancelled = true;
         return result;
     }
-    VDScanResult result = scanVideoStream(progressCallback, shouldContinue);
+    VDScanResult result = scanVideoStreamImpl(progressCallback, shouldContinue, true);
     if (!result.cancelled && result.errorMessage.isEmpty() && !hasCompleteFrameIndex()) {
         result.errorMessage = mLastError.isEmpty()
             ? QStringLiteral("Could not verify a complete presentation-order frame index.")
@@ -1700,6 +1700,12 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
     std::function<bool(int currentFrame, int totalFrames)> progressCallback,
     std::function<bool()> shouldContinue) {
+    return scanVideoStreamImpl(progressCallback, shouldContinue, false);
+}
+
+VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
+    const std::function<bool(int, int)>& progressCallback,
+    const std::function<bool()>& shouldContinue, bool resumeVerifiedPrefix) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     VDScanResult res;
     mDecodeCancelled = false;
@@ -1738,22 +1744,27 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
         return res;
     }
 
-    if (!resetDecoderToStart()) {
-        res.errorMessage = mLastError;
-        return res;
+    // Latest-request-wins scrubbing may abandon indexing many times. Keep the
+    // actual codec/demux position only when it still continues the verified
+    // prefix; never seek to an unproved timestamp to manufacture a continuation.
+    // Explicit health scans deliberately start fresh and inspect every frame.
+    const bool canResume = resumeVerifiedPrefix && mIndexTraversalContiguous
+        && !mLastDecodeReachedEof && !mFrameIndexComplete
+        && mPendingSeekTargetTimestamp == AV_NOPTS_VALUE
+        && mNextDecodeFrameIndex == mFrameIndex.size();
+    if (!canResume) {
+        if (!resetDecoderToStart()) {
+            res.errorMessage = mLastError;
+            return res;
+        }
+        mFrameIndex.clear();
+        mFrameIndexComplete = false;
+        mFrameTimestampLookup.clear();
+        mFrameTimestampLookupReady = false;
+        clearCache();
     }
 
-    // Rebuild a contiguous presentation-order index while scanning. This makes
-    // the decoded total exact and includes frames emitted only during decoder drain.
-    mFrameIndex.clear();
-    mFrameIndexComplete = false;
-    mFrameTimestampLookup.clear();
-    mFrameTimestampLookupReady = false;
-    mCurrentFrameIndex = -1;
-    mNextDecodeFrameIndex = 0;
-    clearCache();
-
-    int decodedCount = 0;
+    int decodedCount = mNextDecodeFrameIndex;
     for (;;) {
         int decodeErrors = 0;
         if (!decodeNextFrame(&decodeErrors, shouldContinue)) {
@@ -1791,9 +1802,13 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
         res.totalFrames = decodedCount;
     }
 
-    // Restore the interactive decoder to the beginning, retaining the timestamp index.
-    if (!resetDecoderToStart() && res.errorMessage.isEmpty()) res.errorMessage = mLastError;
-    clearCache();
+    // A cancelled indexing request leaves a valid resume point for its
+    // replacement. Health analysis and completed/failed indexing restore the
+    // normal interactive start state as before.
+    if (!res.cancelled || !resumeVerifiedPrefix) {
+        if (!resetDecoderToStart() && res.errorMessage.isEmpty()) res.errorMessage = mLastError;
+        clearCache();
+    }
 
     return res;
 }

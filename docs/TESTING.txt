@@ -547,3 +547,20 @@ consumers are follow-up work, not claimed resolved by this checkpoint.
 Validation: full Release 37/37 and sanitizer 33/33 passed; regular build/VirtualDubQt
 rebuilt and passed the maintained actual-application MP4/native-AVS export smoke.
 Physical-device and codec-suite exclusions apply.
+
+Cancelled index progress (H04 follow-up)
+---------------------------------------
+
+A separate regression failed because replacing a cancelled cold seek decoded all
+7,200 frames again. ensureFrameIndex now continues the actual codec/demux position
+when it still follows the verified prefix. It does not timestamp-seek to fabricate
+that continuation. Cancellation preserves pending packet state and prefix ordinal
+knowledge; discontinuities trigger a safe rebuild. Explicit health scans still
+inspect every frame from scratch, and completed indexing restores the interactive
+start position. Existing complete-index invalidation rules are unchanged.
+
+Validation: focused Release and sanitizer decoder, controller, sparse EOF, repeated
+export, stabilization, playback and actual-binary media checks passed 7/7 each.
+The regular binary rebuilt and passed the maintained MP4/native-AVS export smoke.
+This limits repeated work during cold
+scrubbing, not the unavoidable initial index cost for exact variable-rate ordinals.

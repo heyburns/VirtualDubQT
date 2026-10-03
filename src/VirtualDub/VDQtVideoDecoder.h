@@ -175,6 +175,9 @@ private:
     void updateFrameCountAtEndOfStream();
     void applyErrorMode();
     void cacheFrame(int frameIndex, const QImage& image);
+    VDScanResult scanVideoStreamImpl(
+        const std::function<bool(int, int)>& progressCallback,
+        const std::function<bool()>& shouldContinue, bool resumeVerifiedPrefix);
 
     // Public source metadata and last diagnostic.
     bool mIsOpen;
