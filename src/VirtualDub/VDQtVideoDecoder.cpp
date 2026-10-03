@@ -911,6 +911,8 @@ void VDQtVideoDecoder::close() {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     clearCache();
     mFrameIndex.clear();
+    mFrameTimestampLookup.clear();
+    mFrameTimestampLookupReady = false;
 
     if (mAvsClip) {
         avs_release_clip(mAvsClip);
@@ -990,6 +992,7 @@ void VDQtVideoDecoder::close() {
     mDiscardUntilKeyFrame = false;
     mSeekCount = 0;
     mDecodedFrameCount = 0;
+    mIndexLookupWorkCount = 0;
 }
 
 bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
@@ -1316,29 +1319,56 @@ bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors) {
     }
 }
 
-int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint) const {
+void VDQtVideoDecoder::registerIndexedTimestamp(int64_t timestamp, int frameIndex) {
+    if (timestamp == AV_NOPTS_VALUE) return;
+    auto& ordinals = mFrameTimestampLookup[timestamp];
+    // Prefix appends are naturally sorted; a previously unknown timestamp may
+    // instead be filled in during a revisit, requiring a sorted insertion.
+    const auto at = std::lower_bound(ordinals.begin(), ordinals.end(), frameIndex);
+    if (at == ordinals.end() || *at != frameIndex) ordinals.insert(at, frameIndex);
+}
+
+int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint) {
     if (timestamp == AV_NOPTS_VALUE || mFrameIndex.isEmpty()) return -1;
 
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
     hint = std::clamp(hint, 0, indexedCount - 1);
-    for (int distance = 0; distance < indexedCount; ++distance) {
-        const int after = hint + distance;
-        if (after < indexedCount && mFrameIndex[after].timestamp == timestamp) return after;
-        const int before = hint - distance;
-        if (distance && before >= 0 && mFrameIndex[before].timestamp == timestamp) return before;
+    if (!mFrameTimestampLookupReady) {
+        mFrameTimestampLookup.reserve(indexedCount);
+        for (int ordinal = 0; ordinal < indexedCount; ++ordinal) {
+            ++mIndexLookupWorkCount;
+            registerIndexedTimestamp(mFrameIndex[ordinal].timestamp, ordinal);
+        }
+        mFrameTimestampLookupReady = true;
     }
-    return -1;
+
+    ++mIndexLookupWorkCount;
+    const auto found = mFrameTimestampLookup.constFind(timestamp);
+    if (found == mFrameTimestampLookup.cend()) return -1;
+    const auto& ordinals = found.value();
+    const auto after = std::lower_bound(ordinals.cbegin(), ordinals.cend(), hint,
+        [this](int ordinal, int target) { ++mIndexLookupWorkCount; return ordinal < target; });
+    if (after == ordinals.cend()) return ordinals.back();
+    if (after == ordinals.cbegin()) return *after;
+    const int before = *(after - 1);
+    return hint - before < *after - hint ? before : *after;
 }
 
 int VDQtVideoDecoder::registerDecodedFrame() {
     int64_t timestamp = mFrame->best_effort_timestamp;
     if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
 
-    int frameIndex = mNextDecodeFrameIndex;
-    const int indexedMatch = findIndexedFrameByTimestamp(timestamp, mNextDecodeFrameIndex);
-    if (indexedMatch >= 0) frameIndex = indexedMatch;
-
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
+    int frameIndex = mNextDecodeFrameIndex;
+    const bool nextPrefixFrame = mIndexTraversalContiguous && frameIndex == indexedCount;
+    const bool expectedTimestamp = frameIndex >= 0 && frameIndex < indexedCount
+        && mFrameIndex[frameIndex].timestamp == timestamp;
+    // Known presentation order, not PTS uniqueness, establishes a new ordinal.
+    // Two sequential decoded frames with equal timestamps must remain distinct.
+    if (!nextPrefixFrame && !expectedTimestamp) {
+        const int indexedMatch = findIndexedFrameByTimestamp(timestamp, frameIndex);
+        if (indexedMatch >= 0) frameIndex = indexedMatch;
+    }
 
     if (frameIndex != mNextDecodeFrameIndex || frameIndex > indexedCount)
         mIndexTraversalContiguous = false;
@@ -1348,11 +1378,15 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     entry.duration = mFrame->duration;
     entry.keyFrame = (mFrame->flags & AV_FRAME_FLAG_KEY) != 0;
 
-    if (frameIndex == indexedCount) {
+    if (mIndexTraversalContiguous && frameIndex == indexedCount) {
         mFrameIndex.append(entry);
+        if (mFrameTimestampLookupReady) registerIndexedTimestamp(timestamp, frameIndex);
     } else if (frameIndex >= 0 && frameIndex < indexedCount) {
         FrameIndexEntry& indexedEntry = mFrameIndex[frameIndex];
-        if (indexedEntry.timestamp == AV_NOPTS_VALUE) indexedEntry.timestamp = entry.timestamp;
+        if (indexedEntry.timestamp == AV_NOPTS_VALUE) {
+            indexedEntry.timestamp = entry.timestamp;
+            if (mFrameTimestampLookupReady) registerIndexedTimestamp(timestamp, frameIndex);
+        }
         if (indexedEntry.duration <= 0) indexedEntry.duration = entry.duration;
         indexedEntry.keyFrame = indexedEntry.keyFrame || entry.keyFrame;
     }
@@ -1628,6 +1662,8 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
     // Rebuild a contiguous presentation-order index while scanning. This makes
     // the decoded total exact and includes frames emitted only during decoder drain.
     mFrameIndex.clear();
+    mFrameTimestampLookup.clear();
+    mFrameTimestampLookupReady = false;
     mCurrentFrameIndex = -1;
     mNextDecodeFrameIndex = 0;
     clearCache();

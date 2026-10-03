@@ -469,3 +469,27 @@ not available. Rebuilt Release/sanitizer/regular applications passed the media
 smoke; selected Release and sanitizer controller/script/parity/CLI checks passed
 5/5 each. The existing user's regular build was already Release, so this is not
 a claimed explanation or fix for progressive AVS/ProRes throughput loss.
+
+Sequential index growth and duplicate timestamps (P01)
+-----------------------------------------------------
+
+decoder_index_tests generates 7,200 tiny rawvideo frames and measures logical
+timestamp-lookup work rather than imposing a machine-specific speed threshold.
+Before repair, sequential traversal performed 51,832,800 lookup steps and failed
+the linear-work bound. It now performs zero such steps. Observed Release traversal
+time changed from 39 ms to 13-14 ms on this fixture; these tiny-frame observations
+do not predict the user's HD preview/export speed.
+
+The duplicate-PTS fixture failed before repair: 48 distinct decoded pictures were
+collapsed to roughly half that many indexed ordinals. It now retains all 48, with
+each sequential picture compared byte-for-byte to an independent FFmpeg RGB decode
+of lossless BGR input. Additional sparse-then-sequential seeks verify that an
+approximately labeled picture cannot poison the verified prefix. Timestamp lookup
+for genuine reconciliation is lazy and hashed, with sorted duplicate-ordinal lists;
+the auxiliary storage clears with its source or a deliberate index rebuild.
+
+Validation: full Release 36/36 and sanitizer 32/32 passed, including the new index
+and real-binary media regressions. The rebuilt regular binary also passed the
+maintained MP4/native-AVS export smoke. Exact random VFR/duplicate-PTS seeking,
+index sharing/reuse and hardware checks remain separate work. The reported
+progressive AVS/ProRes slowdown remains unreproduced and is not closed here.

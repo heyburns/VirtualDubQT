@@ -8,6 +8,7 @@
 #include <QByteArray>
 #include <QImage>
 #include <QCache>
+#include <QHash>
 #include <QMutex>
 #include <QVector>
 #include <functional>
@@ -101,7 +102,10 @@ public:
     qsizetype getCachedFrameCostKiB() const { return mFrameCache.totalCost(); }
     quint64 getSeekCount() const { return mSeekCount; }
     quint64 getDecodedFrameCount() const { return mDecodedFrameCount; }
-    void resetPerformanceCounters() { mSeekCount = 0; mDecodedFrameCount = 0; }
+    quint64 getIndexLookupWorkCount() const { return mIndexLookupWorkCount; }
+    void resetPerformanceCounters() {
+        mSeekCount = 0; mDecodedFrameCount = 0; mIndexLookupWorkCount = 0;
+    }
     static qsizetype getFrameCacheBudgetKiB();
     static void setFrameCacheBudgetMiB(int budgetMiB);
     static int getDecoderThreadCount();
@@ -152,7 +156,8 @@ private:
     bool decodeNextFrame(int *decodeErrors = nullptr);
     QImage convertDecodedFrameToImage();
     int registerDecodedFrame();
-    int findIndexedFrameByTimestamp(int64_t timestamp, int hint) const;
+    int findIndexedFrameByTimestamp(int64_t timestamp, int hint);
+    void registerIndexedTimestamp(int64_t timestamp, int frameIndex);
     void updateFrameCountAtEndOfStream();
     void applyErrorMode();
     void cacheFrame(int frameIndex, const QImage& image);
@@ -194,6 +199,7 @@ private:
     bool mDiscardUntilKeyFrame;
     quint64 mSeekCount;
     quint64 mDecodedFrameCount;
+    quint64 mIndexLookupWorkCount = 0;
     // swscale configuration and destination image format.
     AVPixelFormat mSwsSourceFormat;
     AVPixelFormat mSwsDestinationFormat;
@@ -224,6 +230,11 @@ private:
     // QCache cost is KiB, not entry count; this bounds memory for large frames.
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
+    // Built only when a seek needs timestamp reconciliation. Sequential index
+    // growth requires neither an all-prefix search nor this additional storage.
+    // A timestamp can belong to several distinct presentation ordinals.
+    QHash<qint64, QVector<int>> mFrameTimestampLookup;
+    bool mFrameTimestampLookupReady = false;
 
     QImage renderAvsFrame(int frameIndex);
 };

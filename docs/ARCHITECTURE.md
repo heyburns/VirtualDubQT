@@ -97,7 +97,13 @@ cache.
 Random access seeks to a known preceding keyframe where possible, flushes codec
 state, and decodes dependency frames forward. Sequential playback avoids random
 seeks even when presentation drops a late frame. Best-effort timestamps populate
-the presentation-order index and provide VFR frame durations.
+the presentation-order index and provide VFR frame durations. A known sequential
+traversal appends the next ordinal directly, even if its PTS equals the previous
+frame's PTS. Timestamp equality does not mean the pictures are the same frame.
+An expected indexed revisit likewise checks only its expected entry. When a seek
+actually requires reconciliation, a lazy hash maps each timestamp to a sorted
+list of ordinals; duplicate timestamps are retained rather than overwritten.
+That auxiliary storage is released on Close or a deliberate index rebuild.
 
 EOF and verified length are separate facts. `mIndexTraversalContiguous` records
 whether the current traversal started at the beginning or a verified prefix
@@ -105,7 +111,9 @@ anchor; approximate timestamp seeks and decode errors invalidate that proof.
 Only a contiguous traversal whose next ordinal equals the indexed prefix length
 can promote decoder EOF to an exact frame count. The worker independently reports
 EOF so playback can stop and restore the last displayed playhead without shrinking
-an incomplete timeline. Efficient exact seeking and index sharing remain separate
+an incomplete timeline. Only verified traversals may extend the prefix; an
+approximately labeled sparse observation never becomes prefix proof. Exact
+seeking and index sharing remain separate
 audit work; an approximate time seek is not proof of a VFR ordinal.
 
 FFmpeg/AviSynth frames are converted to packed RGB QImages. Optimized swscale

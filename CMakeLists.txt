@@ -216,6 +216,15 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    add_executable(decoder_index_tests
+        tests/test_decoder_index.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(decoder_index_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(decoder_index_tests)
+    add_test(NAME decoder_index_tests COMMAND decoder_index_tests)
+    set_tests_properties(decoder_index_tests PROPERTIES
+        LABELS "decoder;index;performance" TIMEOUT 60)
+
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp
         src/VirtualDub/VDQtTimeline.cpp)

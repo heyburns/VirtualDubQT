@@ -28,8 +28,10 @@ Remaining execution sequence
 [x] S09: preserve and roll back complete Append
     state, audio choices, markers, zoom, selection, edits and source intent.
 [x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
-[ ] H04/H05/P01/P02/M16: exact cancellable seeks, efficient and reusable indexes,
+[ ] H04/H05/P02/M16: exact cancellable seeks, efficient and reusable indexes,
     variable-rate frame identity and shared keyframe/navigation knowledge.
+[x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
+    hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [ ] S04: preserve all imported sequence images at the requested rational frame rate.
 [ ] H02/M01/M10: incoming field history, normalized layouts and meaningful high depth.
 [ ] H10/M25: explicit filter failures, missing assets/plugins and invalid preview.
