@@ -74,7 +74,7 @@ Remaining execution sequence
     preflight before execution; remaining packed-color/runtime math is still open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
-[ ] M07: timed capture stops independently of preview output (hardware verification pending).
+[x] M07: timed capture stops independently of preview output (hardware verification pending).
 [ ] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
 [ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.
 [ ] P04/P06/P07/P10/P11: measured filter/cache/display/log/buffer optimizations.

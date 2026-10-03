@@ -4,6 +4,7 @@
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
 #include "VDQtFilterFrameContext.h"
+#include "VDQtCapturePolicy.h"
 #include "VDQtFilterValidation.h"
 #include "VDQtAudioExport.h"
 #include "VDQtSourceSafety.h"
@@ -8692,45 +8693,20 @@ void VDQtMainWindow::onCaptureVideo() {
                   << QStringLiteral("-f") << QStringLiteral("alsa")
                   << QStringLiteral("-i") << audioDevice->text().trimmed();
     }
-    arguments << QStringLiteral("-map") << QStringLiteral("0:v:0");
-    if (captureAudio->isChecked())
-        arguments << QStringLiteral("-map") << QStringLiteral("1:a:0");
-    arguments << QStringLiteral("-c:v") << selectedVideoCodec;
-    if (selectedVideoCodec == QStringLiteral("libx264")
-        || selectedVideoCodec == QStringLiteral("libx265")) {
-        arguments << QStringLiteral("-preset") << QStringLiteral("veryfast")
-                  << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p");
-    }
-    if (captureAudio->isChecked())
-        arguments << QStringLiteral("-af")
-                  << QStringLiteral("ebur128=metadata=1")
-                  << QStringLiteral("-c:a") << selectedAudioCodec;
-    else
-        arguments << QStringLiteral("-an");
-    if (timedStop->isChecked())
-        arguments << QStringLiteral("-t")
-                  << QString::number(durationSeconds->value());
-    if (splitCapture->isChecked()) {
-        const int segmentSeconds = segmentMinutes->value() * 60;
-        if (selectedVideoCodec != QStringLiteral("rawvideo"))
-            arguments << QStringLiteral("-force_key_frames")
-                      << QString("expr:gte(t,n_forced*%1)").arg(segmentSeconds);
-        arguments << QStringLiteral("-f") << QStringLiteral("segment")
-                  << QStringLiteral("-segment_time")
-                  << QString::number(segmentSeconds)
-                  << QStringLiteral("-reset_timestamps") << QStringLiteral("1");
-    }
-    arguments << QStringLiteral("-stats_period") << QStringLiteral("0.25")
-              << QStringLiteral("-y") << capturePath;
-    if (livePreview->isChecked()) {
-        arguments << QStringLiteral("-map") << QStringLiteral("0:v:0")
-                  << QStringLiteral("-an")
-                  << QStringLiteral("-vf")
-                  << QStringLiteral("scale=640:-2:flags=fast_bilinear")
-                  << QStringLiteral("-c:v") << QStringLiteral("mjpeg")
-                  << QStringLiteral("-q:v") << QStringLiteral("7")
-                  << QStringLiteral("-f") << QStringLiteral("image2pipe")
-                  << QStringLiteral("pipe:1");
+    VDQtCaptureOutputConfig captureConfig;
+    captureConfig.path = capturePath;
+    captureConfig.videoCodec = selectedVideoCodec;
+    captureConfig.audioCodec = selectedAudioCodec;
+    captureConfig.includeAudio = captureAudio->isChecked();
+    captureConfig.preview = livePreview->isChecked();
+    captureConfig.segmented = splitCapture->isChecked();
+    captureConfig.segmentSeconds = segmentMinutes->value() * 60;
+    captureConfig.durationSeconds = timedStop->isChecked() ? durationSeconds->value() : 0;
+    QString captureConfigError;
+    arguments += VDQtCaptureOutputArguments(captureConfig, &captureConfigError);
+    if (!captureConfigError.isEmpty()) {
+        QMessageBox::critical(this, "Capture Error", captureConfigError);
+        return;
     }
 
     QProcess capture;
@@ -8843,6 +8819,10 @@ void VDQtMainWindow::onCaptureVideo() {
                         : QStringLiteral("waiting"))
                     : QStringLiteral("off")));
         QApplication::processEvents(QEventLoop::AllEvents, 100);
+        // A camera stall or lack of preview frames must not defeat timed Stop.
+        // Reuse the normal user-stop path so the muxer can finalize the recording.
+        if (VDQtCaptureTimeExpired(captureConfig.durationSeconds, elapsed.elapsed()))
+            stopRequested = true;
         if (stopRequested && stopRequestedAt < 0) {
             stopRequestedAt = elapsed.elapsed();
             capture.write("q\n");

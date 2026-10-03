@@ -53,6 +53,8 @@ get_filename_component(AVISYNTH_LIBRARY_DIR "${AVISYNTH_LIBRARY}" DIRECTORY)
 set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtApplicationIcon.h
     src/VirtualDub/VDQtApplicationIcon.cpp
+    src/VirtualDub/VDQtCapturePolicy.h
+    src/VirtualDub/VDQtCapturePolicy.cpp
     src/VirtualDub/VDQtFrameDecodeWorker.h
     src/VirtualDub/VDQtFrameDecodeWorker.cpp
     src/VirtualDub/VDQtVideoDecoder.h
@@ -297,6 +299,13 @@ if (BUILD_TESTING)
             LABELS "integration;lifetime;isolation" TIMEOUT 120
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
     endforeach()
+
+    add_executable(capture_policy_tests tests/test_capture_policy.cpp src/VirtualDub/VDQtCapturePolicy.cpp)
+    target_include_directories(capture_policy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(capture_policy_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(capture_policy_tests)
+    add_test(NAME capture_policy_tests COMMAND capture_policy_tests)
+    set_tests_properties(capture_policy_tests PROPERTIES LABELS "capture;contracts" TIMEOUT 30)
 
     add_executable(audio_filter_contract_tests
         tests/test_audio_filter_contracts.cpp

@@ -986,6 +986,25 @@ passed another 5/5 in each configuration. The rebuilt regular binary passed
 MP4/native-AVS decode/export smoke. Remaining packed-color and runtime numeric
 edge cases are still tracked, not declared universally safe by these tests.
 
+Timed capture output/deadline policy (M07)
+-----------------------------------------
+
+The hardware-free subprocess regression reproduced a 0.3-second recording
+finishing while preview kept the child process alive until the test timeout.
+Capture now uses one tested output builder, applying the duration to BOTH the
+recording and image-pipe preview. The GUI additionally requests normal Stop on
+the elapsed wall-clock deadline, independent of preview frames or input progress;
+its existing bounded terminate/kill fallback remains. Untimed capture still
+requires an explicit stop. Segmented capture retains its keyframe/segment flags.
+
+Tests use an infinite lavfi source, with/without preview, check normal process
+completion and decode both recordings, and count all nine expected 30 fps
+frames. Deadline boundaries and nonfinite configuration rejection are checked.
+Focused Release 4/4 and ASan/UBSan 4/4 passed, followed by the strengthened
+nine-frame check in both configurations. The rebuilt regular binary passed
+MP4/native-AVS decode/export smoke. No camera, microphone or user process was
+opened; physical capture/stall/segmented-device verification remains pending.
+
 Batch analysis filename preservation
 ------------------------------------
 
