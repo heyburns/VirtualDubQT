@@ -61,6 +61,69 @@ QString avOperationError(const QString& operation, int errorCode) {
         .arg(errorCode);
 }
 
+// Resolve each frame's declared color properties before conversion. The
+// user's explicit override wins; only unspecified metadata uses the historic
+// SD/HD fallback. Compare the actual swscale state so ordinary playback does
+// not recreate a converter when matrix/range stay unchanged.
+bool configureConversionColors(SwsContext *context, AVPixelFormat format,
+                                int width, int height, int declaredMatrix,
+                                int declaredRange, int matrixOverride,
+                                int rangeOverride, QString *error) {
+    if (!context) return false;
+    const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(format);
+    const bool rgb = descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_RGB);
+    int matrix = width >= 1280 || height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    if (matrixOverride == 1) matrix = SWS_CS_ITU601;
+    else if (matrixOverride == 2) matrix = SWS_CS_ITU709;
+    else if (!rgb && descriptor && descriptor->nb_components >= 3) {
+        switch (declaredMatrix) {
+        case AVCOL_SPC_BT709: matrix = SWS_CS_ITU709; break;
+        case AVCOL_SPC_FCC: matrix = SWS_CS_FCC; break;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M: matrix = SWS_CS_ITU601; break;
+        case AVCOL_SPC_SMPTE240M: matrix = SWS_CS_SMPTE240M; break;
+        case AVCOL_SPC_BT2020_NCL: matrix = SWS_CS_BT2020; break;
+        case AVCOL_SPC_UNSPECIFIED: break;
+        default:
+            if (error) *error = QStringLiteral("Source color matrix %1 is not supported by RGB conversion; choose an explicit decoding matrix if appropriate.")
+                .arg(declaredMatrix);
+            return false;
+        }
+    }
+    int range = rgb ? 1 : 0;
+    if (rangeOverride == 1) range = 0;
+    else if (rangeOverride == 2) range = 1;
+    else if (declaredRange == AVCOL_RANGE_JPEG) range = 1;
+    else if (declaredRange == AVCOL_RANGE_MPEG) range = 0;
+
+    const int *coefficients = sws_getCoefficients(matrix);
+    const int *outputCoefficients = sws_getCoefficients(SWS_CS_DEFAULT);
+    int *oldInput = nullptr, *oldOutput = nullptr;
+    int oldRange = -1, oldDestinationRange = -1, brightness = 0, contrast = 0, saturation = 0;
+    if (sws_getColorspaceDetails(context, &oldInput, &oldRange, &oldOutput,
+            &oldDestinationRange, &brightness, &contrast, &saturation) >= 0
+        && oldInput && oldOutput && oldRange == range && oldDestinationRange == 1
+        && brightness == 0 && contrast == (1 << 16) && saturation == (1 << 16)
+        && std::memcmp(oldInput, coefficients, 4 * sizeof(int)) == 0
+        && std::memcmp(oldOutput, outputCoefficients, 4 * sizeof(int)) == 0)
+        return true;
+    const int result = sws_setColorspaceDetails(context, coefficients, range,
+        outputCoefficients, 1, 0, 1 << 16, 1 << 16);
+    if (result < 0 && error)
+        *error = avOperationError(QStringLiteral("Could not configure frame color conversion"), result);
+    return result >= 0;
+}
+
+int nativeFrameProperty(AVS_ScriptEnvironment *environment, const AVS_VideoFrame *frame,
+                         const char *key, int fallback) {
+    const AVS_Map *properties = avs_get_frame_props_ro(environment, frame);
+    if (!properties) return fallback;
+    int error = 0;
+    const int64_t value = avs_prop_get_int(environment, properties, key, 0, &error);
+    return !error && value >= std::numeric_limits<int>::min()
+        && value <= std::numeric_limits<int>::max() ? static_cast<int>(value) : fallback;
+}
+
 bool isUsableFrameRate(AVRational rate) {
     if (rate.num <= 0 || rate.den <= 0) return false;
     const double value = av_q2d(rate);
@@ -386,6 +449,16 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
             && mSwsSourceWidth == w
             && mSwsSourceHeight == h;
         if ((contextMatches || setupSwsContext(srcFmt, w, h, mOutputPixelFormat)) && mSwsCtx) {
+            const int declaredMatrix = nativeFrameProperty(mAvsEnv, frame, "_Matrix", AVCOL_SPC_UNSPECIFIED);
+            const int avsRange = nativeFrameProperty(mAvsEnv, frame, "_ColorRange", -1);
+            // AviSynth uses 0=full, 1=limited (not FFmpeg's enum values).
+            const int declaredRange = avsRange == 0 ? AVCOL_RANGE_JPEG
+                : avsRange == 1 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_UNSPECIFIED;
+            if (!configureConversionColors(mSwsCtx, srcFmt, w, h, declaredMatrix,
+                    declaredRange, mColorSpaceMode, mComponentRangeMode, &mLastError)) {
+                avs_release_video_frame(frame);
+                return {};
+            }
             // Do not give swscale direct access to QImage storage. Optimized
             // packed-RGB converters can finish a partial row with a complete
             // SIMD store; at widths such as 648 RGB24 pixels that crosses the
@@ -469,39 +542,10 @@ bool VDQtVideoDecoder::setupSwsContext(AVPixelFormat sourceFormat,
         return false;
     }
 
-    int srcRange = 0;
-    if (mComponentRangeMode == 1) {
-        srcRange = 0; // Limited (16-235)
-    } else if (mComponentRangeMode == 2) {
-        srcRange = 1; // Full (0-255)
-    } else {
-        if (mCodecCtx && mCodecCtx->color_range == AVCOL_RANGE_JPEG) srcRange = 1;
-        else srcRange = 0;
-    }
-
-    const int *invTable = nullptr;
-    if (mColorSpaceMode == 1) {
-        invTable = sws_getCoefficients(SWS_CS_ITU601);
-    } else if (mColorSpaceMode == 2) {
-        invTable = sws_getCoefficients(SWS_CS_ITU709);
-    } else {
-        if (sourceWidth >= 1280 || sourceHeight >= 720) {
-            invTable = sws_getCoefficients(SWS_CS_ITU709);
-        } else {
-            invTable = sws_getCoefficients(SWS_CS_ITU601);
-        }
-    }
-
-    const int *table = sws_getCoefficients(SWS_CS_DEFAULT);
-    const int colorResult = sws_setColorspaceDetails(
-        newContext,
-        invTable, srcRange,
-        table, 1, // destination full range RGB
-        0, 1 << 16, 1 << 16
-    );
-
-    if (colorResult < 0) {
-        mLastError = avOperationError(QStringLiteral("Could not configure pixel conversion colorspace"), colorResult);
+    if (!configureConversionColors(newContext, sourceFormat, sourceWidth, sourceHeight,
+            mCodecCtx ? mCodecCtx->colorspace : AVCOL_SPC_UNSPECIFIED,
+            mCodecCtx ? mCodecCtx->color_range : AVCOL_RANGE_UNSPECIFIED,
+            mColorSpaceMode, mComponentRangeMode, &mLastError)) {
         sws_freeContext(newContext);
         return false;
     }
@@ -1051,7 +1095,14 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         && mSwsDestinationFormat == outputPixelFormat
         && mSwsSourceWidth == sourceWidth
         && mSwsSourceHeight == sourceHeight;
+    const int declaredMatrix = sourceFrame->colorspace != AVCOL_SPC_UNSPECIFIED
+        ? sourceFrame->colorspace : mCodecCtx->colorspace;
+    const int declaredRange = sourceFrame->color_range != AVCOL_RANGE_UNSPECIFIED
+        ? sourceFrame->color_range : mCodecCtx->color_range;
     if (storageMatches && contextMatches) {
+        if (!configureConversionColors(mSwsCtx, sourceFormat, sourceWidth, sourceHeight,
+                declaredMatrix, declaredRange, mColorSpaceMode, mComponentRangeMode, &mLastError))
+            return false;
         mSourceBitDepth = sourceBitDepth;
         mSourceHasAlpha = sourceHasAlpha;
         return true;
@@ -1075,7 +1126,9 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
         }
     }
 
-    if (!setupSwsContext(sourceFormat, sourceWidth, sourceHeight, outputPixelFormat)) {
+    if (!setupSwsContext(sourceFormat, sourceWidth, sourceHeight, outputPixelFormat)
+        || !configureConversionColors(mSwsCtx, sourceFormat, sourceWidth, sourceHeight,
+            declaredMatrix, declaredRange, mColorSpaceMode, mComponentRangeMode, &mLastError)) {
         if (replacementBuffer) av_free(replacementBuffer);
         if (replacementFrame) av_frame_free(&replacementFrame);
         return false;
@@ -1437,7 +1490,7 @@ int VDQtVideoDecoder::registerDecodedFrame() {
 QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
     if (!ensureConversionResources(mFrame)) return QImage();
 
-    sws_scale(
+    const int convertedRows = sws_scale(
         mSwsCtx,
         const_cast<const uint8_t *const *>(mFrame->data),
         mFrame->linesize,
@@ -1445,6 +1498,10 @@ QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
         mFrame->height > 0 ? mFrame->height : mHeight,
         mFrameRGB->data,
         mFrameRGB->linesize);
+    if (convertedRows != mHeight) {
+        mLastError = QStringLiteral("Decoded frame color conversion did not produce a complete image.");
+        return {};
+    }
 
     const QImage frameView(
         mFrameRGB->data[0], mWidth, mHeight, mFrameRGB->linesize[0], mOutputImageFormat);

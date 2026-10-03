@@ -252,6 +252,14 @@ if (BUILD_TESTING)
     set_tests_properties(color_contract_tests PROPERTIES
         LABELS "decoder;export;color;contracts" TIMEOUT 120)
 
+    add_executable(decode_color_contract_tests
+        tests/test_decode_color_contracts.cpp tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(decode_color_contract_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(decode_color_contract_tests)
+    add_test(NAME decode_color_contract_tests COMMAND decode_color_contract_tests)
+    set_tests_properties(decode_color_contract_tests PROPERTIES
+        LABELS "decoder;color;contracts" TIMEOUT 120)
+
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp
         src/VirtualDub/VDQtTimeline.cpp)
