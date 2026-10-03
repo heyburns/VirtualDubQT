@@ -80,7 +80,24 @@ RGB strides, alpha, temporal history, retained output aliases, and opacity
 snapshots. Whole-frame pixels are compared to a scalar reference; null/failed
 phase sequences must report failure with no partial outputs. High-depth tests
 preserve existing behavior without claiming to implement missing algorithms.
+Duplicating Bob chains also verify independent temporal state for both phases.
 
 A single-CPU host can check pixels but cannot exercise the multi-worker race.
 Do not turn this memory-safety repair into a field-history, IVTC cadence, or
 high-depth feature rewrite: those findings have their own planned batches.
+
+Linux Release builds also run four filter_allocation tests. Each limits only its
+own disposable test process's address space, forcing a real QImage-detachment
+allocation failure, then restores the budget and verifies successful recovery.
+These are intentionally excluded from ASan builds because ASan reserves large
+shadow-memory mappings. No production allocation limit or test hook is added.
+
+Repair validation, 2026-10-02:
+  - Before repair, all four audit probes reproduced heap-use-after-free. The new
+    tests also failed on corrupted parallel pixels or the same sanitizer error.
+  - After repair, scalar-reference pixel, source/output ownership, alpha,
+    high-depth-preservation, seek-discontinuity, and failed-sequence checks pass
+    at 1080p/4K with eight available workers in both Release and sanitizer builds.
+  - The four real allocation-failure/recovery tests pass in Release.
+  - Full selected suites: Release 16/16 passed; sanitizer 12/12 passed. Physical
+    audio-device checks are excluded, and allocator-limit checks run only in Release.

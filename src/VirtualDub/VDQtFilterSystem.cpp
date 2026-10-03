@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
+#include <new>
 #include <utility>
 #include <QDebug>
 
@@ -26,7 +28,10 @@ constexpr qint64 kParallelFilterPixelThreshold = 256 * 1024;
 
 // Split independent rows across the global Qt thread pool only when the image
 // is large enough to repay task scheduling. Callers must capture disjoint output
-// rows and treat their input image as immutable.
+// rows and treat their input image as immutable. Detach destinations with bits()
+// BEFORE submitting tasks: even scanLine() can detach a shared QImage and must
+// never run concurrently on the same image object. Capture pointers/strides, not
+// mutable QImage access. This function joins all tasks before owners can expire.
 template <typename Function>
 void parallelFor(int count, qint64 workItems, Function&& function) {
     const int idealThreads = std::max(1, QThread::idealThreadCount());
@@ -38,14 +43,25 @@ void parallelFor(int count, qint64 workItems, Function&& function) {
     const int taskCount = std::min(count, idealThreads);
     QList<QFuture<void>> futures;
     futures.reserve(taskCount);
-    for (int task = 0; task < taskCount; ++task) {
-        const int begin = count * task / taskCount;
-        const int end = count * (task + 1) / taskCount;
-        futures.append(QtConcurrent::run([begin, end, &function]() {
-            for (int index = begin; index < end; ++index) function(index);
-        }));
+    try {
+        for (int task = 0; task < taskCount; ++task) {
+            const int begin = count * task / taskCount;
+            const int end = count * (task + 1) / taskCount;
+            futures.append(QtConcurrent::run([begin, end, &function]() {
+                for (int index = begin; index < end; ++index) function(index);
+            }));
+        }
+        for (QFuture<void>& future : futures) future.waitForFinished();
+    } catch (...) {
+        // Submission can fail after earlier rows have started (for example,
+        // allocation failure). Keep the callable and its image owners alive
+        // until EVERY submitted task finishes, then propagate the first error.
+        const auto failure = std::current_exception();
+        for (QFuture<void>& future : futures) {
+            try { future.waitForFinished(); } catch (...) {}
+        }
+        std::rethrow_exception(failure);
     }
-    for (QFuture<void>& future : futures) future.waitForFinished();
 }
 
 template <typename Transform>
@@ -577,24 +593,40 @@ bool VDQtFilterSystem::processFrameSequence(const QImage& inputFrame, QList<QIma
 
 bool VDQtFilterSystem::processFrameSequence(
     const QImage& inputFrame, QList<QImage>& outputFrames,
-    const VDFilterFrameContext& context) {
+    const VDFilterFrameContext& context) try {
     outputFrames.clear();
+
+    if (inputFrame.isNull()) return false;
 
     const VDFilterTimingInfo timing = getTimingInfo();
     if (!timing.sequenceSupported)
         return false;
 
     outputFrames.reserve(timing.outputFramesPerInput);
-    for (int phase = 0; phase < timing.outputFramesPerInput; ++phase)
-        outputFrames.append(processFrameForPhase(
-            inputFrame, static_cast<quint64>(phase), context));
+    for (int phase = 0; phase < timing.outputFramesPerInput; ++phase) {
+        QImage output = processFrameForPhase(
+            inputFrame, static_cast<quint64>(phase), context);
+        if (output.isNull()) {
+            // Allocation/processing failure is not a successful sequence of
+            // null images. Discard any earlier phases and their temporal state
+            // so a retry cannot reuse a partially advanced filter history.
+            outputFrames.clear();
+            resetRuntimeState();
+            return false;
+        }
+        outputFrames.append(std::move(output));
+    }
 
     return true;
+} catch (const std::bad_alloc&) {
+    outputFrames.clear();
+    resetRuntimeState();
+    return false;
 }
 
 QImage VDQtFilterSystem::processFrameForPhase(
     const QImage& inputFrame, quint64 bobPhaseMask,
-    const VDFilterFrameContext& context) {
+    const VDFilterFrameContext& context) try {
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
 
     // Normalize once at chain entry. 64-bit input remains 16-bit-per-channel;
@@ -609,6 +641,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
             ? inputFrame.convertToFormat(QImage::Format_RGBA8888)
             : inputFrame.convertToFormat(QImage::Format_RGB888);
     }
+    if (result.isNull()) return {};
     int bobFilterIndex = 0;
 
     // The chain is interpreted in order. Reserved _sylia.* parameters carry
@@ -642,6 +675,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
             if (clippedWidth <= 0 || clippedHeight <= 0) return {};
             result = result.copy(clipLeft, clipTop,
                                  clippedWidth, clippedHeight);
+            if (result.isNull()) return {};
         }
 
         const int opacityPointCount = std::clamp(
@@ -865,6 +899,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
                     || temporal.lastFrameNumber + 1 == context.frameNumber);
             const QImage previous = sequential
                 ? temporal.previousFrame.convertToFormat(result.format()) : QImage();
+            if (sequential && previous.isNull()) return {};
             if (!previous.isNull() && previous.size() == result.size()) {
                 if (filter.type == VDFilterType::FieldDelay
                     || filter.type == VDFilterType::Interlace) {
@@ -888,12 +923,20 @@ QImage VDQtFilterSystem::processFrameForPhase(
                         filter.params.value("strength", 4.0) / 8.0, 0.0, 1.0);
                     if (!highPrecision) {
                         const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
-                        parallelFor(result.height(),
-                                    static_cast<qint64>(result.width()) * result.height(),
-                                    [&](int y) {
-                            uchar *current = result.scanLine(y);
-                            const uchar *prior = previous.constScanLine(y);
-                            for (int x = 0; x < result.width(); ++x) {
+                        const int width = result.width(), height = result.height();
+                        const uchar *previousBits = previous.constBits();
+                        const qsizetype previousStride = previous.bytesPerLine();
+                        // The input, prior output, and opacity snapshot may all
+                        // share storage. Detach once on the caller thread; the
+                        // previous QImage keeps its read buffer alive until join.
+                        uchar *destinationBits = result.bits();
+                        if (!destinationBits) return {};
+                        const qsizetype destinationStride = result.bytesPerLine();
+                        parallelFor(height, static_cast<qint64>(width) * height,
+                                    [=](int y) {
+                            uchar *current = destinationBits + y * destinationStride;
+                            const uchar *prior = previousBits + y * previousStride;
+                            for (int x = 0; x < width; ++x) {
                                 int maximumDifference = 0;
                                 for (int channel = 0; channel < 3; ++channel)
                                     maximumDifference = std::max(maximumDifference,
@@ -930,15 +973,21 @@ QImage VDQtFilterSystem::processFrameForPhase(
                 static_cast<int>(filter.params.value("threshold", 12)), 0, 255);
             if (!highPrecision) {
                 const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
-                parallelFor(std::max(0, result.height() - 2),
-                            static_cast<qint64>(result.width()) * result.height(),
-                            [&](int row) {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(std::max(0, height - 2),
+                            static_cast<qint64>(width) * height,
+                            [=](int row) {
                     const int y = row + 1;
-                    uchar *destination = result.scanLine(y);
-                    const uchar *above = source.constScanLine(y - 1);
-                    const uchar *current = source.constScanLine(y);
-                    const uchar *below = source.constScanLine(y + 1);
-                    for (int x = 0; x < result.width(); ++x) {
+                    uchar *destination = destinationBits + y * destinationStride;
+                    const uchar *above = sourceBits + (y - 1) * sourceStride;
+                    const uchar *current = sourceBits + y * sourceStride;
+                    const uchar *below = sourceBits + (y + 1) * sourceStride;
+                    for (int x = 0; x < width; ++x) {
                         for (int channel = 0; channel < 3; ++channel) {
                             const int offset = x * bytesPerPixel + channel;
                             const int prediction = (above[offset] + below[offset] + 1) >> 1;
@@ -1011,15 +1060,20 @@ QImage VDQtFilterSystem::processFrameForPhase(
                 filter.params.value("scanline", 0.08), 0.0, 0.8);
             if (!highPrecision) {
                 const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
-                parallelFor(result.height(),
-                            static_cast<qint64>(result.width()) * result.height(),
-                            [&](int y) {
-                    uchar *destination = result.scanLine(y);
-                    const uchar *row = source.constScanLine(y);
-                    for (int x = 0; x < result.width(); ++x) {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(height, static_cast<qint64>(width) * height,
+                            [=](int y) {
+                    uchar *destination = destinationBits + y * destinationStride;
+                    const uchar *row = sourceBits + y * sourceStride;
+                    for (int x = 0; x < width; ++x) {
                         int red = 0, green = 0, blue = 0, count = 0;
                         for (int offset = -radius; offset <= radius; ++offset) {
-                            const int sx = std::clamp(x + offset, 0, result.width() - 1);
+                            const int sx = std::clamp(x + offset, 0, width - 1);
                             red += row[sx * bytesPerPixel];
                             green += row[sx * bytesPerPixel + 1];
                             blue += row[sx * bytesPerPixel + 2];
@@ -1062,16 +1116,21 @@ QImage VDQtFilterSystem::processFrameForPhase(
             const QImage source = result;
             if (!highPrecision) {
                 const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
-                parallelFor(result.height(),
-                            static_cast<qint64>(result.width()) * result.height(),
-                            [&](int y) {
-                    uchar *destination = result.scanLine(y);
-                    const uchar *current = source.constScanLine(y);
-                    const uchar *above = source.constScanLine(std::max(0, y - 1));
-                    const uchar *below = source.constScanLine(std::min(source.height() - 1, y + 1));
-                    for (int x = 0; x < result.width(); ++x) {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(height, static_cast<qint64>(width) * height,
+                            [=](int y) {
+                    uchar *destination = destinationBits + y * destinationStride;
+                    const uchar *current = sourceBits + y * sourceStride;
+                    const uchar *above = sourceBits + std::max(0, y - 1) * sourceStride;
+                    const uchar *below = sourceBits + std::min(height - 1, y + 1) * sourceStride;
+                    for (int x = 0; x < width; ++x) {
                         const int left = std::max(0, x - 1);
-                        const int right = std::min(result.width() - 1, x + 1);
+                        const int right = std::min(width - 1, x + 1);
                         for (int channel = 0; channel < 3; ++channel) {
                             const int center = current[x * bytesPerPixel + channel];
                             const int average = (current[left * bytesPerPixel + channel]
@@ -2319,6 +2378,8 @@ QImage VDQtFilterSystem::processFrameForPhase(
             break;
         }
 
+        if (result.isNull()) return {};
+
         if (!opacitySource.isNull() && opacitySource.size() == result.size()) {
             struct OpacityPoint {
                 double x = 0.0;
@@ -2387,9 +2448,16 @@ QImage VDQtFilterSystem::processFrameForPhase(
                 painter.drawImage(0, 0, result);
                 painter.end();
                 result = blended;
+                if (result.isNull()) return {};
             }
         }
     }
 
     return result;
+} catch (const std::bad_alloc&) {
+    // QImage allocation normally returns a null image, while Qt container/task
+    // bookkeeping can throw. Both mean this phase failed, including legacy
+    // callers that consume processFrame() rather than processFrameSequence().
+    resetRuntimeState();
+    return {};
 }

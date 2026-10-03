@@ -145,6 +145,8 @@ public:
     QImage processFrame(const QImage& inputFrame);
     QImage processFrame(const QImage& inputFrame,
                         const VDFilterFrameContext& context);
+    // Failure (including null input/allocation failure) clears outputFrames;
+    // callers never receive an apparently successful partial/null sequence.
     bool processFrameSequence(const QImage& inputFrame, QList<QImage>& outputFrames);
     bool processFrameSequence(const QImage& inputFrame,
                               QList<QImage>& outputFrames,

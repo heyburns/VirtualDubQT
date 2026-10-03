@@ -369,6 +369,29 @@ if (BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
+    add_executable(filter_memory_tests
+        tests/test_filter_memory.cpp
+        tests/support/VDQtTestFixtures.cpp
+        src/VirtualDub/VDQtFilterSystem.cpp
+        src/VirtualDub/VDQtPluginHost.cpp
+    )
+    target_compile_definitions(filter_memory_tests PRIVATE QT_NO_KEYWORDS)
+    target_include_directories(filter_memory_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(filter_memory_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Concurrent)
+    vdqt_enable_diagnostics(filter_memory_tests)
+    foreach(filter_case IN ITEMS temporal ivtc television warp)
+        # Process isolation keeps one ASan crash from hiding the other cases.
+        add_test(NAME filter_memory_${filter_case} COMMAND filter_memory_tests ${filter_case})
+        set_tests_properties(filter_memory_${filter_case} PROPERTIES
+            LABELS "filters;memory" TIMEOUT 180)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ENABLE_SANITIZERS)
+            add_test(NAME filter_allocation_${filter_case}
+                COMMAND filter_memory_tests ${filter_case} --allocation-failure)
+            set_tests_properties(filter_allocation_${filter_case} PROPERTIES
+                LABELS "filters;memory;allocation" TIMEOUT 30)
+        endif()
+    endforeach()
+
     # Build a real shared VDX module rather than mocking the dlopen ABI.
     add_library(vdqt_test_plugin MODULE
         src/VirtualDub/test_vdx_plugin.cpp
