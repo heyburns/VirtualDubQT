@@ -298,6 +298,15 @@ if (BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
     endforeach()
 
+    add_executable(audio_filter_contract_tests
+        tests/test_audio_filter_contracts.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(audio_filter_contract_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(audio_filter_contract_tests)
+    add_test(NAME audio_filter_contract_tests COMMAND audio_filter_contract_tests)
+    set_tests_properties(audio_filter_contract_tests PROPERTIES
+        LABELS "audio;contracts" TIMEOUT 120 ENVIRONMENT "VD_DISABLE_AUDIO_OUTPUT=1")
+
     add_executable(filter_contract_tests tests/test_filter_contracts.cpp)
     target_link_libraries(filter_contract_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_contract_tests)

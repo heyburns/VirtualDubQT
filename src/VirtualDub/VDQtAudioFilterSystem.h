@@ -2,6 +2,7 @@
 #define VDQTAUDIOFILTERSYSTEM_H
 
 #include <QByteArray>
+#include <QAudioFormat>
 #include <QIODevice>
 #include <QList>
 #include <QMap>
@@ -39,47 +40,29 @@ struct VDAudioFilterInstance {
     }
 };
 
-// Stateful, allocation-free processor for filters that can operate in place on
-// signed 16-bit interleaved PCM. configure() builds one State per chain entry;
-// reset() must be called after a seek so history from the old time position is
-// never mixed into the new one.
-class VDQtAudioFilterProcessor {
-public:
-    void configure(const QList<VDAudioFilterInstance>& chain,
-                   int sampleRate,
-                   int channels);
-    void reset();
-    void processInt16(char *data, qint64 bytes);
+// Validate before constructing either live or offline graphs. Disabled stages
+// are still checked when loading settings, but do not affect duration bounds.
+bool VDQtValidateAudioFilters(const QList<VDAudioFilterInstance>& chain,
+                             QString *errorMessage = nullptr);
 
-private:
-    struct State {
-        QVector<double> previousInput;
-        QVector<double> previousOutput;
-        QVector<qint16> delay;
-        qint64 delayPosition = 0;
-        double phase = 0.0;
-    };
-
-    QList<VDAudioFilterInstance> mChain;
-    QVector<State> mStates;
-    int mSampleRate = 0;
-    int mChannels = 0;
-};
-
-// Pull-through adapter placed between an audio decoder QIODevice and
-// QAudioSink. Fixed-rate filters use VDQtAudioFilterProcessor. Pitch/time
-// filters are delegated to VariableRateProcessor because they can produce a
-// different number of output samples than they consume.
+// Pull-through adapter: decoders supply source-rate/channel packed S16. All
+// effects use the offline export graph; final conversion belongs exclusively
+// to the sound-device boundary. The no-effect, same-format path is transparent.
+// Stop the sink before reconfiguration/seek, then reset to discard graph history
+// AND QIODevice's own read-ahead bytes before restarting the consumer.
 class VDQtAudioFilterDevice final : public QIODevice {
 public:
     VDQtAudioFilterDevice(QIODevice *source,
                           int sampleRate,
                           int channels,
                           QObject *parent = nullptr);
+    VDQtAudioFilterDevice(QIODevice *source, int sampleRate, int channels,
+                          const QAudioFormat& outputFormat, QObject *parent = nullptr);
     ~VDQtAudioFilterDevice() override;
 
-    void setFilterChain(const QList<VDAudioFilterInstance>& chain);
-    void resetProcessor();
+    bool setFilterChain(const QList<VDAudioFilterInstance>& chain);
+    bool resetProcessor();
+    QString error() const;
     bool isSequential() const override { return true; }
     bool atEnd() const override;
     qint64 bytesAvailable() const override;
@@ -89,13 +72,14 @@ protected:
     qint64 writeData(const char *, qint64) override { return -1; }
 
 private:
-    struct VariableRateProcessor;
+    struct GraphProcessor;
     QIODevice *mSource = nullptr;
     int mSampleRate = 0;
     int mChannels = 0;
+    QAudioFormat mOutputFormat;
+    QString mConfigurationError;
     QList<VDAudioFilterInstance> mChain;
-    VDQtAudioFilterProcessor mProcessor;
-    std::unique_ptr<VariableRateProcessor> mVariableProcessor;
+    std::unique_ptr<GraphProcessor> mGraphProcessor;
 };
 
 // Session-wide catalog and editable audio-filter chain. This object stores
@@ -123,7 +107,7 @@ public:
     void clear();
     bool hasEnabledFilters() const;
 
-    QString ffmpegFilterGraph(int sourceSampleRate) const;
+    QString ffmpegFilterGraph(int sourceSampleRate, QString *errorMessage = nullptr) const;
 
 private:
     QList<VDAudioFilterInstance> mActiveChain;

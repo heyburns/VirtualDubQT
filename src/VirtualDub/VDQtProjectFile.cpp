@@ -455,6 +455,7 @@ bool parseProcessing(const QJsonObject& object,
         }
         result.audioFilters.append(filter);
     }
+    if (!VDQtValidateAudioFilters(result.audioFilters, errorMessage)) return false;
 
     const QJsonObject metadata = object.value("textMetadata").toObject();
     if (metadata.size() > 128) {

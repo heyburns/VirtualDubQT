@@ -5,6 +5,7 @@
 // invariant visible in CI output.
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 
 #include "VDQtFilterSystem.h"
@@ -146,14 +147,18 @@ int main(int argc, char **argv) {
         VDAudioFilterInstance gain = audioFilters.createFilter(
             VDAudioFilterType::Gain);
         gain.params[QStringLiteral("decibels")] = 6.0;
-        VDQtAudioFilterProcessor processor;
-        processor.configure({gain}, 48000, 2);
         std::array<qint16, 4> samples{1000, -1000, 2000, -2000};
-        processor.processInt16(reinterpret_cast<char *>(samples.data()),
-                               sizeof(samples));
+        QByteArray gainInput(reinterpret_cast<const char *>(samples.data()), sizeof(samples));
+        QBuffer gainSource(&gainInput);
+        gainSource.open(QIODevice::ReadOnly);
+        VDQtAudioFilterDevice gainDevice(&gainSource, 48000, 2);
+        if (!require(gainDevice.setFilterChain({gain}), "initialize the actual gain graph")) return 1;
+        const QByteArray gained = gainDevice.read(sizeof(samples));
+        if (!require(gained.size() == sizeof(samples), "gain output retains sample count")) return 1;
+        std::memcpy(samples.data(), gained.constData(), sizeof(samples));
         if (!require(samples[0] >= 1994 && samples[0] <= 1996
                         && samples[1] <= -1994 && samples[1] >= -1996,
-                     "live audio filter processor applies gain to interleaved PCM"))
+                     "live audio filter device applies gain to interleaved PCM"))
             return 1;
 
         VDAudioFilterInstance pitch = audioFilters.createFilter(

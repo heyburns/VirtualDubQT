@@ -89,25 +89,7 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
         || (codec.rateMode != "cbr" && codec.rateMode != "vbr")
         || (codec.bitDepth != 8 && codec.bitDepth != 16 && codec.bitDepth != 24 && codec.bitDepth != 32))
         return fail(errorMessage, QStringLiteral("Invalid audio codec or conversion settings."));
-    for (const auto& filter : request.filters) {
-        if (!filter.enabled) continue;
-        if (filter.type < VDAudioFilterType::Gain || filter.type >= VDAudioFilterType::Count)
-            return fail(errorMessage, QStringLiteral("Unknown enabled audio filter."));
-        for (double parameter : filter.params)
-            if (!std::isfinite(parameter) || std::abs(parameter) > 1e6)
-                return fail(errorMessage, QStringLiteral("Invalid audio filter parameter."));
-        // Bound exponential/integer conversions before constructing the graph.
-        if (filter.type == VDAudioFilterType::PitchShift
-            && std::abs(filter.params.value("semitones", 0)) > 48)
-            return fail(errorMessage, QStringLiteral("Audio pitch shift is outside the supported range."));
-        if (filter.type == VDAudioFilterType::TimeStretch
-            && (filter.params.value("factor", 1) < 0.01 || filter.params.value("factor", 1) > 100))
-            return fail(errorMessage, QStringLiteral("Invalid audio time-stretch factor."));
-        if (filter.type == VDAudioFilterType::Resample
-            && (filter.params.value("sampleRate", 48000) < 1000
-                || filter.params.value("sampleRate", 48000) > 192000))
-            return fail(errorMessage, QStringLiteral("Invalid audio filter sample rate."));
-    }
+    if (!VDQtValidateAudioFilters(request.filters, errorMessage)) return false;
     qint64 samples = 0;
     for (const auto& range : request.sampleRanges) {
         if (range.first < 0 || (range.second <= 0 && !(range.second == -1 && request.sampleRanges.size() == 1))

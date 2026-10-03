@@ -250,10 +250,24 @@ structure. Do not expose those reserved keys as ordinary user parameters.
 
 `VDQtAudioPlayer` selects a stream and builds one of these pull pipelines:
 
-- FFmpeg source -> FFmpeg decode-ahead device -> optional audio filters -> Qt
-  audio sink.
-- Native AviSynth clip -> AVS decode-ahead device -> optional audio filters ->
-  Qt audio sink.
+- FFmpeg source -> source-rate/channel S16 decode-ahead device -> shared effects
+  graph -> sound-device format conversion -> Qt audio sink.
+- Native AviSynth clip -> source-rate/channel S16 decode-ahead device -> the
+  same effects graph and device conversion -> Qt audio sink.
+
+`VDQtAudioFilterDevice` uses the export libavfilter algorithms for every enabled
+effect, not separate approximations for fixed-rate effects. The no-effect,
+same-format path remains a transparent adapter. Conversion to a preferred
+UInt8/Int16/Int32/Float device happens after filtering, so a device fallback never
+bypasses filters or changes their source-rate interpretation. Graphs use one
+worker thread and bounded pending output. Errors are returned explicitly;
+callback diagnostics are synchronized for UI reads, and failed graphs never
+fall back to unfiltered audio. The parameter validator also guards exports and
+saved settings before exponential/sample-rate calculations.
+
+EOF includes effect tails and QIODevice read-ahead output. Seeking/reconfiguring
+flushes both the graph and Qt's internal byte buffer. Partial upstream sample
+frames are retained across short reads; an incomplete final frame is an error.
 
 The decoder cursor includes buffered read-ahead. A/V synchronization must use
 the sink's presented playback time instead. Seeking stops and joins the producer,

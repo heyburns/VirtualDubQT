@@ -1,11 +1,10 @@
-// Live and export audio-filter implementation. Simple fixed-rate DSP runs
-// directly on interleaved PCM; variable-rate work uses an FFmpeg libavfilter
-// graph. The final section maps the same chain to ffmpeg(1) arguments so preview
-// and offline output apply equivalent processing.
+// One effects backend for live and offline audio. The live graph consumes
+// source-rate packed S16, then converts only its final output to the sink format.
 #include "VDQtAudioFilterSystem.h"
 
 #include <QUuid>
 #include <QStringList>
+#include <QMutexLocker>
 
 #include <algorithm>
 #include <cmath>
@@ -20,16 +19,10 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
+#include <libavutil/samplefmt.h>
 }
 
 namespace {
-
-qint16 clippedSample(double value) {
-    return static_cast<qint16>(std::clamp(
-        std::lround(value),
-        static_cast<long>(std::numeric_limits<qint16>::min()),
-        static_cast<long>(std::numeric_limits<qint16>::max())));
-}
 
 QString number(double value) {
     return QString::number(value, 'f', 8);
@@ -38,7 +31,6 @@ QString number(double value) {
 QStringList atempoChain(double factor) {
     // FFmpeg's atempo node accepts only 0.5..2.0. Factor the requested rate into
     // a legal chain so extreme but supported values behave predictably.
-    factor = std::clamp(factor, 0.03125, 32.0);
     QStringList filters;
     while (factor < 0.5) {
         filters.append(QStringLiteral("atempo=0.5"));
@@ -54,22 +46,72 @@ QStringList atempoChain(double factor) {
 
 } // namespace
 
-// Pull adapter for filters whose output duration differs from their input.
-// pending stores packed S16 frames already produced by the graph; nextPts is in
-// input samples and is reset whenever a seek rebuilds the graph.
-struct VDQtAudioFilterDevice::VariableRateProcessor {
+bool VDQtValidateAudioFilters(const QList<VDAudioFilterInstance>& chain, QString *errorMessage) {
+    const auto fail = [&](const QString& message) {
+        if (errorMessage) *errorMessage = message;
+        return false;
+    };
+    if (errorMessage) errorMessage->clear();
+    if (chain.size() > 256) return fail(QStringLiteral("Too many audio filters."));
+    double combinedTempo = 1.0;
+    for (const auto& filter : chain) {
+        if (filter.type < VDAudioFilterType::Gain || filter.type >= VDAudioFilterType::Count)
+            return fail(QStringLiteral("Unknown audio filter type."));
+        for (auto parameter = filter.params.cbegin(); parameter != filter.params.cend(); ++parameter) {
+            const double value = parameter.value();
+            // Unknown serialized/legacy fields are retained but never used in
+            // DSP arithmetic. In particular SetLong may store a 64-bit value;
+            // reject nonfinite data, not a harmless large configuration field.
+            double minimum = std::numeric_limits<double>::lowest();
+            double maximum = std::numeric_limits<double>::max();
+            const auto& key = parameter.key();
+            // Deep attenuation is a valid mute used by existing scripts/tests;
+            // do not mistake it for an unsafe positive-gain exponent.
+            if (key == "decibels") { minimum = -1000; maximum = 96; }
+            else if (key == "cutoffHz") { minimum = 1; maximum = 768000; }
+            else if (key == "sampleRate") { minimum = 1000; maximum = 768000; }
+            else if (key == "semitones") { minimum = -48; maximum = 48; }
+            else if (key == "factor") { minimum = 0.03125; maximum = 32; }
+            else if (key == "mix") { minimum = 0; maximum = 1; }
+            else if (key == "delayMs" || key == "depthMs") { minimum = 0; maximum = 1000; }
+            else if (key == "rateHz") { minimum = 0.01; maximum = 20; }
+            else if (key == "left" || key == "right" || key == "crossfeed") { minimum = -4; maximum = 4; }
+            if (!std::isfinite(value) || value < minimum || value > maximum
+                || (key == "sampleRate" && std::trunc(value) != value))
+                return fail(QStringLiteral("Invalid audio parameter '%1' in '%2'.").arg(key, filter.name));
+        }
+        if (filter.enabled && filter.type == VDAudioFilterType::TimeStretch) {
+            combinedTempo *= filter.params.value("factor", 1.0);
+            // Bound intermediate expansion, not just the final chain: opposite
+            // enormous stretches can still exhaust memory before cancelling.
+            if (combinedTempo < 0.03125 || combinedTempo > 32)
+                return fail(QStringLiteral("Combined audio time stretch exceeds the supported range."));
+        }
+    }
+    return true;
+}
+
+// Libavfilter emits complete packed frames; this adapter exposes a byte stream
+// without discarding short input fragments or output tails. No decoder work is
+// moved back into the sink callback: the upstream devices remain decode-ahead.
+struct VDQtAudioFilterDevice::GraphProcessor {
     AVFilterGraph *graph = nullptr;
     AVFilterContext *source = nullptr;
     AVFilterContext *sink = nullptr;
     QByteArray pending;
+    QByteArray inputTail;
     qsizetype pendingOffset = 0;
     qint64 nextPts = 0;
     int sampleRate = 0;
     int channels = 0;
+    QAudioFormat outputFormat;
+    AVSampleFormat outputSampleFormat = AV_SAMPLE_FMT_NONE;
+    QString error;
+    mutable QMutex errorMutex; // Callback writes; UI reads without racing QString.
     bool sourceFlushed = false;
     bool sinkFinished = false;
 
-    ~VariableRateProcessor() {
+    ~GraphProcessor() {
         avfilter_graph_free(&graph);
     }
 
@@ -77,27 +119,56 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
         return std::max<qint64>(0, pending.size() - pendingOffset);
     }
 
+    bool fail(const QString& message) {
+        const QMutexLocker lock(&errorMutex);
+        if (error.isEmpty()) error = message;
+        sinkFinished = true;
+        return false;
+    }
+
+    QString failure() const {
+        const QMutexLocker lock(&errorMutex);
+        return error;
+    }
+
+    bool fail(const char *operation, int code) {
+        char detail[AV_ERROR_MAX_STRING_SIZE] = {};
+        av_strerror(code, detail, sizeof(detail));
+        return fail(QStringLiteral("Audio %1 failed: %2").arg(QLatin1String(operation),
+                                                             QString::fromUtf8(detail)));
+    }
+
     bool configure(const QList<VDAudioFilterInstance>& chain,
                    int requestedSampleRate,
-                   int requestedChannels) {
+                   int requestedChannels, const QAudioFormat& requestedOutput) {
         avfilter_graph_free(&graph);
         source = nullptr;
         sink = nullptr;
         pending.clear();
+        inputTail.clear();
+        error.clear();
         pendingOffset = 0;
         nextPts = 0;
         sourceFlushed = false;
         sinkFinished = false;
-        sampleRate = std::max(1, requestedSampleRate);
-        channels = std::max(1, requestedChannels);
+        sampleRate = requestedSampleRate;
+        channels = requestedChannels;
+        outputFormat = requestedOutput;
+        switch (outputFormat.sampleFormat()) {
+        case QAudioFormat::UInt8: outputSampleFormat = AV_SAMPLE_FMT_U8; break;
+        case QAudioFormat::Int16: outputSampleFormat = AV_SAMPLE_FMT_S16; break;
+        case QAudioFormat::Int32: outputSampleFormat = AV_SAMPLE_FMT_S32; break;
+        case QAudioFormat::Float: outputSampleFormat = AV_SAMPLE_FMT_FLT; break;
+        default: return fail(QStringLiteral("Unsupported audio device sample format."));
+        }
 
-        // Reuse the export graph generator, then pin the live graph back to the
-        // QAudioSink format. That keeps preview/export semantics aligned while
-        // giving this pull device a stable packed-S16 contract.
+        // Effects precede device conversion, even if the sound card prefers
+        // another rate, channel count or floating-point sample format.
         VDQtAudioFilterSystem graphSystem;
         graphSystem.replaceActiveChain(chain);
-        QString description = graphSystem.ffmpegFilterGraph(sampleRate);
-        if (description.isEmpty()) return false;
+        QString description = graphSystem.ffmpegFilterGraph(sampleRate, &error);
+        if (!error.isEmpty()) return false;
+        if (description.isEmpty()) description = QStringLiteral("anull");
 
         AVChannelLayout layout = {};
         av_channel_layout_default(&layout, channels);
@@ -105,24 +176,34 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
         if (av_channel_layout_describe(
                 &layout, layoutName, sizeof(layoutName)) < 0) {
             av_channel_layout_uninit(&layout);
-            return false;
+            return fail(QStringLiteral("Could not describe the source audio layout."));
+        }
+        const QString inputLayoutName = QString::fromUtf8(layoutName);
+        av_channel_layout_uninit(&layout);
+        av_channel_layout_default(&layout, outputFormat.channelCount());
+        if (av_channel_layout_describe(&layout, layoutName, sizeof(layoutName)) < 0) {
+            av_channel_layout_uninit(&layout);
+            return fail(QStringLiteral("Could not describe the device audio layout."));
         }
         description += QString(
-            ",aresample=%1,aformat=sample_fmts=s16:sample_rates=%1:channel_layouts=%2")
-            .arg(sampleRate)
-            .arg(QString::fromUtf8(layoutName));
+            ",aresample=%1,aformat=sample_fmts=%2:sample_rates=%1:channel_layouts=%3")
+            .arg(outputFormat.sampleRate())
+            .arg(QLatin1String(av_get_sample_fmt_name(outputSampleFormat)), QString::fromUtf8(layoutName));
 
         graph = avfilter_graph_alloc();
         if (!graph) {
             av_channel_layout_uninit(&layout);
-            return false;
+            return fail(QStringLiteral("Could not allocate the audio graph."));
         }
+        // These are small streaming blocks. Auto-sizing a graph to every CPU
+        // creates unnecessary session threads and increases callback latency.
+        graph->nb_threads = 1;
         const AVFilter *bufferFilter = avfilter_get_by_name("abuffer");
         const AVFilter *sinkFilter = avfilter_get_by_name("abuffersink");
         const QByteArray sourceArguments = QString(
             "time_base=1/%1:sample_rate=%1:sample_fmt=s16:channel_layout=%2")
             .arg(sampleRate)
-            .arg(QString::fromUtf8(layoutName))
+            .arg(inputLayoutName)
             .toUtf8();
         av_channel_layout_uninit(&layout);
         if (!bufferFilter || !sinkFilter
@@ -134,7 +215,7 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
             avfilter_graph_free(&graph);
             source = nullptr;
             sink = nullptr;
-            return false;
+            return fail(QStringLiteral("Could not create the audio graph endpoints."));
         }
 
         AVFilterInOut *outputs = avfilter_inout_alloc();
@@ -145,7 +226,7 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
             avfilter_graph_free(&graph);
             source = nullptr;
             sink = nullptr;
-            return false;
+            return fail(QStringLiteral("Could not allocate audio graph connections."));
         }
         outputs->name = av_strdup("in");
         outputs->filter_ctx = source;
@@ -160,11 +241,12 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
             graph, utf8Description.constData(), &inputs, &outputs, nullptr);
         avfilter_inout_free(&outputs);
         avfilter_inout_free(&inputs);
-        if (parseResult < 0 || avfilter_graph_config(graph, nullptr) < 0) {
+        const int configResult = parseResult < 0 ? parseResult : avfilter_graph_config(graph, nullptr);
+        if (configResult < 0) {
             avfilter_graph_free(&graph);
             source = nullptr;
             sink = nullptr;
-            return false;
+            return fail("graph configuration", configResult);
         }
         return true;
     }
@@ -174,7 +256,7 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
         // Convert that push behavior into pending bytes consumed by readData().
         if (!sink || sinkFinished) return;
         AVFrame *frame = av_frame_alloc();
-        if (!frame) return;
+        if (!frame) { fail(QStringLiteral("Could not allocate an audio output frame.")); return; }
         for (;;) {
             av_frame_unref(frame);
             const int result = av_buffersink_get_frame(sink, frame);
@@ -184,26 +266,26 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
                 break;
             }
             if (result < 0) {
-                sinkFinished = true;
+                fail("filtering", result);
                 break;
             }
-            const int outputChannels = frame->ch_layout.nb_channels > 0
-                ? frame->ch_layout.nb_channels : channels;
+            const int outputChannels = frame->ch_layout.nb_channels;
             const qint64 byteCount = static_cast<qint64>(frame->nb_samples)
-                * outputChannels * sizeof(qint16);
-            if (frame->format == AV_SAMPLE_FMT_S16 && frame->data[0]
-                && byteCount > 0
-                && byteCount <= std::numeric_limits<int>::max()) {
+                * outputFormat.bytesPerFrame();
+            if (frame->format == outputSampleFormat && frame->data[0]
+                && outputChannels == outputFormat.channelCount()
+                && byteCount > 0 && byteCount <= 32 * 1024 * 1024
+                && pendingBytes() <= 32 * 1024 * 1024 - byteCount) {
                 pending.append(
                     reinterpret_cast<const char *>(frame->data[0]),
                     static_cast<int>(byteCount));
-            }
+            } else { fail(QStringLiteral("Invalid or excessive audio graph output.")); break; }
         }
         av_frame_free(&frame);
     }
 
     bool feed(QIODevice *input, qint64 preferredBytes) {
-        if (!source || !input || sourceFlushed) return false;
+        if (!source || !input || sourceFlushed || !error.isEmpty()) return false;
         const qint64 frameBytes = channels * sizeof(qint16);
         // Read complete interleaved sample frames and cap temporary allocation;
         // a rate-changing graph can otherwise amplify a very large pull request.
@@ -211,46 +293,56 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
             preferredBytes, frameBytes * 4096);
         requestBytes -= requestBytes % frameBytes;
         requestBytes = std::min<qint64>(requestBytes, 1024 * 1024);
-        QByteArray block(static_cast<int>(requestBytes), Qt::Uninitialized);
-        qint64 bytesRead = input->read(block.data(), requestBytes);
-        if (bytesRead <= 0) {
+        QByteArray block = std::move(inputTail);
+        const qsizetype previousBytes = block.size();
+        block.resize(previousBytes + requestBytes);
+        const qint64 bytesRead = input->read(block.data() + previousBytes, requestBytes);
+        block.resize(previousBytes + std::max<qint64>(0, bytesRead));
+        if (bytesRead < 0) return fail(QStringLiteral("Audio input failed: %1").arg(input->errorString()));
+        if (bytesRead == 0) {
+            inputTail = std::move(block);
             if (input->atEnd()) {
+                if (!inputTail.isEmpty()) return fail(QStringLiteral("Audio input ended with an incomplete sample frame."));
                 const int flushResult = av_buffersrc_add_frame_flags(
                     source, nullptr, 0);
                 sourceFlushed = true;
-                if (flushResult < 0) sinkFinished = true;
+                if (flushResult < 0) return fail("graph flush", flushResult);
                 drainSink();
             }
             return false;
         }
-        bytesRead -= bytesRead % frameBytes;
-        if (bytesRead <= 0) return false;
+        const qint64 completeBytes = block.size() - block.size() % frameBytes;
+        inputTail = block.mid(completeBytes);
+        if (completeBytes == 0) return true; // Fragment retained; ask for more.
 
         AVFrame *frame = av_frame_alloc();
-        if (!frame) return false;
+        if (!frame) return fail(QStringLiteral("Could not allocate an audio input frame."));
         frame->format = AV_SAMPLE_FMT_S16;
         frame->sample_rate = sampleRate;
         av_channel_layout_default(&frame->ch_layout, channels);
-        frame->nb_samples = static_cast<int>(bytesRead / frameBytes);
+        frame->nb_samples = static_cast<int>(completeBytes / frameBytes);
         frame->pts = nextPts;
+        if (nextPts > std::numeric_limits<qint64>::max() - frame->nb_samples) {
+            av_frame_free(&frame);
+            return fail(QStringLiteral("Audio sample timestamp overflow."));
+        }
         nextPts += frame->nb_samples;
         bool accepted = false;
         if (av_frame_get_buffer(frame, 0) >= 0) {
             std::memcpy(frame->data[0], block.constData(),
-                        static_cast<size_t>(bytesRead));
+                        static_cast<size_t>(completeBytes));
             accepted = av_buffersrc_add_frame_flags(
                 source, frame, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0;
         }
         av_frame_free(&frame);
         if (accepted) drainSink();
+        else fail(QStringLiteral("Could not submit the audio input frame."));
         return accepted;
     }
 
     qint64 read(QIODevice *input, char *data, qint64 maximumLength) {
         if (!data || maximumLength <= 0 || !graph) return 0;
-        const qint64 frameBytes = channels * sizeof(qint16);
-        maximumLength -= maximumLength % frameBytes;
-        if (maximumLength <= 0) return 0;
+        if (!error.isEmpty()) return -1;
         drainSink();
         for (int attempt = 0;
              pendingBytes() == 0 && !sinkFinished && attempt < 64;
@@ -261,6 +353,7 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
             }
         }
         const qint64 copied = std::min(maximumLength, pendingBytes());
+        if (!error.isEmpty()) return -1;
         if (copied <= 0) return 0;
         std::memcpy(data, pending.constData() + pendingOffset,
                     static_cast<size_t>(copied));
@@ -277,162 +370,6 @@ struct VDQtAudioFilterDevice::VariableRateProcessor {
 };
 
 // ---------------------------------------------------------------------------
-// Fixed-rate in-place DSP
-// ---------------------------------------------------------------------------
-
-void VDQtAudioFilterProcessor::configure(
-    const QList<VDAudioFilterInstance>& chain,
-    int sampleRate,
-    int channels) {
-    mChain = chain;
-    mSampleRate = std::max(1, sampleRate);
-    mChannels = std::max(1, channels);
-    // State slots follow chain indices, including disabled entries. Reordering
-    // or replacing a chain calls configure/reset so delay and IIR history can
-    // never migrate accidentally to a different filter.
-    mStates.resize(mChain.size());
-    reset();
-}
-
-void VDQtAudioFilterProcessor::reset() {
-    for (int index = 0; index < mStates.size(); ++index) {
-        State& state = mStates[index];
-        state.previousInput.fill(0.0, mChannels);
-        state.previousOutput.fill(0.0, mChannels);
-        state.delayPosition = 0;
-        state.phase = 0.0;
-        state.delay.clear();
-        if (index < mChain.size()
-            && mChain.at(index).type == VDAudioFilterType::Chorus) {
-            const double delayMs = std::clamp(
-                mChain.at(index).params.value(QStringLiteral("delayMs"), 20.0),
-                1.0, 100.0);
-            const double depthMs = std::clamp(
-                mChain.at(index).params.value(QStringLiteral("depthMs"), 5.0),
-                0.0, 50.0);
-            const int delayFrames = std::max(
-                2, static_cast<int>(std::ceil(
-                    (delayMs + depthMs + 2.0) * mSampleRate / 1000.0)));
-            state.delay.fill(0, delayFrames * mChannels);
-        }
-    }
-}
-
-void VDQtAudioFilterProcessor::processInt16(char *data, qint64 bytes) {
-    if (!data || bytes <= 0 || mChannels <= 0) return;
-    const qint64 frameBytes = static_cast<qint64>(mChannels) * sizeof(qint16);
-    const qint64 frames = bytes / frameBytes;
-    qint16 *samples = reinterpret_cast<qint16 *>(data);
-
-    // Process whole buffers one filter at a time to preserve chain order. Each
-    // stateful filter retains its per-channel history across QAudioSink pulls.
-    for (int filterIndex = 0; filterIndex < mChain.size(); ++filterIndex) {
-        const VDAudioFilterInstance& filter = mChain.at(filterIndex);
-        if (!filter.enabled) continue;
-        State& state = mStates[filterIndex];
-
-        if (filter.type == VDAudioFilterType::Gain) {
-            const double gain = std::pow(
-                10.0, filter.params.value(QStringLiteral("decibels"), 0.0) / 20.0);
-            for (qint64 index = 0; index < frames * mChannels; ++index)
-                samples[index] = clippedSample(samples[index] * gain);
-        } else if (filter.type == VDAudioFilterType::LowPass) {
-            const double cutoff = std::clamp(
-                filter.params.value(QStringLiteral("cutoffHz"), 3000.0),
-                10.0, mSampleRate * 0.49);
-            const double alpha = 1.0 - std::exp(
-                -2.0 * std::acos(-1.0) * cutoff / mSampleRate);
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                for (int channel = 0; channel < mChannels; ++channel) {
-                    const qint64 offset = frame * mChannels + channel;
-                    state.previousOutput[channel] += alpha
-                        * (samples[offset] - state.previousOutput[channel]);
-                    samples[offset] = clippedSample(state.previousOutput[channel]);
-                }
-            }
-        } else if (filter.type == VDAudioFilterType::HighPass) {
-            const double cutoff = std::clamp(
-                filter.params.value(QStringLiteral("cutoffHz"), 120.0),
-                10.0, mSampleRate * 0.49);
-            const double rc = 1.0 / (2.0 * std::acos(-1.0) * cutoff);
-            const double dt = 1.0 / mSampleRate;
-            const double alpha = rc / (rc + dt);
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                for (int channel = 0; channel < mChannels; ++channel) {
-                    const qint64 offset = frame * mChannels + channel;
-                    const double input = samples[offset];
-                    const double output = alpha
-                        * (state.previousOutput[channel] + input
-                           - state.previousInput[channel]);
-                    state.previousInput[channel] = input;
-                    state.previousOutput[channel] = output;
-                    samples[offset] = clippedSample(output);
-                }
-            }
-        } else if (filter.type == VDAudioFilterType::ChannelMix
-                   && mChannels >= 2) {
-            const double left = filter.params.value(QStringLiteral("left"), 1.0);
-            const double right = filter.params.value(QStringLiteral("right"), 1.0);
-            const double cross = filter.params.value(QStringLiteral("crossfeed"), 0.0);
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                qint16 *sample = samples + frame * mChannels;
-                const double originalLeft = sample[0];
-                const double originalRight = sample[1];
-                sample[0] = clippedSample(originalLeft * left + originalRight * cross);
-                sample[1] = clippedSample(originalRight * right + originalLeft * cross);
-            }
-        } else if (filter.type == VDAudioFilterType::CenterCut
-                   && mChannels >= 2) {
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                qint16 *sample = samples + frame * mChannels;
-                const double difference = (sample[0] - sample[1]) * 0.5;
-                sample[0] = clippedSample(difference);
-                sample[1] = clippedSample(-difference);
-            }
-        } else if (filter.type == VDAudioFilterType::CenterMix
-                   && mChannels >= 2) {
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                qint16 *sample = samples + frame * mChannels;
-                const qint16 mixed = clippedSample((sample[0] + sample[1]) * 0.5);
-                sample[0] = mixed;
-                sample[1] = mixed;
-            }
-        } else if (filter.type == VDAudioFilterType::Chorus
-                   && !state.delay.isEmpty()) {
-            const double delayMs = filter.params.value(QStringLiteral("delayMs"), 20.0);
-            const double depthMs = filter.params.value(QStringLiteral("depthMs"), 5.0);
-            const double rateHz = std::clamp(
-                filter.params.value(QStringLiteral("rateHz"), 0.8), 0.05, 10.0);
-            const double mix = std::clamp(
-                filter.params.value(QStringLiteral("mix"), 0.35), 0.0, 1.0);
-            const qint64 delayFrames = state.delay.size() / mChannels;
-            for (qint64 frame = 0; frame < frames; ++frame) {
-                const double modulation = (std::sin(state.phase) + 1.0) * 0.5;
-                const qint64 offsetFrames = std::clamp<qint64>(
-                    static_cast<qint64>(std::llround(
-                        (delayMs + depthMs * modulation) * mSampleRate / 1000.0)),
-                    1, delayFrames - 1);
-                const qint64 readFrame = (state.delayPosition - offsetFrames
-                    + delayFrames) % delayFrames;
-                for (int channel = 0; channel < mChannels; ++channel) {
-                    const qint64 sampleOffset = frame * mChannels + channel;
-                    const qint64 writeOffset = state.delayPosition * mChannels + channel;
-                    const qint64 readOffset = readFrame * mChannels + channel;
-                    const qint16 dry = samples[sampleOffset];
-                    samples[sampleOffset] = clippedSample(
-                        dry * (1.0 - mix) + state.delay[readOffset] * mix);
-                    state.delay[writeOffset] = dry;
-                }
-                state.delayPosition = (state.delayPosition + 1) % delayFrames;
-                state.phase += 2.0 * std::acos(-1.0) * rateHz / mSampleRate;
-                if (state.phase > 2.0 * std::acos(-1.0))
-                    state.phase -= 2.0 * std::acos(-1.0);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Live pull-through device and session chain catalog
 // ---------------------------------------------------------------------------
 
@@ -441,77 +378,104 @@ VDQtAudioFilterDevice::VDQtAudioFilterDevice(
     int sampleRate,
     int channels,
     QObject *parent)
+    : VDQtAudioFilterDevice(source, sampleRate, channels, [=] {
+        QAudioFormat format;
+        format.setSampleRate(sampleRate);
+        format.setChannelCount(channels);
+        format.setSampleFormat(QAudioFormat::Int16);
+        return format;
+      }(), parent) {}
+
+VDQtAudioFilterDevice::VDQtAudioFilterDevice(
+    QIODevice *source, int sampleRate, int channels,
+    const QAudioFormat& outputFormat, QObject *parent)
     : QIODevice(parent)
     , mSource(source)
     , mSampleRate(sampleRate)
-    , mChannels(channels) {
+    , mChannels(channels)
+    , mOutputFormat(outputFormat) {
     if (mSource) {
         QObject::connect(mSource, &QIODevice::readyRead, this,
                          [this]() { Q_EMIT readyRead(); });
     }
     open(QIODevice::ReadOnly);
+    setFilterChain({});
 }
 
 VDQtAudioFilterDevice::~VDQtAudioFilterDevice() = default;
 
-void VDQtAudioFilterDevice::setFilterChain(
+bool VDQtAudioFilterDevice::setFilterChain(
     const QList<VDAudioFilterInstance>& chain) {
-    mChain = chain;
-    mProcessor.configure(chain, mSampleRate, mChannels);
-    // Fixed-duration effects stay in the inexpensive in-place processor.
-    // Anything that changes sample count requires libavfilter's buffered graph.
-    const bool needsVariableRateProcessor = std::any_of(
-        chain.cbegin(), chain.cend(), [](const VDAudioFilterInstance& filter) {
-            return filter.enabled
-                && (filter.type == VDAudioFilterType::Resample
-                    || filter.type == VDAudioFilterType::PitchShift
-                    || filter.type == VDAudioFilterType::TimeStretch);
-        });
-    if (needsVariableRateProcessor) {
-        auto processor = std::make_unique<VariableRateProcessor>();
-        if (processor->configure(chain, mSampleRate, mChannels)) {
-            mVariableProcessor = std::move(processor);
-        } else {
-            qWarning("[Audio filters] Could not initialize the live FFmpeg filter graph.");
-            mVariableProcessor.reset();
-        }
-    } else {
-        mVariableProcessor.reset();
+    const auto snapshot = chain; // resetProcessor may pass our own mChain.
+    QIODevice::close(); // Discard Qt's read-ahead bytes on seek/configuration.
+    open(QIODevice::ReadOnly);
+    mChain = snapshot;
+    mGraphProcessor.reset();
+    mConfigurationError.clear();
+    if (!mSource || mSampleRate < 1000 || mSampleRate > 768000
+        || mChannels < 1 || mChannels > 64 || !mOutputFormat.isValid()
+        || mOutputFormat.sampleRate() < 1000 || mOutputFormat.sampleRate() > 768000
+        || mOutputFormat.channelCount() > 64) {
+        mConfigurationError = QStringLiteral("Invalid audio source or output format.");
+        return false;
     }
+    if (!VDQtValidateAudioFilters(chain, &mConfigurationError)) return false;
+    const bool needsGraph = std::any_of(
+        chain.cbegin(), chain.cend(), [](const VDAudioFilterInstance& filter) {
+            return filter.enabled;
+        }) || mOutputFormat.sampleRate() != mSampleRate
+            || mOutputFormat.channelCount() != mChannels
+            || mOutputFormat.sampleFormat() != QAudioFormat::Int16;
+    if (needsGraph) {
+        auto processor = std::make_unique<GraphProcessor>();
+        if (!processor->configure(chain, mSampleRate, mChannels, mOutputFormat)) {
+            mConfigurationError = processor->error;
+            return false;
+        }
+        mGraphProcessor = std::move(processor);
+    }
+    return true;
 }
 
-void VDQtAudioFilterDevice::resetProcessor() {
-    mProcessor.reset();
-    if (mVariableProcessor)
-        mVariableProcessor->configure(mChain, mSampleRate, mChannels);
+bool VDQtAudioFilterDevice::resetProcessor() {
+    return setFilterChain(mChain);
+}
+
+QString VDQtAudioFilterDevice::error() const {
+    return mGraphProcessor ? mGraphProcessor->failure() : mConfigurationError;
 }
 
 bool VDQtAudioFilterDevice::atEnd() const {
-    if (!mSource) return true;
-    if (mVariableProcessor) {
-        return mVariableProcessor->sinkFinished
-            && mVariableProcessor->pendingBytes() == 0;
+    if (!error().isEmpty() || !mSource) return true;
+    // Upstream EOF does not mean Qt's already buffered output has been heard.
+    if (QIODevice::bytesAvailable() > 0) return false;
+    if (mGraphProcessor) {
+        return mGraphProcessor->sinkFinished
+            && mGraphProcessor->pendingBytes() == 0;
     }
     return mSource->atEnd();
 }
 
 qint64 VDQtAudioFilterDevice::bytesAvailable() const {
-    return (mVariableProcessor ? mVariableProcessor->pendingBytes() : 0)
-        + (mSource ? mSource->bytesAvailable() : 0)
-        + QIODevice::bytesAvailable();
+    const qint64 buffered = QIODevice::bytesAvailable();
+    if (!error().isEmpty()) return buffered;
+    if (!mGraphProcessor) return buffered + (mSource ? mSource->bytesAvailable() : 0);
+    // Upstream and downstream bytes have different units after conversion.
+    // Advertise a minimal readable hint, not a fictitious unfiltered byte count.
+    return buffered + mGraphProcessor->pendingBytes()
+        + (mSource && (mSource->bytesAvailable() > 0 || mSource->atEnd())
+           && !mGraphProcessor->sinkFinished ? mOutputFormat.bytesPerFrame() : 0);
 }
 
 qint64 VDQtAudioFilterDevice::readData(char *data, qint64 maximumLength) {
     if (!mSource || !data || maximumLength <= 0) return 0;
-    if (mVariableProcessor)
-        return mVariableProcessor->read(mSource, data, maximumLength);
-    // The ordinary path is a transparent pull followed by in-place DSP; it
-    // neither owns nor advances the upstream source except through this read.
-    const qint64 frameBytes = std::max<qint64>(1, mChannels * sizeof(qint16));
-    maximumLength -= maximumLength % frameBytes;
-    const qint64 read = mSource->read(data, maximumLength);
-    if (read > 0) mProcessor.processInt16(data, read);
-    return read;
+    if (!error().isEmpty()) { setErrorString(error()); return -1; }
+    if (mGraphProcessor) {
+        const auto read = mGraphProcessor->read(mSource, data, maximumLength);
+        if (read < 0) setErrorString(error());
+        return read;
+    }
+    return mSource->read(data, maximumLength);
 }
 
 VDQtAudioFilterSystem& VDQtAudioFilterSystem::instance() {
@@ -617,9 +581,9 @@ bool VDQtAudioFilterSystem::hasEnabledFilters() const {
         [](const VDAudioFilterInstance& filter) { return filter.enabled; });
 }
 
-// Offline and variable-rate live processing share this graph translation. Keep
-// parameter defaults synchronized with createFilter() and the in-place DSP.
-QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate) const {
+// All live/offline effects share this translation and parameter validation.
+QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate, QString *errorMessage) const {
+    if (!VDQtValidateAudioFilters(mActiveChain, errorMessage)) return {};
     // This output is parsed both by libavfilter and ffmpeg(1); do not introduce
     // shell quoting or options that are valid in only one of those contexts.
     sourceSampleRate = std::clamp(sourceSampleRate, 1000, 768000);
@@ -660,7 +624,8 @@ QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate) const {
             const double ratio = std::pow(2.0,
                 filter.params.value(QStringLiteral("semitones"), 0.0) / 12.0);
             const int shiftedRate = std::clamp(
-                static_cast<int>(std::llround(currentSampleRate * ratio)),
+                static_cast<int>(std::llround(std::clamp(currentSampleRate * ratio,
+                                                        1000.0, 768000.0))),
                 1000, 768000);
             graph << QString("asetrate=%1").arg(shiftedRate);
             graph << QString("aresample=%1").arg(currentSampleRate);

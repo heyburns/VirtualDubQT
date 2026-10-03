@@ -2267,9 +2267,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             if (audioMode == AudioMode_DirectStreamCopy) {
                 args << "-c:a" << "copy";
             } else {
+                QString audioFilterError;
                 const QString audioGraph = audioFilters
                     .ffmpegFilterGraph(audioPlayer
-                        ? audioPlayer->getSampleRate() : 48000);
+                        ? audioPlayer->getSampleRate() : 48000, &audioFilterError);
+                if (!audioFilterError.isEmpty()) {
+                    mLastError = audioFilterError;
+                    return false;
+                }
                 if (!audioGraph.isEmpty()) args << "-af" << audioGraph;
                 args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
                     processing.audioCodec);

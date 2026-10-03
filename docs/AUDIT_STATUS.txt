@@ -61,7 +61,9 @@ Remaining execution sequence
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
 [x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
     Effects run once after edit assembly; source precision is retained until encoding.
-[ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
+[x] M14/M15: matching audio effects and device-boundary conversion without bypass.
+    All ten effects, EOF tails, seek resets and supported sink formats tested
+    with PCM fixtures; physical listening/device negotiation remains a hardware gate.
 [x] Audio follow-up: separate held-picture and advancing audio mappings, including
     masked VFR playback intervals. Physical continuous-sound verification is pending.
 [ ] M08/M09/M11/M12/M13: AVS formats, color/aspect metadata and effective codec controls.

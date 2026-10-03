@@ -2,6 +2,7 @@
 // reference JSON: command spellings, built-in filter catalogs/defaults, audio
 // filters, and timeline semantics. It does not launch the full GUI.
 #include "VDQtAudioFilterSystem.h"
+#include <QBuffer>
 #include "VDQtFilterSystem.h"
 #include "VDQtScriptEngine.h"
 #include "VDQtTimeline.h"
@@ -167,11 +168,18 @@ QJsonObject buildContract(QString *errorMessage) {
     VDAudioFilterInstance gain =
         VDQtAudioFilterSystem::instance().createFilter(VDAudioFilterType::Gain);
     gain.params[QStringLiteral("decibels")] = 20.0 * std::log10(2.0);
-    VDQtAudioFilterProcessor audioProcessor;
-    audioProcessor.configure({gain}, 48000, 1);
     qint16 samples[] = {1000, -1000, 20000, -20000};
-    audioProcessor.processInt16(reinterpret_cast<char *>(samples),
-                                sizeof(samples));
+    QByteArray audioInput(reinterpret_cast<const char *>(samples), sizeof(samples));
+    QBuffer source(&audioInput);
+    source.open(QIODevice::ReadOnly);
+    VDQtAudioFilterDevice device(&source, 48000, 1);
+    const bool configured = device.setFilterChain({gain});
+    const auto output = device.read(sizeof(samples));
+    if (!configured || output.size() != sizeof(samples)) {
+        if (errorMessage) *errorMessage = QStringLiteral("Live audio gain graph failed.");
+        return {};
+    }
+    std::memcpy(samples, output.constData(), sizeof(samples));
     QJsonArray audioSamples;
     for (qint16 sample : samples) audioSamples.append(sample);
     contract[QStringLiteral("audioGainSamples")] = audioSamples;

@@ -1782,6 +1782,8 @@ void VDQtMainWindow::applyProcessingState(const VDQtProcessingState& state) {
     VDQtFilterSystem::instance().replaceActiveChain(state.filters);
     VDQtAudioFilterSystem::instance().replaceActiveChain(state.audioFilters);
     mAudioPlayer.refreshAudioFilters();
+    if (!mAudioPlayer.playbackError().isEmpty())
+        statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
     mVideoDecoder.setDecompressionConfig(
         mDecompressionFormatConfig.formatName,
         mDecompressionFormatConfig.colorSpace,
@@ -7711,6 +7713,8 @@ void VDQtMainWindow::onAudioSource() {
     mAudioDisabled = false;
     mAudioStreamIndex = mAudioPlayer.getSelectedStreamIndex();
     mAudioPlayer.refreshAudioFilters();
+    if (!mAudioPlayer.playbackError().isEmpty())
+        statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
     onAudioModeFullProcessing();
     statusBar()->showMessage(
         mAudioSourcePath.isEmpty()
@@ -7930,6 +7934,8 @@ void VDQtMainWindow::onAudioFilters() {
 
     system.replaceActiveChain(working);
     mAudioPlayer.refreshAudioFilters();
+    if (!mAudioPlayer.playbackError().isEmpty())
+        statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
     if (system.hasEnabledFilters()) onAudioModeFullProcessing();
     statusBar()->showMessage(QString("Audio filter chain updated: %1 filter(s)")
                                  .arg(working.size()));
@@ -8973,6 +8979,8 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
             if (!resumePausedAudio)
                 seekAudioToVideoFrame(mPlaybackStartFrame);
             mAudioPlayer.play();
+            if (!mAudioPlayer.playbackError().isEmpty())
+                statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
             mPlaybackPausedFrame = -1;
             syncInteractiveFilterChain();
             mDecodedPreviewFrames.clear();
@@ -9017,6 +9025,8 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
             if (!resumePausedAudio)
                 seekAudioToVideoFrame(mPlaybackStartFrame);
             mAudioPlayer.play();
+            if (!mAudioPlayer.playbackError().isEmpty())
+                statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
             mPlaybackPausedFrame = -1;
             syncInteractiveFilterChain();
             mDecodedPreviewFrames.clear();
@@ -9133,6 +9143,15 @@ void VDQtMainWindow::onPlaybackTick() {
         return;
     }
 
+    // Graph failures can arise after start (for example a damaged producer).
+    // Stop the failed sound path once, retain wall-clock video fallback, and
+    // expose its diagnostic rather than silently resuming unfiltered samples.
+    if (mAudioPlayer.isPlaying() && !mAudioPlayer.playbackError().isEmpty()) {
+        const QString message = mAudioPlayer.playbackError();
+        mAudioPlayer.pause();
+        statusBar()->showMessage(QStringLiteral("Audio playback: ") + message);
+    }
+
     double audioElapsed = -1.0;
     // With an active output device, use the samples actually presented as the
     // clock. Decoder read-ahead can be hundreds of milliseconds ahead and is
@@ -9202,6 +9221,8 @@ void VDQtMainWindow::onPlaybackTick() {
                 != targetFrame - currentTimelineFrame) {
             seekAudioToVideoFrame(targetFrame);
             mAudioPlayer.play();
+            if (!mAudioPlayer.playbackError().isEmpty())
+                statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
             const double timestamp = targetSourceFrame >= 0
                 ? mVideoDecoder.getFrameTimestampSeconds(targetSourceFrame) : -1.0;
             mPlaybackAudioOriginSeconds = timestamp;

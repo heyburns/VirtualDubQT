@@ -118,6 +118,9 @@ public:
     void close();
 
     void play();
+    // Empty while the configured filter/device pipeline is usable. The UI can
+    // explain graph failure without silently starting unfiltered audio.
+    QString playbackError() const;
     void pause();
     void stop();
     void seekToFrame(int frameIndex, double fps);

@@ -977,3 +977,32 @@ dotted names and protect a source with the same output extension. Focused
 Release 4/4 and ASan/UBSan 4/4 passed (queue, numeric inputs, stabilization and
 actual-app smoke). The rebuilt regular binary independently passed real
 MP4/native-AVS decode/export smoke.
+
+Shared live/export audio effects and sink conversion (M14/M15)
+-------------------------------------------------------------
+
+The real pull-device test failed before repair, first exposing premature EOF
+with 7680 bytes still in Qt's read-ahead buffer. All enabled effects now use the
+same libavfilter graph as export; adding an identity resampler cannot switch
+algorithms. Removed the now-unused approximate native fixed-rate DSP and moved
+its gain/parity tests onto the actual live device. Both AVS and ordinary audio
+retain source-rate/channel S16 internally, then convert after effects to the
+sound device's preferred UInt8/Int16/Int32/Float format. Graph configuration or
+processing failure never silently falls back to unfiltered playback.
+
+Tests compare all ten filters against independent ffmpeg output, with matching
+sample counts/tails and at most one S16 quantization step difference. Converted
+mono/32 kHz output matches reference bytes in all four formats. They cover an
+identity resampler, partial input frames, invalid/nonfinite/exponential values,
+reconfiguration and seeks with unread Qt buffer bytes. Validation preserves
+harmless legacy 64-bit configuration fields and deep attenuation used as mute.
+Graphs have one worker thread and a bounded pending-output budget; callback
+error messages are synchronized for UI reads.
+
+Full Release 53/53 and ASan/UBSan 49/49 passed. After the final legacy-field
+compatibility adjustment, focused Release 8/8 and ASan/UBSan 8/8 passed again.
+The rebuilt regular binary independently passed MP4/native-AVS smoke. A separate
+idle Release benchmark of lowpass+chorus+pitch+stretch measured 4096-byte pulls
+at 0.586 ms p99 / 0.689 ms worst over ten runs (21.3 ms of S16 stereo audio per
+pull). This measures a buffered PCM source, not a physical sink, AVS plugin
+decode cost or actual audible continuity; those remain separate hardware gates.
