@@ -7164,10 +7164,12 @@ bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
                              0, estimate > 0 ? estimate : 0, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
-    const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.scanVideoStream(
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.ensureFrameIndex(
         [&progress, estimate, operationLabel](int current, int reportedTotal) {
             if (estimate > 0) {
-                const int maximum = std::max(estimate, reportedTotal);
+                const int maximum = std::max({estimate, reportedTotal, current});
                 progress.setRange(0, maximum);
                 progress.setValue(std::min(current, maximum));
             } else {

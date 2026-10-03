@@ -493,3 +493,29 @@ and real-binary media regressions. The rebuilt regular binary also passed the
 maintained MP4/native-AVS export smoke. Exact random VFR/duplicate-PTS seeking,
 index sharing/reuse and hardware checks remain separate work. The reported
 progressive AVS/ProRes slowdown remains unreproduced and is not closed here.
+
+Verified-index reuse for repeated exports (P02)
+----------------------------------------------
+
+operation_index_reuse failed before repair because a second four-frame raw export
+decoded the complete 48-frame source again. It now preserves identical selected
+pixels without that scan. A rendered FFV1 export after a color-conversion change
+also reuses the index and is independently decoded to verify exactly four output
+frames. Explicit error analysis still decodes all 48 source frames afresh.
+
+decoder_index_tests additionally checks cached ensureFrameIndex() performs zero
+decodes, cached-request cancellation preserves proof, cancelled fresh scans do
+not count as complete, incomplete scans rebuild, corrupt-frame-policy changes
+invalidate/reverify, and closing/reopening the same path starts without inherited
+index state. Native AVS length is authoritative without rendering every frame.
+Indexing progress dialogs no longer auto-reset cancellation at provisional limits.
+
+Complete-index proof is source-owned, not an exact-looking metadata estimate or
+a global cache retaining earlier sessions. Raw/rendered export and segment/retry
+paths sharing the open decoder reuse it. Worker/editor sharing, exact random VFR
+ordinals and the unreproduced progressive AVS/ProRes loss remain separate work.
+
+Validation: focused Release/sanitizer checks passed 5/5 each, then full Release
+37/37 and sanitizer 33/33 passed. The rebuilt regular binary passed the maintained
+MP4/native-AVS raw-export smoke. Existing physical-device, leak-check and separate
+codec-troubleshooting-suite exclusions still apply.

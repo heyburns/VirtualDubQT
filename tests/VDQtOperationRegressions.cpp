@@ -803,6 +803,56 @@ bool unknownTimeline(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool indexReuse(VDQtTestFixtures& fixtures) {
+    VDQtVideoDecoder decoder;
+    VDQtVideoExporter exporter;
+    if (!decoder.openFile(fixtures.mp4)) return false;
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = fixtures.mp4;
+    raw.outputPath = fixtures.directory.filePath("first-index.raw");
+    raw.startFrame = 2; raw.endFrame = 5;
+    raw.pixelFormat = "rgb24";
+    raw.unattended = true;
+    if (!exporter.exportRawVideo(raw, &decoder)) return false;
+    const QByteArray first = readFile(raw.outputPath);
+    decoder.clearCache();
+    decoder.resetPerformanceCounters();
+    raw.outputPath = fixtures.directory.filePath("reused-index.raw");
+    if (!exporter.exportRawVideo(raw, &decoder)) return false;
+    if (!check(readFile(raw.outputPath) == first && first.size() == 4 * 320 * 180 * 3,
+               "repeated raw exports retain identical selected pictures")) return false;
+    if (!check(decoder.getDecodedFrameCount() < 48,
+               "repeated raw export does not decode the whole source again")) return false;
+
+    VDQtVideoExporter::ProcessingSnapshot processing;
+    processing.videoCodec.codecId = "ffv1";
+    processing.videoCodec.rateMode = "lossless";
+    VDQtVideoExporter::ExportOptions video;
+    video.inputPath = fixtures.mp4;
+    video.outputPath = fixtures.directory.filePath("reused-index.mkv");
+    video.startFrame = 2; video.endFrame = 5;
+    video.processing = processing;
+    video.includeAudio = false;
+    video.unattended = true;
+    decoder.setDecompressionConfig("Autoselect", 1, 0);
+    decoder.resetPerformanceCounters();
+    if (!check(exporter.exportVideo(video, &decoder),
+               "video export succeeds with the reused index after a color change")) {
+        std::cerr << exporter.lastError().toStdString() << '\n';
+        return false;
+    }
+    if (!check(decoder.getDecodedFrameCount() < 48,
+               "rendered video export reuses verified index knowledge")) return false;
+    VDQtVideoDecoder exported;
+    if (!exported.openFile(video.outputPath)
+        || !check(exported.scanVideoStream().totalFrames == 4,
+                  "cached-index video output contains exactly the selected four frames")) return false;
+    decoder.resetPerformanceCounters();
+    const auto rescanned = decoder.scanVideoStream();
+    return check(rescanned.totalFrames == 48 && decoder.getDecodedFrameCount() >= 48,
+                 "explicit error analysis still performs a fresh source scan");
+}
+
 bool sparseEof(VDQtTestFixtures& fixtures) {
     VDQtVideoDecoder reference;
     if (!reference.openFile(fixtures.mp4)) return false;
@@ -1075,6 +1125,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "safety") return sourceProtection(fixtures);
     if (scenario == "unknown_timeline") return unknownTimeline(fixtures);
     if (scenario == "sparse_eof") return sparseEof(fixtures);
+    if (scenario == "index_reuse") return indexReuse(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

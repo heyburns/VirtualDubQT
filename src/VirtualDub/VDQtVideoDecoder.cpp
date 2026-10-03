@@ -911,6 +911,7 @@ void VDQtVideoDecoder::close() {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     clearCache();
     mFrameIndex.clear();
+    mFrameIndexComplete = false;
     mFrameTimestampLookup.clear();
     mFrameTimestampLookupReady = false;
 
@@ -1421,6 +1422,7 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
         || mFrameIndex.isEmpty() || mNextDecodeFrameIndex != mFrameIndex.size()) return;
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
+    mFrameIndexComplete = true;
 }
 
 QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode) {
@@ -1616,9 +1618,41 @@ void VDQtVideoDecoder::applyErrorMode() {
 
 void VDQtVideoDecoder::setErrorMode(int errorMode) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
-    mErrorMode = std::clamp(errorMode, 0, 2);
+    const int replacementMode = std::clamp(errorMode, 0, 2);
+    if (replacementMode != mErrorMode && mIsOpen && !mIsAvsNative) {
+        // Error recovery can change which corrupt pictures are emitted. Index
+        // knowledge from the previous policy is not valid for the new one.
+        mFrameIndex.clear();
+        mFrameTimestampLookup.clear();
+        mFrameTimestampLookupReady = false;
+        mFrameIndexComplete = false;
+        mIndexTraversalContiguous = false;
+        mFrameCountStatus = mFrameCount > 0
+            ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
+        clearCache();
+    }
+    mErrorMode = replacementMode;
     mDiscardUntilKeyFrame = false;
     applyErrorMode();
+}
+
+VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
+    std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (hasCompleteFrameIndex()) {
+        VDScanResult result;
+        result.totalFrames = mFrameCount;
+        if (progressCallback && !progressCallback(mFrameCount, mFrameCount))
+            result.cancelled = true;
+        return result;
+    }
+    VDScanResult result = scanVideoStream(progressCallback);
+    if (!result.cancelled && result.errorMessage.isEmpty() && !hasCompleteFrameIndex()) {
+        result.errorMessage = mLastError.isEmpty()
+            ? QStringLiteral("Could not verify a complete presentation-order frame index.")
+            : mLastError;
+    }
+    return result;
 }
 
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
@@ -1662,6 +1696,7 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
     // Rebuild a contiguous presentation-order index while scanning. This makes
     // the decoded total exact and includes frames emitted only during decoder drain.
     mFrameIndex.clear();
+    mFrameIndexComplete = false;
     mFrameTimestampLookup.clear();
     mFrameTimestampLookupReady = false;
     mCurrentFrameIndex = -1;

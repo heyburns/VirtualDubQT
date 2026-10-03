@@ -32,8 +32,36 @@ bool sequentialScaling(VDQtTestFixtures& fixtures) {
     }
     std::cout << "7200-frame sequential traversal: " << timer.elapsed()
               << " ms, lookup work=" << decoder.getIndexLookupWorkCount() << '\n';
-    return check(decoder.getSeekCount() == 0 && decoder.getIndexLookupWorkCount() <= frames * 2,
-                 "sequential indexing does not search the entire previous prefix");
+    if (!check(decoder.getSeekCount() == 0 && decoder.getIndexLookupWorkCount() <= frames * 2,
+               "sequential indexing does not search the entire previous prefix")) return false;
+    if (!check(decoder.getFrameImage(frames, true).isNull() && decoder.hasCompleteFrameIndex(),
+               "only verified EOF marks the index complete")) return false;
+    decoder.resetPerformanceCounters();
+    const auto cached = decoder.ensureFrameIndex();
+    if (!check(cached.totalFrames == frames && !cached.cancelled && cached.errorMessage.isEmpty()
+               && decoder.getDecodedFrameCount() == 0,
+               "ensuring a complete index does not decode the source again")) return false;
+    const auto cancelled = decoder.ensureFrameIndex([](int, int) { return false; });
+    if (!check(cancelled.cancelled && decoder.hasCompleteFrameIndex(),
+               "cancelling a cached request preserves verified index knowledge")) return false;
+    const auto partial = decoder.scanVideoStream([](int current, int) { return current < 7; });
+    if (!check(partial.cancelled && !decoder.hasCompleteFrameIndex(),
+               "a cancelled fresh health scan is not a complete reusable index")) return false;
+    decoder.resetPerformanceCounters();
+    if (!check(decoder.ensureFrameIndex().totalFrames == frames && decoder.hasCompleteFrameIndex()
+               && decoder.getDecodedFrameCount() >= frames,
+               "ensuring an incomplete scan rebuilds the complete index")) return false;
+    decoder.setErrorMode(1);
+    if (!check(!decoder.hasCompleteFrameIndex(),
+               "changing corrupt-frame recovery invalidates ordinal knowledge")) return false;
+    decoder.resetPerformanceCounters();
+    if (!check(decoder.ensureFrameIndex().totalFrames == frames && decoder.hasCompleteFrameIndex()
+               && decoder.getDecodedFrameCount() >= frames,
+               "new error policy receives its own verified index")) return false;
+    decoder.close();
+    return check(!decoder.hasCompleteFrameIndex() && decoder.openFile(input)
+                 && !decoder.hasCompleteFrameIndex(),
+                 "closing/reopening even the same path cannot reuse stale session index state");
 }
 
 bool duplicateTimestamps(VDQtTestFixtures& fixtures) {

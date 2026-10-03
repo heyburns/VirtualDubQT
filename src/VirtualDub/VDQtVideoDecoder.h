@@ -53,6 +53,9 @@ public:
     int getFrameCount() const { return mFrameCount; }
     FrameCountStatus getFrameCountStatus() const { return mFrameCountStatus; }
     bool isFrameCountExact() const { return mFrameCountStatus == FrameCountStatus::Exact; }
+    bool hasCompleteFrameIndex() const {
+        return mIsOpen && (mIsAvsNative || mFrameIndexComplete);
+    }
     // EOF describes the last decode attempt, not proof of the entire source's
     // length. A sparse timestamp seek can reach EOF with only a prefix indexed.
     bool reachedEndOfStream() const { return mLastDecodeReachedEof; }
@@ -127,6 +130,10 @@ public:
     };
 
     VDScanResult scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr);
+    // Navigation/export need the verified index, not a fresh health analysis.
+    // Reuse a complete source-owned index; cached results report length only.
+    // scanVideoStream() remains the explicit, always-fresh error scan.
+    VDScanResult ensureFrameIndex(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr);
 
     void setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange);
     QString getForcedFormatName() const { return mForcedFormatName; }
@@ -230,6 +237,7 @@ private:
     // QCache cost is KiB, not entry count; this bounds memory for large frames.
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
+    bool mFrameIndexComplete = false;
     // Built only when a seek needs timestamp reconciliation. Sequential index
     // growth requires neither an all-prefix search nor this additional storage.
     // A timestamp can belong to several distinct presentation ordinals.

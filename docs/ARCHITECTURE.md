@@ -116,6 +116,16 @@ approximately labeled sparse observation never becomes prefix proof. Exact
 seeking and index sharing remain separate
 audit work; an approximate time seek is not proof of a VFR ordinal.
 
+`hasCompleteFrameIndex()` is independent of exact count metadata. `ensureFrameIndex()`
+reuses a verified complete index for navigation/export and reports only cached
+length, not a fresh health analysis. `scanVideoStream()` still deliberately decodes
+the source afresh for error analysis. A cancelled fresh scan clears complete-index
+proof even if its old exact count remains a valid length hint; Close and changes
+to corrupt-frame recovery also invalidate it. Color-conversion changes do not
+alter presentation order and therefore retain it. Raw/rendered exports use this
+source-owned proof across selections, segments and retries, not a process-global
+cache of previously opened files. Worker/editor snapshot sharing remains separate.
+
 FFmpeg/AviSynth frames are converted to packed RGB QImages. Optimized swscale
 paths may finish rows with full SIMD stores, so conversion storage uses a
 64-byte-aligned stride plus explicit tail padding. The allocation owner and the
