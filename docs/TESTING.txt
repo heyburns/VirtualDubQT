@@ -721,3 +721,17 @@ VFR time entry in the jump dialog is a separate remaining consumer.
 Validation: full Release 44/44 and sanitizer 40/40 passed. After the allocation
 guard, focused Release decode/edit/context/stabilization/media tests passed 6/6.
 The regular binary rebuilt and passed real MP4/native-AVS export smoke.
+
+Shared filter-test implementation (C06 follow-up)
+-----------------------------------------------
+
+Performance, memory/allocation, plugin-host and parity tests now link the same
+static application core as controller tests. All use the same production flags;
+parity-reference paths remain test-only. The specially instrumented audio suite
+stays independently compiled because its conditional fields change object layout.
+The generated compile inventory contains two VDQtFilterSystem.cpp compilations
+instead of six (production and the genuine instrumented variant). This is build
+efficiency and configuration consistency, not a claimed playback speedup.
+
+Validation: full Release 44/44 and sanitizer 40/40 passed after consolidation.
+The regular target rebuilt and passed maintained MP4/native-AVS export smoke.

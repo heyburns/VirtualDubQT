@@ -420,20 +420,8 @@ if (BUILD_TESTING)
 
     add_executable(filter_performance_tests
         src/VirtualDub/test_filter_performance.cpp
-        src/VirtualDub/VDQtFilterSystem.cpp
-        src/VirtualDub/VDQtFilterSystem.h
-        src/VirtualDub/VDQtPluginHost.cpp
-        src/VirtualDub/VDQtPluginHost.h
     )
-    target_compile_definitions(filter_performance_tests PRIVATE QT_NO_KEYWORDS)
-    target_include_directories(filter_performance_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(filter_performance_tests PRIVATE
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Concurrent
-    )
+    target_link_libraries(filter_performance_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_performance_tests)
     add_test(NAME filter_performance_tests COMMAND filter_performance_tests)
     set_tests_properties(filter_performance_tests PROPERTIES
@@ -445,12 +433,8 @@ if (BUILD_TESTING)
     add_executable(filter_memory_tests
         tests/test_filter_memory.cpp
         tests/support/VDQtTestFixtures.cpp
-        src/VirtualDub/VDQtFilterSystem.cpp
-        src/VirtualDub/VDQtPluginHost.cpp
     )
-    target_compile_definitions(filter_memory_tests PRIVATE QT_NO_KEYWORDS)
-    target_include_directories(filter_memory_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(filter_memory_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Concurrent)
+    target_link_libraries(filter_memory_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_memory_tests)
     foreach(filter_case IN ITEMS temporal ivtc television warp)
         # Process isolation keeps one ASan crash from hiding the other cases.
@@ -480,20 +464,8 @@ if (BUILD_TESTING)
 
     add_executable(plugin_host_tests
         src/VirtualDub/test_plugin_host.cpp
-        src/VirtualDub/VDQtFilterSystem.cpp
-        src/VirtualDub/VDQtFilterSystem.h
-        src/VirtualDub/VDQtPluginHost.cpp
-        src/VirtualDub/VDQtPluginHost.h
     )
-    target_compile_definitions(plugin_host_tests PRIVATE QT_NO_KEYWORDS)
-    target_include_directories(plugin_host_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(plugin_host_tests PRIVATE
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Concurrent
-    )
+    target_link_libraries(plugin_host_tests PRIVATE vdqt_core)
     add_dependencies(plugin_host_tests vdqt_test_plugin)
     vdqt_enable_diagnostics(plugin_host_tests)
     add_test(NAME plugin_host_tests COMMAND plugin_host_tests
@@ -519,29 +491,11 @@ if (BUILD_TESTING)
 
     add_executable(parity_contract_tests
         src/VirtualDub/test_parity_contract.cpp
-        src/VirtualDub/VDQtScriptEngine.cpp
-        src/VirtualDub/VDQtScriptEngine.h
-        src/VirtualDub/VDQtTimeline.cpp
-        src/VirtualDub/VDQtTimeline.h
-        src/VirtualDub/VDQtFilterSystem.cpp
-        src/VirtualDub/VDQtFilterSystem.h
-        src/VirtualDub/VDQtPluginHost.cpp
-        src/VirtualDub/VDQtPluginHost.h
-        src/VirtualDub/VDQtAudioFilterSystem.cpp
-        src/VirtualDub/VDQtAudioFilterSystem.h
     )
     target_compile_definitions(parity_contract_tests PRIVATE
-        QT_NO_KEYWORDS
         VDQT_PARITY_REFERENCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/parity/virtualdub2-reference.json"
     )
-    target_include_directories(parity_contract_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(parity_contract_tests PRIVATE
-        Qt6::Core
-        Qt6::Gui
-        PkgConfig::FFMPEG
-    )
+    target_link_libraries(parity_contract_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(parity_contract_tests)
     add_test(NAME parity_contract_tests COMMAND parity_contract_tests)
     set_tests_properties(parity_contract_tests PROPERTIES
