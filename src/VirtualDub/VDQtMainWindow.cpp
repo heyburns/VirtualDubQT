@@ -312,6 +312,13 @@ bool writeImageSequenceManifest(const QString& path,
             "An image sequence and a positive frame rate are required.");
         return false;
     }
+    const AVRational inputRate = av_d2q(frameRate, 1000000);
+    if (inputRate.num <= 0 || inputRate.den <= 0) {
+        if (errorMessage) *errorMessage = QStringLiteral("The image frame rate cannot be represented.");
+        return false;
+    }
+    const QByteArray rateOption = "option framerate " + QByteArray::number(inputRate.num)
+        + '/' + QByteArray::number(inputRate.den) + '\n';
     QByteArray contents("ffconcat version 1.0\n");
     for (const QString& source : sources) {
         const QString escaped = escapedConcatPath(QFileInfo(source).absoluteFilePath());
@@ -323,8 +330,11 @@ bool writeImageSequenceManifest(const QString& path,
         contents += "file ";
         contents += escaped.toUtf8();
         contents += '\n';
+        // Concat durations alone do not set each still-image demuxer's clock:
+        // it otherwise defaults to 25fps and quantizes/collides timestamps.
+        contents += rateOption;
         contents += "duration ";
-        contents += QByteArray::number(1.0 / frameRate, 'f', 12);
+        contents += QByteArray::number(av_q2d(av_inv_q(inputRate)), 'f', 12);
         contents += '\n';
     }
     QSaveFile output(path);

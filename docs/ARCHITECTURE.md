@@ -112,9 +112,11 @@ Only a contiguous traversal whose next ordinal equals the indexed prefix length
 can promote decoder EOF to an exact frame count. The worker independently reports
 EOF so playback can stop and restore the last displayed playhead without shrinking
 an incomplete timeline. Only verified traversals may extend the prefix; an
-approximately labeled sparse observation never becomes prefix proof. Exact
-seeking and index sharing remain separate
-audit work; an approximate time seek is not proof of a VFR ordinal.
+approximately labeled sparse observation never becomes prefix proof. Random
+frame-number seeks establish a complete presentation index before using a
+timestamp anchor; frame number divided by average FPS is never used to label a
+picture. Repeated-timestamp anchors are ambiguous, so those paths count from a
+safe earlier unique anchor or the beginning. Seek overshoot retries from start.
 
 `hasCompleteFrameIndex()` is independent of exact count metadata. `ensureFrameIndex()`
 reuses a verified complete index for navigation/export and reports only cached
@@ -124,7 +126,23 @@ proof even if its old exact count remains a valid length hint; Close and changes
 to corrupt-frame recovery also invalidate it. Color-conversion changes do not
 alter presentation order and therefore retain it. Raw/rendered exports use this
 source-owned proof across selections, segments and retries, not a process-global
-cache of previously opened files. Worker/editor snapshot sharing remains separate.
+cache of previously opened files. Cancelled indexing preserves codec/packet state
+when it still continues the verified prefix, allowing the latest scrub request to
+resume work. Callback checks between packets/frames abandon obsolete generations;
+an individual blocking demux read, AVS evaluation or plugin call is not preemptible.
+
+Complete immutable index snapshots are shared between worker and editor, including
+keyframe controls, export and audio-start timing. Matching open-source identity,
+stream/timebase/codec and recovery policy are required for adoption; generation
+tokens reject old-session delivery. The queued Qt alias is explicitly registered.
+Partial growing prefixes are not copied on every frame, and read-only accesses do
+not detach the shared array. Edited-timeline cumulative timing and VFR time-entry
+remain separate audit work.
+
+Image sequence manifests configure each still-image demuxer's rational input rate,
+not only concat durations. Otherwise its default 25fps clock quantizes requested
+30/60/100fps timing even when presentation ordinals are retained. Fresh imports,
+project reload and queued reconstruction use the same manifest builder.
 
 FFmpeg/AviSynth frames are converted to packed RGB QImages. Optimized swscale
 paths may finish rows with full SIMD stores, so conversion storage uses a

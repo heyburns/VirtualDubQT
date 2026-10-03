@@ -605,3 +605,21 @@ Validation: focused Release and sanitizer decoder/controller/keyframe/stabilizat
 actual-binary smoke checks passed 5/5 each. Regular binary rebuilt and passed its
 MP4/native-AVS export smoke. This completes the automatic worker-to-editor path;
 it does not change the separately deferred VFR time-entry calculations.
+
+Image input rational clocks (S04)
+--------------------------------
+
+operation_image_sequence loads ten distinct PNGs through real project/controller
+paths at 25/30/60/100 and 30000/1001 fps. Before repair, the 30fps last image had
+timestamp 0.28 seconds instead of 0.30. P01's duplicate-PTS fix already prevented
+the old lost-frame count, but did not repair the demuxer clock. The common manifest
+builder now sets each image demuxer's rational framerate as well as its matching
+duration. Import/project reload/queued reconstruction all use that builder.
+
+Tests verify the last preview timestamp within UI millisecond precision, ten output
+BGRA images at every tested rate, and each frame's distinct red value in order.
+The normal source-protection audit recognizes the existing safe framerate option.
+
+Validation: focused Release and sanitizer source/project/append/queue/decoder/CLI
+checks passed 8/8 each. The regular binary rebuilt and passed MP4/native-AVS export
+smoke. No unrelated user images/settings are used.

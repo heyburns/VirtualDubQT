@@ -40,7 +40,7 @@ Remaining execution sequence
     hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;
     preserve fresh error scans and invalidate proof on Close/cancel/error-policy change.
-[ ] S04: preserve all imported sequence images at the requested rational frame rate.
+[x] S04: preserve all imported sequence images at the requested rational frame rate.
 [ ] H02/M01/M10: incoming field history, normalized layouts and meaningful high depth.
 [ ] H10/M25: explicit filter failures, missing assets/plugins and invalid preview.
 [ ] S06/M06: consistent source/timeline/output-phase filter context in all consumers.

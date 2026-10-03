@@ -16,6 +16,7 @@
 #include <QLineEdit>
 #include <QPointer>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QThread>
 #include <QtEndian>
 #include <iostream>
@@ -914,6 +915,66 @@ bool indexedNavigation(VDQtTestFixtures& fixtures) {
                  "GUI previous-keyframe navigation uses the same verified index");
 }
 
+bool importedImageTiming(VDQtTestFixtures& fixtures) {
+    QStringList images;
+    for (int frame = 0; frame < 10; ++frame) {
+        QImage image(16, 16, QImage::Format_RGB888);
+        image.fill(QColor(20 + frame * 20, 40, 60));
+        const QString path = fixtures.directory.filePath(QString("import-%1.png").arg(frame));
+        if (!image.save(path)) return false;
+        images.append(path);
+    }
+    for (double fps : {25.0, 30.0, 60.0, 100.0, 30000.0 / 1001.0}) {
+        VDQtProjectState project;
+        project.sourcePath = images.first();
+        project.sourcePaths = images;
+        project.imageSequenceFps = fps;
+        project.sourceFrameCount = 10;
+        project.sourceFrameCountExact = true;
+        project.timelineExplicit = true;
+        project.timelineSegments = {{0, 10}};
+        project.audioDisabled = true;
+        const QString projectPath = fixtures.directory.filePath("images.vdqproject");
+        QString error;
+        if (!VDQtProjectFile::saveProject(projectPath, project, &error)) return false;
+        VDQtMainWindow window;
+        window.setAutomationUnattended(true);
+        window.show();
+        if (!chooseProjectFile(window, "onFileLoadProject", projectPath)) return false;
+        const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+        auto *position = window.findChild<VDQtPositionControlWidget*>();
+        if (!position || panes.size() != 2) return false;
+        position->SetPosition(9);
+        if (!check(waitFor([&] { return !panes.first()->frameImage().isNull()
+                   && panes.first()->frameImage().pixelColor(0, 0).red() == 200; }),
+                   "all imported images retain their presentation ordinals")) return false;
+        const QString time = window.statusBar()->currentMessage()
+            .section("Time: ", 1, 1).section("  |", 0, 0);
+        const auto fields = time.split(':');
+        const double seconds = fields.size() == 3
+            ? fields.at(0).toDouble() * 3600 + fields.at(1).toDouble() * 60
+                + fields.at(2).toDouble() : -1;
+        if (!check(std::abs(seconds - 9.0 / fps) <= 0.002,
+                   "imported image timestamps use the requested rational input frame rate")) {
+            std::cerr << "rate=" << fps << ", last-frame time=" << seconds << '\n';
+            return false;
+        }
+        const QString output = fixtures.directory.filePath(QString("images-%1.raw").arg(fps));
+        if (!window.runAutomationText(
+                QString("VirtualDub.SaveRawVideo(\"%1\",8,4,0,0);").arg(output),
+                fixtures.directory.path(), &error)) return false;
+        const QByteArray bytes = readFile(output);
+        if (!check(bytes.size() == 10 * 16 * 16 * 4,
+                   "image import/export retains exactly ten images at every tested rate")) return false;
+        for (int frame = 0; frame < 10; ++frame) {
+            if (!check(static_cast<unsigned char>(bytes.at(frame * 16 * 16 * 4 + 2))
+                           == 20 + frame * 20,
+                       "each exported image retains its distinct source pixels")) return false;
+        }
+    }
+    return true;
+}
+
 bool emptyTimeline(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1157,6 +1218,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "sparse_eof") return sparseEof(fixtures);
     if (scenario == "index_reuse") return indexReuse(fixtures);
     if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
+    if (scenario == "image_sequence") return importedImageTiming(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }
