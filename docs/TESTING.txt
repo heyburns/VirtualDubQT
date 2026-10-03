@@ -786,3 +786,20 @@ and verify empty-ID migration and snapshot stability.
 Validation: focused Release 9/9 and ASan/UBSan 9/9 passed, including project-load,
 filter, plugin, stabilization and actual-app media smoke. The regular executable
 rebuilt and independently passed real MP4/native-AVS export smoke.
+
+Shared filter parameter checks (M26)
+----------------------------------
+
+The invalid Levels input-black=255 regression aborted in std::clamp before
+repair. One numeric schema now supplies generic dialog bounds, JSON validation,
+script Config checks and processing-boundary validation. Tests reject non-finite
+and oversized numbers, fractional enum choices, invalid level/range/alignment
+relationships and excessive frame allocations. They verify every built-in
+default, disabled invalid stages and narrow valid level intervals. The latter
+no longer manufacture a clamp lower bound above 1.0. General script conversions
+that occur before filter configuration remain a separately tracked M21 repair.
+
+Validation: full Release 47/47 and ASan/UBSan 43/43 passed. Final dimension review
+also covers the rotated intermediate and 64-bit format expansion; the focused
+filter/performance/parity/media gates reran 9/9 in both builds. The regular
+binary rebuilt and passed actual MP4/native-AVS export smoke.

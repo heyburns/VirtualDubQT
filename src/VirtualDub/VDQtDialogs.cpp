@@ -2,6 +2,7 @@
 // Dialogs edit copies of plain configuration values and commit on acceptance;
 // preview subdialogs may process the supplied still image but do not own media.
 #include "VDQtDialogs.h"
+#include "VDQtFilterValidation.h"
 #include <algorithm>
 #include <cmath>
 #include <QDialogButtonBox>
@@ -46,44 +47,11 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
     QMap<QString, QLineEdit *> textControls;
     for (auto it = filter->params.cbegin(); it != filter->params.cend(); ++it) {
         auto *control = new QDoubleSpinBox(&dialog);
-        control->setDecimals(3);
-        control->setRange(-1000000.0, 1000000.0);
-        control->setSingleStep(0.1);
         const QString key = it.key();
-        if (key == QStringLiteral("mode")) {
-            control->setDecimals(0); control->setRange(0.0, 2.0);
-            control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("hueDegrees")) {
-            control->setRange(-360.0, 360.0); control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("saturation")
-                   || key == QStringLiteral("value")) {
-            control->setRange(0.0, 8.0);
-        } else if (key == QStringLiteral("inputBlack")
-                   || key == QStringLiteral("inputWhite")
-                   || key == QStringLiteral("outputBlack")
-                   || key == QStringLiteral("outputWhite")
-                   || key == QStringLiteral("threshold")) {
-            control->setRange(0.0, 255.0); control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("gamma")) {
-            control->setRange(0.05, 20.0);
-        } else if (key == QStringLiteral("levels")) {
-            control->setDecimals(0); control->setRange(2.0, 256.0);
-            control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("amount")) {
-            control->setRange(0.0, 1.0);
-        } else if (key == QStringLiteral("left") || key == QStringLiteral("top")
-                   || key == QStringLiteral("right") || key == QStringLiteral("bottom")) {
-            control->setDecimals(0); control->setRange(0.0, 16384.0);
-            control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("x") || key == QStringLiteral("y")) {
-            control->setDecimals(0); control->setRange(-256.0, 256.0);
-            control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("blockSize")) {
-            control->setDecimals(0); control->setRange(2.0, 256.0);
-            control->setSingleStep(1.0);
-        } else if (key == QStringLiteral("strength")) {
-            control->setRange(0.0, 8.0);
-        }
+        const auto spec = VDQtFilterParameter(filter->type, key);
+        control->setRange(spec.minimum, spec.maximum);
+        control->setDecimals(spec.integer ? 0 : 6);
+        control->setSingleStep(spec.integer ? 1 : 0.1);
         control->setValue(it.value());
         form->addRow(key, control);
         controls.insert(key, control);
@@ -97,8 +65,17 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
     }
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    QObject::connect(buttons, &QDialogButtonBox::accepted,
-                     &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        VDFilterInstance candidate = *filter;
+        for (auto it = controls.cbegin(); it != controls.cend(); ++it)
+            candidate.params[it.key()] = it.value()->value();
+        QString error;
+        if (!VDQtValidateFilter(candidate, &error)) {
+            QMessageBox::warning(&dialog, QStringLiteral("Invalid filter settings"), error);
+            return;
+        }
+        dialog.accept();
+    });
     QObject::connect(buttons, &QDialogButtonBox::rejected,
                      &dialog, &QDialog::reject);
     form->addRow(buttons);

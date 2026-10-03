@@ -1,12 +1,15 @@
 // Existing filter behavior contracts, independent of codec troubleshooting.
 // Keep incoming-history/pixel-layout repairs separate from algorithm-parity work.
 #include "VirtualDub/VDQtFilterSystem.h"
+#include "VirtualDub/VDQtFilterValidation.h"
+#include "VirtualDub/VDQtProjectFile.h"
 
 #include <QCoreApplication>
 #include <QTransform>
 #include <QTemporaryDir>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 namespace {
 bool check(bool condition, const char *message) {
@@ -207,6 +210,75 @@ bool uniqueIdentities() {
                  && migrated.getActiveChain().first().id != migrated.getActiveChain().last().id,
                  "empty legacy IDs are assigned distinct identities");
 }
+
+bool parameterValidation() {
+    QImage input(17, 9, QImage::Format_RGB888);
+    input.fill(QColor(100, 80, 60));
+    VDQtFilterSystem filters;
+    for (const auto type : {VDFilterType::Levels, VDFilterType::Curves}) {
+        filters.clearFilters();
+        filters.addFilter(type);
+        auto params = filters.getActiveChain().first().params;
+        params[type == VDFilterType::Levels ? "inputBlack" : "black"] = 255;
+        filters.updateFilterParams(0, params);
+        QList<QImage> output{input};
+        if (!check(!filters.processFrameSequence(input, output) && output.isEmpty()
+                   && !filters.lastError().isEmpty(),
+                   "invalid black/white relationships fail before pixel processing")) return false;
+        QTemporaryDir directory;
+        VDQtProcessingState saved, loaded;
+        saved.filters = filters.getActiveChain();
+        QString error;
+        if (!VDQtProjectFile::saveProcessingSettings(directory.filePath("invalid.vdqsettings"), saved, &error)
+            || !check(!VDQtProjectFile::loadProcessingSettings(directory.filePath("invalid.vdqsettings"), &loaded, &error)
+                      && error.contains("white", Qt::CaseInsensitive),
+                      "invalid saved level relationships fail at the JSON boundary")) return false;
+    }
+    filters.clearFilters();
+    filters.addFilter(VDFilterType::Resize);
+    const auto base = filters.getActiveChain().first().params;
+    for (const auto& invalid : QList<QPair<QString, double>>{
+            {"width", std::numeric_limits<double>::infinity()},
+            {"height", std::numeric_limits<double>::quiet_NaN()},
+            {"filterMode", 1.5}, {"width", 1e100},
+            {"_sylia.range.start", 1e100}, {"codecAdjust", 3}}) {
+        auto params = base;
+        params[invalid.first] = invalid.second;
+        filters.updateFilterParams(0, params);
+        QList<QImage> output;
+        if (!check(!filters.processFrameSequence(input, output) && output.isEmpty(),
+                   "non-finite, oversized and nonintegral filter parameters are rejected")) return false;
+    }
+    auto tooLarge = base;
+    tooLarge["sizeMode"] = 0;
+    tooLarge["width"] = 32768;
+    tooLarge["height"] = 32768;
+    filters.updateFilterParams(0, tooLarge);
+    QList<QImage> output;
+    if (!check(!filters.processFrameSequence(input, output) && output.isEmpty(),
+               "predicted excessive frame allocation is rejected before allocation")) return false;
+    filters.setFilterEnabled(0, false);
+    if (!check(filters.processFrameSequence(input, output) && output.first() == input,
+               "disabled invalid configuration does not affect processing")) return false;
+    filters.clearFilters();
+    for (int type = int(VDFilterType::SixAxis); type < int(VDFilterType::Count); ++type) {
+        if (VDFilterType(type) == VDFilterType::Plugin) continue;
+        VDQtFilterSystem factory;
+        factory.addFilter(VDFilterType(type));
+        QString error;
+        if (!check(!factory.getActiveChain().isEmpty()
+                   && VDQtValidateFilter(factory.getActiveChain().first(), &error),
+                   "all built-in defaults satisfy the shared schema")) return false;
+    }
+    filters.addFilter(VDFilterType::Levels);
+    auto narrow = filters.getActiveChain().first().params;
+    narrow["inputBlack"] = 254.99999;
+    narrow["inputWhite"] = 255;
+    filters.updateFilterParams(0, narrow);
+    if (!check(filters.processFrameSequence(input, output),
+               "a narrow but valid level interval does not form an invalid clamp")) return false;
+    return true;
+}
 }
 
 int main(int argc, char **argv) {
@@ -217,6 +289,7 @@ int main(int argc, char **argv) {
     if (args.contains("failure")) return requiredEffects() ? 0 : 1;
     if (args.contains("sequence")) return expandedSequence() ? 0 : 1;
     if (args.contains("identity")) return uniqueIdentities() ? 0 : 1;
+    if (args.contains("validation")) return parameterValidation() ? 0 : 1;
     return fieldHistory() && rotatedLayout() && requiredEffects() && expandedSequence()
-        && uniqueIdentities() ? 0 : 1;
+        && uniqueIdentities() && parameterValidation() ? 0 : 1;
 }

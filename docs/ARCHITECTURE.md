@@ -215,6 +215,13 @@ a conservative 512 MiB budget for retained stage images/temporal history reject
 oversized sequences with an explicit failure. Caller-owned images and individual
 kernel scratch retain separate normal allocation-error handling.
 
+`VDQtFilterValidation` owns shared numeric types/bounds and relationships for
+generic controls, loaded JSON, script configuration and the processing boundary.
+Calculated resize/framing/rotation dimensions are checked against the current
+stage size and precision before allocation. Invalid settings report an error;
+they must not enter unsafe casts or level calculations. Pipeline/project loading
+also migrates missing or duplicate IDs once while preserving valid unique IDs.
+
 Required effects must not be silently omitted. A failed sequence discards every
 output phase, resets partial runtime history, and records a pipeline-local
 `VDFilterProcessingError` (filter ID/name and actionable message). Preview keeps

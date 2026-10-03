@@ -66,6 +66,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtFilterSystem.h
     src/VirtualDub/VDQtFilterFrameContext.h
     src/VirtualDub/VDQtFilterSystem.cpp
+    src/VirtualDub/VDQtFilterValidation.h
+    src/VirtualDub/VDQtFilterValidation.cpp
     src/VirtualDub/VDQtPluginHost.h
     src/VirtualDub/VDQtPluginHost.cpp
     src/VirtualDub/VDQtScriptEngine.h
@@ -286,7 +288,7 @@ if (BUILD_TESTING)
     add_executable(filter_contract_tests tests/test_filter_contracts.cpp)
     target_link_libraries(filter_contract_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_contract_tests)
-    foreach(filter_contract IN ITEMS field layout failure sequence identity)
+    foreach(filter_contract IN ITEMS field layout failure sequence identity validation)
         add_test(NAME filter_contract_${filter_contract}
             COMMAND filter_contract_tests ${filter_contract})
         set_tests_properties(filter_contract_${filter_contract} PROPERTIES
@@ -308,6 +310,8 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtCodecSettings.h
         src/VirtualDub/VDQtFilterSystem.cpp
         src/VirtualDub/VDQtFilterSystem.h
+        src/VirtualDub/VDQtFilterValidation.cpp
+        src/VirtualDub/VDQtFilterValidation.h
         src/VirtualDub/VDQtPluginHost.cpp
         src/VirtualDub/VDQtPluginHost.h
         src/VirtualDub/VDQtScriptEngine.cpp

@@ -4,6 +4,7 @@
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
 #include "VDQtFilterFrameContext.h"
+#include "VDQtFilterValidation.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtOutputTransaction.h"
 #include "VDQtBatchWizard.h"
@@ -3661,6 +3662,8 @@ bool VDQtMainWindow::executeAutomationProgram(
             } else if (method == QStringLiteral("Config")) {
                 QString filterError;
                 if (!configureVideoFilter(index, command.arguments, &filterError))
+                    return fail(command, filterError);
+                if (!VDQtValidateFilter(processing.filters.at(index), &filterError))
                     return fail(command, filterError);
             } else if (method == QStringLiteral("SetClipping")) {
                 if (!requireArguments(command, 4, 5))

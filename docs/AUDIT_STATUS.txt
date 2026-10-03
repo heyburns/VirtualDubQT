@@ -51,7 +51,8 @@ Remaining execution sequence
     including cumulative VFR time and advancing timing across held masks.
     Output-phase advancement downstream of Bob is tested separately under P05.
 [x] M18: migrate empty/duplicate filter IDs without sharing temporal history.
-[ ] M26: typed finite/range/relationship validation.
+[x] M26: shared typed finite/range/relationship checks before filter calculations.
+    General script/numeric entry-point conversions remain M20/M21.
 [ ] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
     Private pipeline runtime reset/destruction is already fixed.
 [x] P05: stage-wise expanded frame sequences, correct histories and memory budgets.

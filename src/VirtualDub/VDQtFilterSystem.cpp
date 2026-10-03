@@ -4,6 +4,7 @@
 // Temporal state is per pipeline instance and is reset at discontinuities.
 #include "VDQtFilterSystem.h"
 #include "VDQtPluginHost.h"
+#include "VDQtFilterValidation.h"
 #include <QTransform>
 #include <QUuid>
 #include <QRgba64>
@@ -724,6 +725,10 @@ QImage VDQtFilterSystem::processFilterForPhase(
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
     const auto& filter = mActiveChain.at(filterIndex);
     if (!filter.enabled) return inputFrame;
+    QString configurationError;
+    if (!VDQtValidateFilter(filter, &configurationError, inputFrame.size(),
+                            inputFrame.depth() > 32 ? 8 : 4))
+        return failProcessing(configurationError, &filter);
     const qint64 rangeEnd = static_cast<qint64>(filter.params.value(
         QStringLiteral("_sylia.range.end"), -1.0));
     if (rangeEnd >= 0 && context.frameNumber >= 0) {
@@ -842,9 +847,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
         case VDFilterType::Curves: {
             const double black = std::clamp(
                 filter.params.value("black", 0.0) / 255.0, 0.0, 1.0);
-            const double white = std::clamp(
-                filter.params.value("white", 255.0) / 255.0,
-                black + 1.0 / 65535.0, 1.0);
+            const double white = filter.params.value("white", 255.0) / 255.0;
             const double gamma = std::clamp(
                 filter.params.value("gamma", 1.0), 0.05, 20.0);
             transformRgbPixels(result, highPrecision,
@@ -2197,9 +2200,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
         case VDFilterType::Levels: {
             const double inputBlack = std::clamp(
                 filter.params.value("inputBlack", 0.0) / 255.0, 0.0, 1.0);
-            const double inputWhite = std::clamp(
-                filter.params.value("inputWhite", 255.0) / 255.0,
-                inputBlack + 1.0 / 65535.0, 1.0);
+            const double inputWhite = filter.params.value("inputWhite", 255.0) / 255.0;
             const double gamma = std::clamp(
                 filter.params.value("gamma", 1.0), 0.05, 20.0);
             const double outputBlack = std::clamp(

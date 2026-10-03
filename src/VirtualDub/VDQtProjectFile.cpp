@@ -2,6 +2,7 @@
 // job queues. Helper functions below keep enum/config encoding symmetric and
 // validate bounded values before public loaders commit a reconstructed state.
 #include "VDQtProjectFile.h"
+#include "VDQtFilterValidation.h"
 
 #include <QDir>
 #include <QFile>
@@ -373,6 +374,11 @@ bool parseProcessing(const QJsonObject& object,
                 return false;
             }
             filter.stringParams.insert(it.key(), it.value().toString());
+        }
+        QString filterError;
+        if (!VDQtValidateFilter(filter, &filterError)) {
+            setError(errorMessage, QStringLiteral("Filter '%1': %2").arg(filter.name, filterError));
+            return false;
         }
         result.filters.append(filter);
     }
