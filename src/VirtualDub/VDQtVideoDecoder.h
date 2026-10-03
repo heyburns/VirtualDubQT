@@ -74,6 +74,9 @@ public:
     // beginning of the video stream, not the container's absolute timestamp.
     double getFrameTimestampSeconds(int frameIndex);
     double getFrameDurationSeconds(int frameIndex);
+    // Cumulative presentation duration before this ordinal; frameCount is the
+    // end boundary. Complete indexes cache/share prefix sums, including VFR.
+    double getFrameElapsedSeconds(int frameIndex);
     double getFps() const { return mFps; }
     int getWidth() const { return mWidth; }
     int getHeight() const { return mHeight; }

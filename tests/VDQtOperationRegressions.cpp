@@ -4,6 +4,7 @@
 #include "support/VDQtTestFixtures.h"
 #include "VirtualDub/VDQtMainWindow.h"
 #include "VirtualDub/VDQtFrameServer.h"
+#include "VirtualDub/VDQtFilterFrameContext.h"
 
 #include <QApplication>
 #include <QDir>
@@ -975,6 +976,98 @@ bool importedImageTiming(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool editedFilterContext(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    auto *input = window.findChild<VDVideoDisplayWidget*>("inputPreview");
+    auto *output = window.findChild<VDVideoDisplayWidget*>("outputPreview");
+    if (!input || !output || !waitFor([&] { return !input->frameImage().isNull(); })) return false;
+    auto& session = VDQtFilterSystem::instance();
+    session.clearFilters();
+    session.addFilter(VDFilterType::InvertColor);
+    auto params = session.getActiveChain().first().params;
+    params["_sylia.range.start"] = 0;
+    params["_sylia.range.end"] = 10;
+    session.updateFilterParams(0, params);
+    QString error;
+    if (!window.runAutomationText("VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(20,10);",
+                                  fixtures.directory.path(), &error)) return false;
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(fixtures.mp4)) return false;
+    const QImage source = reference.getFrameImage(20);
+    VDQtFilterSystem expectedFilters;
+    expectedFilters.addFilter(VDFilterType::InvertColor);
+    const QImage expected = expectedFilters.processFrame(source);
+    if (!check(waitFor([&] { return input->frameImage() == source && output->frameImage() == expected; }),
+               "edited preview activates a timed effect at timeline zero, not source frame twenty")) return false;
+    params["_sylia.range.start"] = 2;
+    params["_sylia.range.end"] = 3;
+    session.updateFilterParams(0, params);
+    VDQtVideoExporter exporter;
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = fixtures.mp4;
+    raw.outputPath = fixtures.directory.filePath("context.raw");
+    raw.pixelFormat = "rgb24";
+    raw.swapChromaPlanes = false;
+    raw.scanlineAlignment = 1;
+    raw.startFrame = 2; raw.endFrame = 3;
+    raw.timelineSegments = {{20, 10, false}};
+    raw.unattended = true;
+    if (!exporter.exportRawVideo(raw, &reference)) return false;
+    QByteArray wanted;
+    for (int frame : {22, 23}) {
+        QImage image = reference.getFrameImage(frame).convertToFormat(QImage::Format_RGB888);
+        if (frame == 22) image = expectedFilters.processFrame(image);
+        for (int y = 0; y < image.height(); ++y)
+            wanted.append(reinterpret_cast<const char*>(image.constScanLine(y)), image.width() * 3);
+    }
+    if (!check(readFile(raw.outputPath) == wanted,
+               "raw selection retains absolute edited-timeline positions for timed filters")) return false;
+    VDQtVideoExporter::ExportOptions video;
+    video.inputPath = fixtures.mp4;
+    video.outputPath = fixtures.directory.filePath("context.mkv");
+    video.includeAudio = false;
+    video.videoCodecOverride = "ffv1";
+    video.videoPixelFormatOverride = "rgb24";
+    video.startFrame = 2; video.endFrame = 3;
+    video.timelineSegments = raw.timelineSegments;
+    video.unattended = true;
+    QByteArray rendered;
+    if (!exporter.exportVideo(video, &reference, nullptr, nullptr,
+        [&](int, const QImage&, const QImage& outputImage) {
+            const QImage image = outputImage.convertToFormat(QImage::Format_RGB888);
+            for (int y = 0; y < image.height(); ++y)
+                rendered.append(reinterpret_cast<const char*>(image.constScanLine(y)), image.width() * 3);
+        })) return false;
+    if (!check(rendered == wanted, "rendered and raw selected exports agree with edited filter positions")) return false;
+
+    const QString vfr = fixtures.directory.filePath("context-vfr.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=32x24:rate=24:duration=1",
+            "-vf", "select='if(lt(n,12),1,not(mod(n,3)))'", "-fps_mode", "vfr",
+            "-c:v", "ffv1", "-an", vfr}) || !reference.openFile(vfr)) return false;
+    if (reference.ensureFrameIndex().totalFrames != 16) return false;
+    const QList<VDQtTimelineSegment> edits{{12, 4, false}, {0, 2, false}, {2, 2, true}};
+    const auto second = VDQtFilterContextForFrame(reference, edits, 1);
+    if (!check(second.frameNumber == 1 && second.sourceFrameNumber == 13
+               && std::abs(second.timestampSeconds - 0.125) < 1e-8,
+               "edited VFR time uses actual frame durations rather than average FPS")) return false;
+    const auto firstMask = VDQtFilterContextForFrame(reference, edits, 6);
+    const auto secondMask = VDQtFilterContextForFrame(reference, edits, 7);
+    if (!check(firstMask.sourceFrameNumber == 1 && secondMask.sourceFrameNumber == 1
+               && secondMask.frameNumber == 7
+               && std::abs(secondMask.timestampSeconds - firstMask.timestampSeconds
+                   - reference.getFrameDurationSeconds(2)) < 1e-8,
+               "held preview identity does not freeze timeline time or temporal-filter history")) return false;
+    VDQtVideoDecoder recipient;
+    if (!recipient.openFile(vfr) || !recipient.adoptFrameIndexSnapshot(reference.frameIndexSnapshot())) return false;
+    recipient.resetPerformanceCounters();
+    return check(recipient.getFrameElapsedSeconds(16) == reference.getFrameElapsedSeconds(16)
+                 && recipient.getDecodedFrameCount() == 0,
+                 "shared immutable timing prefix is reused without decoding");
+}
+
 bool failedFilterPreview(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1274,6 +1367,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
     if (scenario == "image_sequence") return importedImageTiming(fixtures);
     if (scenario == "filter_failure") return failedFilterPreview(fixtures);
+    if (scenario == "filter_context") return editedFilterContext(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

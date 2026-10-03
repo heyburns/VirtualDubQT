@@ -3,6 +3,7 @@
 // namespace helpers build subprocess pipelines and transactional output files;
 // the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
+#include "VDQtFilterFrameContext.h"
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtAudioPlayer.h"
@@ -1192,11 +1193,8 @@ bool VDQtVideoExporter::exportRawVideo(
 
     filters.resetRuntimeState();
     QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
-    VDFilterFrameContext sampleContext;
-    sampleContext.frameNumber = startFrame;
-    sampleContext.timestampSeconds =
-        decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
-    sampleContext.frameRate = sourceFps;
+    const VDFilterFrameContext sampleContext = VDQtFilterContextForFrame(
+        decoder, editedTimeline ? renderTimeline.segments() : QList<VDQtTimelineSegment>(), startFrame, sourceFps);
     QImage filteredSample = filters.processFrame(
         sampleFrame, sampleContext);
     if (sampleFrame.isNull() || filteredSample.isNull()) {
@@ -1270,15 +1268,13 @@ bool VDQtVideoExporter::exportRawVideo(
             sourceFrame += inputIndex * step;
         }
         sourceFrame = std::clamp(sourceFrame, startFrame, endFrame);
+        const int timelineFrame = sourceFrame;
         sourceFrame = sourceFrameAt(sourceFrame);
 
         const QImage rawFrame = decoder.getFrameImage(sourceFrame);
         QList<QImage> filteredFrames;
-        VDFilterFrameContext filterContext;
-        filterContext.frameNumber = inputIndex;
-        filterContext.timestampSeconds =
-            decoder.getFrameTimestampSeconds(sourceFrame);
-        filterContext.frameRate = sourceFps;
+        const VDFilterFrameContext filterContext = VDQtFilterContextForFrame(
+            decoder, editedTimeline ? renderTimeline.segments() : QList<VDQtTimelineSegment>(), timelineFrame, sourceFps);
         if (rawFrame.isNull()
             || !filters.processFrameSequence(
                 rawFrame, filteredFrames, filterContext)
@@ -2353,11 +2349,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     int filterFramesPerInput = 1;
     if (applyFilters) {
         filters.resetRuntimeState();
-        VDFilterFrameContext sampleContext;
-        sampleContext.frameNumber = startFrame;
-        sampleContext.timestampSeconds =
-            decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
-        sampleContext.frameRate = sourceFps;
+        const VDFilterFrameContext sampleContext = VDQtFilterContextForFrame(
+            decoder, editedTimeline ? renderTimeline.segments() : QList<VDQtTimelineSegment>(), startFrame, sourceFps);
         QImage filteredSample = filters.processFrame(
             sampleFrame, sampleContext);
         if (filteredSample.isNull()) {
@@ -2797,11 +2790,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
         QList<QImage> filteredFrames;
         if (applyFilters) {
-            VDFilterFrameContext filterContext;
-            filterContext.frameNumber = timelineFrame;
-            filterContext.timestampSeconds =
-                decoder.getFrameTimestampSeconds(f);
-            filterContext.frameRate = sourceFps;
+            const VDFilterFrameContext filterContext = VDQtFilterContextForFrame(
+                decoder, editedTimeline ? renderTimeline.segments() : QList<VDQtTimelineSegment>(), timelineFrame, sourceFps);
             if (!filters.processFrameSequence(
                     rawFrame, filteredFrames, filterContext)
                 || filteredFrames.size() != filterFramesPerInput) {

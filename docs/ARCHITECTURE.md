@@ -213,6 +213,14 @@ the valid input but clears stale output and shows the error in the status bar;
 export/server callers propagate it and do not publish partial output. Missing
 image reads are not cached, so restoring an asset allows a retry.
 
+`VDQtFilterContextForFrame()` is the common input clock contract. Filter position
+and time refer to the edited timeline; separate source fields identify the decoded
+picture. Masked ranges hold a picture while their underlying frame durations keep
+timeline time advancing. Complete immutable decoder snapshots include cumulative
+duration prefixes, reused by all timing consumers. A preview request carries the
+timeline ordinal and segment snapshot in its coalesced pending slot; the worker
+resolves time after decoding/indexing instead of using an obsolete GUI estimate.
+
 Reserved `_sylia.*` numeric parameters preserve VirtualDub script range,
 clipping, and opacity metadata without changing the public filter-instance
 structure. Do not expose those reserved keys as ordinary user parameters.

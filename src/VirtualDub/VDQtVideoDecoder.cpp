@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 
 extern "C" {
 #include <libavutil/pixdesc.h>
@@ -214,6 +215,7 @@ struct VDQtVideoDecoder::FrameIndexSnapshot {
     AVRational timeBase{0, 1};
     AVCodecID codec = AV_CODEC_ID_NONE;
     QVector<FrameIndexEntry> entries;
+    QVector<double> elapsedSeconds;
 };
 
 // ---------------------------------------------------------------------------
@@ -1466,7 +1468,7 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     mFrameIndexComplete = true;
 }
 
-VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() {
+VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() try {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     if (mIsAvsNative || !hasCompleteFrameIndex() || !mFormatCtx) return {};
     if (mFrameIndexSnapshot) return mFrameIndexSnapshot;
@@ -1479,8 +1481,16 @@ VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() {
     snapshot->timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
     snapshot->codec = mCodecCtx->codec_id;
     snapshot->entries = mFrameIndex;
+    snapshot->elapsedSeconds.reserve(mFrameIndex.size() + 1);
+    snapshot->elapsedSeconds.append(0.0);
+    for (int frame = 0; frame < mFrameIndex.size(); ++frame)
+        snapshot->elapsedSeconds.append(snapshot->elapsedSeconds.last()
+            + getFrameDurationSeconds(frame));
     mFrameIndexSnapshot = snapshot;
     return mFrameIndexSnapshot;
+} catch (const std::bad_alloc&) {
+    mLastError = QStringLiteral("Not enough memory to share the source timing index.");
+    return {};
 }
 
 bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snapshot) {
@@ -1646,6 +1656,20 @@ double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
     }
 
     return mFps > 0.0 ? (frameIndex / mFps) : unavailable;
+}
+
+double VDQtVideoDecoder::getFrameElapsedSeconds(int frameIndex) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (!mIsOpen || frameIndex < 0) return std::numeric_limits<double>::quiet_NaN();
+    if (!mIsAvsNative && hasCompleteFrameIndex()) {
+        const auto snapshot = frameIndexSnapshot();
+        if (snapshot && frameIndex < snapshot->elapsedSeconds.size())
+            return snapshot->elapsedSeconds.at(frameIndex);
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    // Native AVS has an exact rational CFR clock. During an ordinary source's
+    // sequential discovery, available timestamps are provisional until indexed.
+    return getFrameTimestampSeconds(frameIndex);
 }
 
 double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {

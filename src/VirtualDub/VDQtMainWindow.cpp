@@ -3,6 +3,7 @@
 // timeline editing, view/processing controls, tools/capture, then asynchronous
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
+#include "VDQtFilterFrameContext.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtOutputTransaction.h"
 #include "VDQtBatchWizard.h"
@@ -2719,11 +2720,8 @@ void VDQtMainWindow::onFileRunAnalysisPass() {
         const int sourceFrame = sourceFrameForTimelineFrame(timelineFrame);
         const QImage input = mVideoDecoder.getFrameImage(sourceFrame, true);
         QList<QImage> outputs;
-        VDFilterFrameContext context;
-        context.frameNumber = timelineFrame;
-        context.timestampSeconds =
-            mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-        context.frameRate = mVideoDecoder.getFps();
+        const VDFilterFrameContext context = VDQtFilterContextForFrame(
+            mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), timelineFrame);
         if (input.isNull()
             || !VDQtFilterSystem::instance().processFrameSequence(
                 input, outputs, context)
@@ -3952,11 +3950,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                 const int sourceFrame = sourceFrameForTimelineFrame(frame);
                 const QImage input = mVideoDecoder.getFrameImage(sourceFrame, true);
                 QList<QImage> outputs;
-                VDFilterFrameContext context;
-                context.frameNumber = frame;
-                context.timestampSeconds =
-                    mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-                context.frameRate = mVideoDecoder.getFps();
+                const VDFilterFrameContext context = VDQtFilterContextForFrame(
+                    mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), frame);
                 if (input.isNull()
                     || !VDQtFilterSystem::instance().processFrameSequence(
                         input, outputs, context)
@@ -4212,11 +4207,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                 const int sourceFrame = sourceFrameForTimelineFrame(frame);
                 const QImage input = mVideoDecoder.getFrameImage(sourceFrame, true);
                 QList<QImage> outputs;
-                VDFilterFrameContext context;
-                context.frameNumber = frame;
-                context.timestampSeconds =
-                    mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-                context.frameRate = mVideoDecoder.getFps();
+                const VDFilterFrameContext context = VDQtFilterContextForFrame(
+                    mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), frame);
                 if (input.isNull()
                     || !VDQtFilterSystem::instance().processFrameSequence(
                         input, outputs, context))
@@ -5045,11 +5037,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
             return false;
         }
         QList<QImage> filtered;
-        VDFilterFrameContext filterContext;
-        filterContext.frameNumber = timelineFrame;
-        filterContext.timestampSeconds =
-            decoder.getFrameTimestampSeconds(static_cast<int>(sourceFrame));
-        filterContext.frameRate = decoder.getFps();
+        const VDFilterFrameContext filterContext = VDQtFilterContextForFrame(
+            decoder, timeline.isIdentity() ? QList<VDQtTimelineSegment>() : timeline.segments(), timelineFrame);
         if (!filters.processFrameSequence(
                 raw, filtered, filterContext)
             || filtered.size() != timing.outputFramesPerInput) {
@@ -5918,11 +5907,8 @@ void VDQtMainWindow::onFileExportFilmstrip() {
     }
     const int firstSource = sourceFrameForTimelineFrame(first);
     const QImage sourceFrame = mVideoDecoder.getFrameImage(firstSource, true);
-    VDFilterFrameContext firstContext;
-    firstContext.frameNumber = first;
-    firstContext.timestampSeconds =
-        mVideoDecoder.getFrameTimestampSeconds(firstSource);
-    firstContext.frameRate = mVideoDecoder.getFps();
+    const VDFilterFrameContext firstContext = VDQtFilterContextForFrame(
+        mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), first);
     VDQtFilterSystem::instance().resetRuntimeState();
     QList<QImage> firstOutputs;
     if (sourceFrame.isNull()
@@ -5970,11 +5956,8 @@ void VDQtMainWindow::onFileExportFilmstrip() {
         } else {
             const int sourceIndex = sourceFrameForTimelineFrame(frame);
             const QImage input = mVideoDecoder.getFrameImage(sourceIndex, true);
-            VDFilterFrameContext context;
-            context.frameNumber = frame;
-            context.timestampSeconds =
-                mVideoDecoder.getFrameTimestampSeconds(sourceIndex);
-            context.frameRate = mVideoDecoder.getFps();
+            const VDFilterFrameContext context = VDQtFilterContextForFrame(
+                mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), frame);
             failed = input.isNull()
                 || !VDQtFilterSystem::instance().processFrameSequence(
                     input, outputs, context);
@@ -6625,11 +6608,8 @@ void VDQtMainWindow::onFileSaveImageSequence() {
         }
 
         QList<QImage> filteredFrames;
-        VDFilterFrameContext filterContext;
-        filterContext.frameNumber = f;
-        filterContext.timestampSeconds =
-            mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-        filterContext.frameRate = mVideoDecoder.getFps();
+        const VDFilterFrameContext filterContext = VDQtFilterContextForFrame(
+            mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), f);
         if (!VDQtFilterSystem::instance().processFrameSequence(
                 rawFrame, filteredFrames, filterContext)
             || filteredFrames.size() != filterTiming.outputFramesPerInput) {
@@ -7758,11 +7738,9 @@ void VDQtMainWindow::onVideoCopyOutputFrame() {
             mPositionControl->GetPosition());
         QImage frame = mVideoDecoder.getFrameImage(sourceFrame);
         if (!frame.isNull()) {
-            VDFilterFrameContext filterContext;
-            filterContext.frameNumber = mPositionControl->GetPosition();
-            filterContext.timestampSeconds =
-                mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-            filterContext.frameRate = mVideoDecoder.getFps();
+            const VDFilterFrameContext filterContext = VDQtFilterContextForFrame(
+                mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(),
+                mPositionControl->GetPosition());
             VDQtFilterSystem::instance().resetRuntimeState();
             QImage processed = VDQtFilterSystem::instance().processFrame(
                 frame, filterContext);
@@ -8417,11 +8395,8 @@ void VDQtMainWindow::onToolsPerformanceProfiler() {
         decodeNanoseconds += timer.nsecsElapsed();
         if (input.isNull()) break;
         QList<QImage> outputs;
-        VDFilterFrameContext context;
-        context.frameNumber = frame;
-        context.timestampSeconds =
-            mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-        context.frameRate = mVideoDecoder.getFps();
+        const VDFilterFrameContext context = VDQtFilterContextForFrame(
+            mVideoDecoder, mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments(), frame);
         timer.restart();
         if (!filters.processFrameSequence(input, outputs, context)
             || outputs.isEmpty()) break;
@@ -9579,7 +9554,9 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
         sourceFrame,
         generation,
         playing,
-        !playing || mPlaybackPreview);
+        !playing || mPlaybackPreview,
+        frameIndex,
+        mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments());
 }
 
 void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
@@ -9661,8 +9638,8 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
 
     const double fps = mVideoDecoder.getFps();
     double timeSeconds = timestampSeconds;
-    if (mTimeline.isModified() && fps > 0.0)
-        timeSeconds = timelineFrame / fps;
+    if (mTimeline.isModified())
+        timeSeconds = VDQtFilterContextForFrame(mVideoDecoder, mTimeline.segments(), timelineFrame).timestampSeconds;
     if (!std::isfinite(timeSeconds)) timeSeconds = (fps > 0) ? (timelineFrame / fps) : 0;
         int hours = static_cast<int>(timeSeconds / 3600);
         int mins = static_cast<int>((timeSeconds - hours * 3600) / 60);

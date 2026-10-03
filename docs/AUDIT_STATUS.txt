@@ -35,7 +35,7 @@ Remaining execution sequence
     Individual AVS/I/O calls are not preemptible.
 [x] M16: complete immutable indexes shared between preview/editor/export/audio
     timing consumers; cold keyframe buttons use actual keyframes, not FPS guesses.
-[ ] Variable-rate jump-to-time and cumulative edited timeline time.
+[ ] Variable-rate jump-to-time (cumulative edited timeline time is now corrected).
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
     hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;
@@ -47,7 +47,9 @@ Remaining execution sequence
     IVTC/TV/Warp Sharp now match their existing 8-bit operation at 16-bit precision;
     original-algorithm parity remains the separately listed M19 work.
 [x] H10/M25: explicit filter failures, missing assets/plugins and invalid preview.
-[ ] S06/M06: consistent source/timeline/output-phase filter context in all consumers.
+[x] S06/M06: consistent source/edited-timeline filter context in all consumers,
+    including cumulative VFR time and advancing timing across held masks.
+    Output-phase advancement downstream of Bob remains P05.
 [ ] M18/M26: unique filter IDs and typed finite/range/relationship validation.
 [ ] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
     Private pipeline runtime reset/destruction is already fixed.

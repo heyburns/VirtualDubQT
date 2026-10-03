@@ -83,12 +83,20 @@ struct VDFilterTimingInfo {
     bool sequenceSupported = true;
 };
 
-// Per-input timing passed to text and temporal filters. A negative value means
+// frameNumber/time refer to the edited timeline at this stage, not the decoder
+// ordinal. Source identity stays separate, especially for held/masked images.
+// Output-phase fields are filled by rate-changing processing. Negative means
 // the caller could not establish that piece of timing.
 struct VDFilterFrameContext {
     qint64 frameNumber = -1;
     double timestampSeconds = -1.0;
     double frameRate = 0.0;
+    qint64 sourceFrameNumber = -1;
+    double sourceTimestampSeconds = -1.0;
+    double inputDurationSeconds = 0.0;
+    qint64 outputFrameNumber = -1;
+    int outputPhase = 0;
+    double outputTimestampSeconds = -1.0;
 };
 
 // Pipeline-local diagnostic: configuration identity is separate from the

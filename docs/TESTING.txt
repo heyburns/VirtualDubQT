@@ -698,3 +698,26 @@ not claims that the current IVTC/warp approximations equal the Windows originals
 
 Validation: full Release 43/43 and sanitizer 39/39 passed. The regular executable
 rebuilt and passed real MP4/native-AVS decode/export smoke after the precision fixes.
+
+Edited filter positions and cumulative timing (S06/M06)
+----------------------------------------------------
+
+operation_filter_context failed before repair: a timed invert at edit positions
+0..9 was skipped after retaining source frames 20..29. Preview now carries an
+independent timeline ordinal/segment snapshot into the latest-request slot and
+resolves its context after decode. Raw selection uses the actual timeline frame,
+not its zero-based export-loop counter. Every input-filter consumer shares the
+same context builder: source identity/time, edit position/time and frame duration.
+
+The regression verifies cropped preview, absolute positions for selected raw
+export, matching rendered output, actual VFR edited time (0.125 seconds for the
+second retained frame), advancing time across held masks and reused cumulative
+index timing with zero additional decode. Complete snapshots cache duration
+prefixes once; ordinary sequential timing remains provisional until indexed.
+Snapshot allocation failure returns an actionable decoder error, not an exception
+escaping its worker. Downstream expanded output-phase advancement is still P05;
+VFR time entry in the jump dialog is a separate remaining consumer.
+
+Validation: full Release 44/44 and sanitizer 40/40 passed. After the allocation
+guard, focused Release decode/edit/context/stabilization/media tests passed 6/6.
+The regular binary rebuilt and passed real MP4/native-AVS export smoke.

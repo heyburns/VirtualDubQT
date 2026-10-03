@@ -2,6 +2,7 @@
 // than decoding, so they are collapsed into one latest-request slot protected by
 // mRequestMutex. Generation tokens keep late results from repainting stale UI.
 #include "VDQtFrameDecodeWorker.h"
+#include "VDQtFilterFrameContext.h"
 
 #include <QMetaObject>
 #include <QMutexLocker>
@@ -103,7 +104,9 @@ bool VDQtFrameDecodeWorker::adoptFrameIndexSnapshot(
 void VDQtFrameDecodeWorker::requestFrame(int frameIndex,
                                          quint64 generation,
                                          bool preserveSequentialDecode,
-                                         bool renderFilteredOutput) {
+                                         bool renderFilteredOutput,
+                                         qint64 timelineFrame,
+                                         const QList<VDQtTimelineSegment>& timelineSegments) {
     // This entry point may be called directly by the GUI thread. It performs no
     // decode work: it replaces the one pending slot, then posts at most one
     // event to the worker thread. That is the key to responsive scrubbing.
@@ -115,6 +118,8 @@ void VDQtFrameDecodeWorker::requestFrame(int frameIndex,
         mLatestGeneration = generation;
         mRequestedSequential = preserveSequentialDecode;
         mRequestedFilteredOutput = renderFilteredOutput;
+        mRequestedTimelineFrame = timelineFrame;
+        mRequestedTimelineSegments = timelineSegments;
         if (!mProcessScheduled) {
             mProcessScheduled = true;
             schedule = true;
@@ -144,6 +149,8 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         quint64 generation = 0;
         bool preserveSequentialDecode = false;
         bool renderFilteredOutput = false;
+        qint64 timelineFrame = -1;
+        QList<VDQtTimelineSegment> timelineSegments;
         {
             QMutexLocker lock(&mRequestMutex);
             if (mRequestedFrame < 0) {
@@ -154,6 +161,8 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
             generation = mRequestedGeneration;
             preserveSequentialDecode = mRequestedSequential;
             renderFilteredOutput = mRequestedFilteredOutput;
+            timelineFrame = mRequestedTimelineFrame;
+            timelineSegments = mRequestedTimelineSegments;
             mRequestedFrame = -1;
         }
 
@@ -175,11 +184,10 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         QList<QImage> outputImages;
         QString filterError;
         if (!inputImage.isNull() && renderFilteredOutput && stillRequested()) {
-            VDFilterFrameContext context;
-            context.frameNumber = frameIndex;
-            context.timestampSeconds =
-                decoder->getFrameTimestampSeconds(frameIndex);
-            context.frameRate = decoder->getFps();
+            // Resolve timing after decoding/indexing, not from a stale GUI
+            // estimate. Image identity and advancing edit position are separate.
+            const VDFilterFrameContext context = VDQtFilterContextForFrame(
+                *decoder, timelineSegments, timelineFrame >= 0 ? timelineFrame : frameIndex);
             if (!mFilters.processFrameSequence(inputImage, outputImages, context)) {
                 outputImages.clear();
                 filterError = mFilters.lastError();

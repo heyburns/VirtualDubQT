@@ -2,6 +2,7 @@
 #define VDQTFRAMEDECODEWORKER_H
 
 #include "VDQtFilterSystem.h"
+#include "VDQtTimeline.h"
 #include "VDQtVideoDecoder.h"
 
 #include <QImage>
@@ -34,7 +35,9 @@ public:
     void requestFrame(int frameIndex,
                       quint64 generation,
                       bool preserveSequentialDecode,
-                      bool renderFilteredOutput);
+                      bool renderFilteredOutput,
+                      qint64 timelineFrame = -1,
+                      const QList<VDQtTimelineSegment>& timelineSegments = {});
     void cancelPending(quint64 generation);
 
 Q_SIGNALS:
@@ -69,6 +72,8 @@ private:
     quint64 mLatestGeneration = 0;
     bool mRequestedSequential = false;
     bool mRequestedFilteredOutput = false;
+    qint64 mRequestedTimelineFrame = -1;
+    QList<VDQtTimelineSegment> mRequestedTimelineSegments;
     bool mProcessScheduled = false;
 
     VDQtVideoDecoder mDecoder;
