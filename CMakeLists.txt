@@ -1,5 +1,13 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.19)
 project(VirtualDubQt VERSION 0.1.1 LANGUAGES CXX)
+
+# Single-configuration builds should not accidentally ship an unoptimized GUI.
+# Honor explicit Debug/RelWithDebInfo choices and multi-configuration generators.
+# CMake presets are optional and separately require CMake 3.21 or newer.
+if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
 
 # The native Qt port is intentionally a self-contained target. The repository
 # also retains much of the original Windows source as a parity reference, but it

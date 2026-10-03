@@ -56,6 +56,8 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
 
 ## Build Instructions
 
+Use CMake 3.19 or newer. The optional regression-test presets require CMake 3.21.
+
 ### Prerequisites (Ubuntu / Debian / Linux Mint)
 
 ```bash
@@ -81,15 +83,14 @@ sudo dnf install gcc-c++ cmake qt6-qtbase-devel qt6-qtmultimedia-devel \
 ### Compiling
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-cmake --build . -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
 ```
 
 ### Running
 
 ```bash
-./VirtualDubQt
+./build/VirtualDubQt
 ```
 
 ### Maintainer Notes

@@ -452,3 +452,20 @@ Validation: selected Release 3/3 and sanitizer 3/3 regressions passed; the same
 maintained harness also passed against regular build/VirtualDubQt. No production
 code was changed. This adds reusable real-media smoke evidence; it is not yet a
 clean DEB/RPM/AppImage runtime test or physical-device coverage.
+
+Build configuration defaults (Q02)
+---------------------------------
+
+The project minimum is now CMake 3.19, matching file(REAL_PATH)'s documented
+introduction in the installed CMake command help. Optional presets still require
+3.21. README instructions explicitly choose Release and run from the repository
+root. A single-configuration build with no selected type defaults to Release;
+explicit Debug/RelWithDebInfo and multi-configuration generators remain untouched.
+
+Fresh disposable configurations proved Release uses -O3/-DNDEBUG, explicit Debug
+retains -g without optimization, and Ninja Multi-Config configures successfully.
+The installed compiler/CMake versions were used; an actual CMake 3.19 binary was
+not available. Rebuilt Release/sanitizer/regular applications passed the media
+smoke; selected Release and sanitizer controller/script/parity/CLI checks passed
+5/5 each. The existing user's regular build was already Release, so this is not
+a claimed explanation or fix for progressive AVS/ProRes throughput loss.
