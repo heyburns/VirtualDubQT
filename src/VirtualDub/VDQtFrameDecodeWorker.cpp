@@ -90,6 +90,12 @@ void VDQtFrameDecodeWorker::setFilterChain(const QList<VDFilterInstance>& chain)
     mFilters.replaceActiveChainTransient(chain);
 }
 
+bool VDQtFrameDecodeWorker::adoptFrameIndexSnapshot(
+    const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    return !mSharedAvsDecoder && mDecoder.adoptFrameIndexSnapshot(snapshot);
+}
+
 void VDQtFrameDecodeWorker::requestFrame(int frameIndex,
                                          quint64 generation,
                                          bool preserveSequentialDecode,
@@ -183,6 +189,10 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         }
 
         if (currentResult) {
+            // Complete snapshots are cached and immutable. Publishing a shared
+            // pointer is cheap; partial growing prefixes are never copied here.
+            if (const auto snapshot = decoder->frameIndexSnapshot())
+                Q_EMIT frameIndexAvailable(generation, snapshot);
             const int status = static_cast<int>(decoder->getFrameCountStatus());
             if (!inputImage.isNull()) {
                 Q_EMIT frameReady(

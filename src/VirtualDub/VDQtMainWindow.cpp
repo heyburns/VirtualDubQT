@@ -675,6 +675,12 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
             this, &VDQtMainWindow::onDecodedFrameReady);
     connect(mFrameDecodeWorker, &VDQtFrameDecodeWorker::frameUnavailable,
             this, &VDQtMainWindow::onDecodedFrameUnavailable);
+    connect(mFrameDecodeWorker, &VDQtFrameDecodeWorker::frameIndexAvailable, this,
+            [this](quint64 generation, const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot) {
+                if (mOperationDepth > 0 || mSourceTransitionActive
+                    || generation != mFrameRequestGeneration) return;
+                mVideoDecoder.adoptFrameIndexSnapshot(snapshot);
+            });
     mFrameDecodeThread->start();
 
     connect(mPositionControl, &VDQtPositionControlWidget::positionChanged, this, &VDQtMainWindow::onPositionChanged);
@@ -7150,10 +7156,11 @@ bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen())
         return true;
-    if (mVideoDecoder.isFrameCountExact()) {
+    if (mVideoDecoder.hasCompleteFrameIndex()) {
         mTimeline.setSourceFrameCount(mVideoDecoder.getFrameCount(), true);
         mPositionControl->SetRange(
             0, std::max<qint64>(0, mTimeline.frameCount() - 1));
+        syncInteractiveFrameIndex();
         return mTimeline.frameCount() > 0;
     }
 
@@ -7195,6 +7202,7 @@ bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
     mPositionControl->SetRange(
         0, std::max<qint64>(0, mTimeline.frameCount() - 1));
     updateEditActions();
+    syncInteractiveFrameIndex();
     return true;
 }
 
@@ -9245,6 +9253,10 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
         statusBar()->showMessage(QStringLiteral("The edited timeline contains no frames to play."));
         return;
     }
+    if ((actionCode == VDQT_PCN_PLAY || actionCode == VDQT_PCN_PLAYPREVIEW)
+        && !mPlaybackTimer->isActive() && mPositionControl->GetPosition() > 0
+        && !mVideoDecoder.hasCompleteFrameIndex()
+        && !ensureExactFrameRange(QStringLiteral("playback start"))) return;
 
     switch (actionCode) {
     case VDQT_PCN_STOP: // 0 - Stop
@@ -9390,6 +9402,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         mPlaybackPausedFrame = -1;
+        if (!ensureExactFrameRange(QStringLiteral("keyframe navigation"))) break;
         const int source = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
         const int targetSource = mVideoDecoder.getPreviousKeyFrame(source);
@@ -9404,6 +9417,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         mPlaybackPausedFrame = -1;
+        if (!ensureExactFrameRange(QStringLiteral("keyframe navigation"))) break;
         const int source = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
         const int targetSource = mVideoDecoder.getNextKeyFrame(source);
@@ -9737,7 +9751,17 @@ bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *er
         },
         Qt::BlockingQueuedConnection);
     if (errorMessage) *errorMessage = workerError;
+    if (opened) syncInteractiveFrameIndex();
     return opened;
+}
+
+void VDQtMainWindow::syncInteractiveFrameIndex() {
+    if (!mFrameDecodeWorker || !mFrameDecodeThread || !mFrameDecodeThread->isRunning()) return;
+    const auto snapshot = mVideoDecoder.frameIndexSnapshot();
+    if (!snapshot) return;
+    QMetaObject::invokeMethod(mFrameDecodeWorker,
+        [worker = mFrameDecodeWorker, snapshot] { worker->adoptFrameIndexSnapshot(snapshot); },
+        Qt::BlockingQueuedConnection);
 }
 
 void VDQtMainWindow::closeInteractiveDecoder() {

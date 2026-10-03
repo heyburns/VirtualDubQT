@@ -4,6 +4,7 @@
 #include "VDQtVideoDecoder.h"
 #include <QDebug>
 #include <QFileInfo>
+#include <QDateTime>
 #include <QDir>
 #include <QMutex>
 #include <QMutexLocker>
@@ -203,6 +204,17 @@ private:
 };
 
 } // namespace
+
+struct VDQtVideoDecoder::FrameIndexSnapshot {
+    QString filePath;
+    qint64 fileSize = -1;
+    qint64 modifiedMs = -1;
+    int errorMode = 0;
+    int streamIndex = -1;
+    AVRational timeBase{0, 1};
+    AVCodecID codec = AV_CODEC_ID_NONE;
+    QVector<FrameIndexEntry> entries;
+};
 
 // ---------------------------------------------------------------------------
 // Global decoder preferences, construction, and script dependency inspection
@@ -833,6 +845,9 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
 
     mFilePath = absolutePath;
     mVideoStreamIndex = streamIndex;
+    const QFileInfo openedSource(absolutePath);
+    mOpenedFileSize = openedSource.size();
+    mOpenedFileModifiedMs = openedSource.lastModified().toMSecsSinceEpoch();
     mWidth = width;
     mHeight = height;
     mFps = isUsableFrameRate(frameRate) ? av_q2d(frameRate) : 0.0;
@@ -912,6 +927,9 @@ void VDQtVideoDecoder::close() {
     clearCache();
     mFrameIndex.clear();
     mFrameIndexComplete = false;
+    mFrameIndexSnapshot.clear();
+    mOpenedFileSize = -1;
+    mOpenedFileModifiedMs = -1;
     mFrameTimestampLookup.clear();
     mFrameTimestampLookupReady = false;
 
@@ -1163,14 +1181,14 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
         // A repeated timestamp cannot identify which presentation ordinal a
         // demuxer will seek to. Use only unambiguous, verified keyframe anchors;
         // ambiguous or timestamp-less streams are counted from stream start.
-        while (candidate > 0 && (!mFrameIndex[candidate].keyFrame
-            || mFrameIndex[candidate].timestamp == AV_NOPTS_VALUE
-            || findIndexedFrameByTimestamp(mFrameIndex[candidate].timestamp, candidate, true) != candidate)) {
+        while (candidate > 0 && (!mFrameIndex.at(candidate).keyFrame
+            || mFrameIndex.at(candidate).timestamp == AV_NOPTS_VALUE
+            || findIndexedFrameByTimestamp(mFrameIndex.at(candidate).timestamp, candidate, true) != candidate)) {
             --candidate;
         }
-        if (candidate > 0 && mFrameIndex[candidate].timestamp != AV_NOPTS_VALUE) {
+        if (candidate > 0 && mFrameIndex.at(candidate).timestamp != AV_NOPTS_VALUE) {
             anchorIndex = candidate;
-            targetTimestamp = mFrameIndex[candidate].timestamp;
+            targetTimestamp = mFrameIndex.at(candidate).timestamp;
         }
     }
 
@@ -1212,6 +1230,7 @@ bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors,
         // Skipped/failed packets cannot verify a complete ordinal traversal.
         mIndexTraversalContiguous = false;
         mFrameIndexComplete = false;
+        mFrameIndexSnapshot.clear();
         if (decodeErrors) ++*decodeErrors;
         mLastError = avOperationError(operation, error);
         qWarning() << "[VDQtVideoDecoder]" << mLastError;
@@ -1341,7 +1360,7 @@ int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint, b
         mFrameTimestampLookup.reserve(indexedCount);
         for (int ordinal = 0; ordinal < indexedCount; ++ordinal) {
             ++mIndexLookupWorkCount;
-            registerIndexedTimestamp(mFrameIndex[ordinal].timestamp, ordinal);
+            registerIndexedTimestamp(mFrameIndex.at(ordinal).timestamp, ordinal);
         }
         mFrameTimestampLookupReady = true;
     }
@@ -1367,7 +1386,7 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     int frameIndex = mNextDecodeFrameIndex;
     const bool nextPrefixFrame = mIndexTraversalContiguous && frameIndex == indexedCount;
     const bool expectedTimestamp = frameIndex >= 0 && frameIndex < indexedCount
-        && mFrameIndex[frameIndex].timestamp == timestamp;
+        && mFrameIndex.at(frameIndex).timestamp == timestamp;
     // Known presentation order, not PTS uniqueness, establishes a new ordinal.
     // Two sequential decoded frames with equal timestamps must remain distinct.
     if (!nextPrefixFrame && !expectedTimestamp) {
@@ -1394,6 +1413,17 @@ int VDQtVideoDecoder::registerDecodedFrame() {
         mFrameIndex.append(entry);
         if (mFrameTimestampLookupReady) registerIndexedTimestamp(timestamp, frameIndex);
     } else if (frameIndex >= 0 && frameIndex < indexedCount) {
+        const auto& known = mFrameIndex.at(frameIndex);
+        // Read through const accessors. A completed snapshot may share the
+        // array with the editor; an unchanged revisit must not detach it.
+        if ((known.timestamp != AV_NOPTS_VALUE || entry.timestamp == AV_NOPTS_VALUE)
+            && (known.duration > 0 || entry.duration <= 0)
+            && (known.keyFrame || !entry.keyFrame)) {
+            mCurrentFrameIndex = frameIndex;
+            mNextDecodeFrameIndex = frameIndex + 1;
+            return frameIndex;
+        }
+        mFrameIndexSnapshot.clear();
         FrameIndexEntry& indexedEntry = mFrameIndex[frameIndex];
         if (indexedEntry.timestamp == AV_NOPTS_VALUE) {
             indexedEntry.timestamp = entry.timestamp;
@@ -1434,6 +1464,46 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
     mFrameIndexComplete = true;
+}
+
+VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (mIsAvsNative || !hasCompleteFrameIndex() || !mFormatCtx) return {};
+    if (mFrameIndexSnapshot) return mFrameIndexSnapshot;
+    auto snapshot = QSharedPointer<FrameIndexSnapshot>::create();
+    snapshot->filePath = mFilePath;
+    snapshot->fileSize = mOpenedFileSize;
+    snapshot->modifiedMs = mOpenedFileModifiedMs;
+    snapshot->errorMode = mErrorMode;
+    snapshot->streamIndex = mVideoStreamIndex;
+    snapshot->timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+    snapshot->codec = mCodecCtx->codec_id;
+    snapshot->entries = mFrameIndex;
+    mFrameIndexSnapshot = snapshot;
+    return mFrameIndexSnapshot;
+}
+
+bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snapshot) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (!snapshot || !mIsOpen || mIsAvsNative || !mFormatCtx || !mCodecCtx
+        || mVideoStreamIndex < 0 || snapshot->filePath != mFilePath
+        || snapshot->fileSize != mOpenedFileSize
+        || snapshot->modifiedMs != mOpenedFileModifiedMs
+        || snapshot->errorMode != mErrorMode || snapshot->streamIndex != mVideoStreamIndex
+        || snapshot->codec != mCodecCtx->codec_id || snapshot->entries.isEmpty()) return false;
+    const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+    if (snapshot->timeBase.num != timeBase.num || snapshot->timeBase.den != timeBase.den) return false;
+    if (mFrameIndexSnapshot == snapshot && mFrameIndexComplete) return true;
+    if (!resetDecoderToStart()) return false;
+    mFrameIndex = snapshot->entries;
+    mFrameIndexSnapshot = snapshot;
+    mFrameIndexComplete = true;
+    mFrameCount = boundedFrameCount(mFrameIndex.size());
+    mFrameCountStatus = FrameCountStatus::Exact;
+    mFrameTimestampLookup.clear();
+    mFrameTimestampLookupReady = false;
+    clearCache();
+    return true;
 }
 
 QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode,
@@ -1517,7 +1587,7 @@ bool VDQtVideoDecoder::isKeyFrame(int frameIndex) {
         return mFrameCountStatus != FrameCountStatus::Exact || frameIndex < mFrameCount;
     }
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size()) {
-        return mFrameIndex[frameIndex].keyFrame;
+        return mFrameIndex.at(frameIndex).keyFrame;
     }
     return false;
 }
@@ -1532,10 +1602,9 @@ int VDQtVideoDecoder::getPreviousKeyFrame(int frameIndex) {
 
     int candidate = std::min(frameIndex - 1, boundedFrameCount(mFrameIndex.size()) - 1);
     for (; candidate >= 0; --candidate) {
-        if (mFrameIndex[candidate].keyFrame) return candidate;
+        if (mFrameIndex.at(candidate).keyFrame) return candidate;
     }
-    int step = std::max(1, static_cast<int>(std::round(mFps > 0 ? mFps : 30.0)));
-    return std::max(0, frameIndex - step);
+    return 0;
 }
 
 int VDQtVideoDecoder::getNextKeyFrame(int frameIndex) {
@@ -1549,13 +1618,11 @@ int VDQtVideoDecoder::getNextKeyFrame(int frameIndex) {
 
     int candidate = std::max(0, frameIndex + 1);
     while (candidate < boundedFrameCount(mFrameIndex.size())) {
-        if (mFrameIndex[candidate].keyFrame) return candidate;
+        if (mFrameIndex.at(candidate).keyFrame) return candidate;
         ++candidate;
     }
 
-    int step = std::max(1, static_cast<int>(std::round(mFps > 0 ? mFps : 30.0)));
-    int maxFrame = mFrameCount > 0 ? mFrameCount - 1 : (frameIndex + step);
-    return std::min(maxFrame, frameIndex + step);
+    return -1; // No known next keyframe; never invent one from average FPS.
 }
 
 double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
@@ -1566,11 +1633,11 @@ double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
     }
 
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size()) {
-        const FrameIndexEntry& entry = mFrameIndex[frameIndex];
+        const FrameIndexEntry& entry = mFrameIndex.at(frameIndex);
         if (entry.timestamp != AV_NOPTS_VALUE && mVideoStreamIndex >= 0 && mFormatCtx) {
             int64_t origin = mStreamStartTimestamp;
-            if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE) {
-                origin = mFrameIndex.front().timestamp;
+            if (!mFrameIndex.isEmpty() && mFrameIndex.at(0).timestamp != AV_NOPTS_VALUE) {
+                origin = mFrameIndex.at(0).timestamp;
             }
             if (origin == AV_NOPTS_VALUE) origin = 0;
             const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
@@ -1588,13 +1655,13 @@ double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
 
     if (frameIndex >= 0 && frameIndex < mFrameIndex.size() && mVideoStreamIndex >= 0 && mFormatCtx) {
         const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
-        const FrameIndexEntry& entry = mFrameIndex[frameIndex];
+        const FrameIndexEntry& entry = mFrameIndex.at(frameIndex);
 
         // AVFrame::duration can reflect decode-order packet spacing rather than
         // presentation-order dwell time on reordered VFR streams. Adjacent PTS
         // values are authoritative for every frame except the final one.
         if (entry.timestamp != AV_NOPTS_VALUE && frameIndex + 1 < mFrameIndex.size()) {
-            const int64_t nextTimestamp = mFrameIndex[frameIndex + 1].timestamp;
+            const int64_t nextTimestamp = mFrameIndex.at(frameIndex + 1).timestamp;
             if (nextTimestamp != AV_NOPTS_VALUE && nextTimestamp > entry.timestamp) {
                 return static_cast<double>(nextTimestamp - entry.timestamp)
                      * av_q2d(timeBase);
@@ -1614,8 +1681,8 @@ double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
             && mFrameCount > 0 && frameIndex + 1 == mFrameCount
             && streamDuration != AV_NOPTS_VALUE && streamDuration > 0) {
             int64_t origin = mStreamStartTimestamp;
-            if (!mFrameIndex.isEmpty() && mFrameIndex.front().timestamp != AV_NOPTS_VALUE)
-                origin = mFrameIndex.front().timestamp;
+            if (!mFrameIndex.isEmpty() && mFrameIndex.at(0).timestamp != AV_NOPTS_VALUE)
+                origin = mFrameIndex.at(0).timestamp;
             if (origin == AV_NOPTS_VALUE) origin = 0;
             if (origin <= std::numeric_limits<int64_t>::max() - streamDuration) {
                 const int64_t streamEnd = origin + streamDuration;
@@ -1662,6 +1729,7 @@ void VDQtVideoDecoder::setErrorMode(int errorMode) {
         mFrameTimestampLookup.clear();
         mFrameTimestampLookupReady = false;
         mFrameIndexComplete = false;
+        mFrameIndexSnapshot.clear();
         mIndexTraversalContiguous = false;
         mFrameCountStatus = mFrameCount > 0
             ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
@@ -1759,6 +1827,7 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
         }
         mFrameIndex.clear();
         mFrameIndexComplete = false;
+        mFrameIndexSnapshot.clear();
         mFrameTimestampLookup.clear();
         mFrameTimestampLookupReady = false;
         clearCache();

@@ -11,6 +11,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QVector>
+#include <QSharedPointer>
 #include <functional>
 
 extern "C" {
@@ -56,6 +57,13 @@ public:
     bool hasCompleteFrameIndex() const {
         return mIsOpen && (mIsAvsNative || mFrameIndexComplete);
     }
+    // Immutable, complete presentation knowledge for another decoder of this
+    // same open source. Partial prefixes are deliberately not published on
+    // every playback frame: that would cause quadratic QVector detachment.
+    struct FrameIndexSnapshot;
+    using FrameIndexSnapshotPtr = QSharedPointer<const FrameIndexSnapshot>;
+    FrameIndexSnapshotPtr frameIndexSnapshot();
+    bool adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snapshot);
     // EOF describes the last decode attempt, not proof of the entire source's
     // length. A sparse timestamp seek can reach EOF with only a prefix indexed.
     bool reachedEndOfStream() const { return mLastDecodeReachedEof; }
@@ -249,6 +257,9 @@ private:
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
     bool mFrameIndexComplete = false;
+    FrameIndexSnapshotPtr mFrameIndexSnapshot;
+    qint64 mOpenedFileSize = -1;
+    qint64 mOpenedFileModifiedMs = -1;
     // Built only when a seek needs timestamp reconciliation. Sequential index
     // growth requires neither an all-prefix search nor this additional storage.
     // A timestamp can belong to several distinct presentation ordinals.
@@ -257,5 +268,7 @@ private:
 
     QImage renderAvsFrame(int frameIndex);
 };
+
+Q_DECLARE_METATYPE(VDQtVideoDecoder::FrameIndexSnapshotPtr)
 
 #endif // VDQTVIDEODECODER_H

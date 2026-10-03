@@ -33,8 +33,9 @@ Remaining execution sequence
     The first uncached random seek can require one full index; replacement requests
     resume cancelled indexing when the decoder still continues the verified prefix.
     Individual AVS/I/O calls are not preemptible.
-[ ] M16: share verified indexes with editor/export/audio and keyframe controls;
-    correct variable-rate jump-to-time and edited timeline time.
+[x] M16: complete immutable indexes shared between preview/editor/export/audio
+    timing consumers; cold keyframe buttons use actual keyframes, not FPS guesses.
+[ ] Variable-rate jump-to-time and cumulative edited timeline time.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
     hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;

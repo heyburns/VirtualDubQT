@@ -884,6 +884,36 @@ bool sparseEof(VDQtTestFixtures& fixtures) {
                  "sparse EOF retains the timeline and last displayed playhead");
 }
 
+bool indexedNavigation(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("key-navigation.mp4");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10",
+                          "-frames:v", "48", "-c:v", "libx264", "-g", "12",
+                          "-keyint_min", "12", "-sc_threshold", "0", "-bf", "3",
+                          "-threads", "1", "-an", source})) return false;
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(source) || reference.ensureFrameIndex().totalFrames != 48) return false;
+    const int key = reference.getNextKeyFrame(0);
+    if (!check(key == 12, "navigation fixture has known GOP positions")) return false;
+    const QImage expected = reference.getFrameImage(key);
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(source)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    if (!position || panes.size() != 2
+        || !waitFor([&] { return !panes.first()->frameImage().isNull(); })) return false;
+    QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                              Q_ARG(int, VDQT_PCN_KEYNEXT));
+    if (!check(position->GetPosition() == key
+               && waitFor([&] { return panes.first()->frameImage() == expected; }),
+               "cold GUI next-keyframe navigation uses actual keyframe knowledge")) return false;
+    QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                              Q_ARG(int, VDQT_PCN_KEYPREV));
+    return check(position->GetPosition() == 0,
+                 "GUI previous-keyframe navigation uses the same verified index");
+}
+
 bool emptyTimeline(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1126,6 +1156,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "unknown_timeline") return unknownTimeline(fixtures);
     if (scenario == "sparse_eof") return sparseEof(fixtures);
     if (scenario == "index_reuse") return indexReuse(fixtures);
+    if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
     if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

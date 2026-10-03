@@ -209,6 +209,7 @@ private:
     bool openInteractiveDecoder(const QString& filePath, QString *errorMessage);
     void closeInteractiveDecoder();
     void syncInteractiveFilterChain();
+    void syncInteractiveFrameIndex();
     void seekAudioToVideoFrame(int frameIndex);
     bool ensureExactFrameRange(const QString& operationLabel);
     // Source/session persistence and special input materialization.

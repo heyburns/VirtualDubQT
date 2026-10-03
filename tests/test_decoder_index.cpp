@@ -177,8 +177,26 @@ bool exactVfrOrdinals(VDQtTestFixtures& fixtures) {
     }
     if (!check(fresh.scanVideoStream().totalFrames == frames,
                "VFR health scan retains the complete source")) return false;
-    return check(fresh.getFrameImage(150) == firstSeek,
-                 "indexing cannot change the picture assigned to an ordinal");
+    if (!check(fresh.getFrameImage(150) == firstSeek,
+               "indexing cannot change the picture assigned to an ordinal")) return false;
+    const auto snapshot = fresh.frameIndexSnapshot();
+    VDQtVideoDecoder consumer;
+    if (!consumer.openFile(input)) return false;
+    if (!check(!consumer.frameIndexSnapshot() && consumer.adoptFrameIndexSnapshot(snapshot)
+               && consumer.ensureFrameIndex().totalFrames == frames
+               && consumer.getDecodedFrameCount() == 0
+               && consumer.getFrameTimestampSeconds(150) == reference.getFrameTimestampSeconds(150),
+               "another decoder adopts exact VFR timing without a redundant scan")) return false;
+    if (!check(consumer.getFrameImage(150) == firstSeek
+               && consumer.frameIndexSnapshot() == snapshot,
+               "revisiting an unchanged shared index keeps its cached immutable snapshot")) return false;
+    consumer.setErrorMode(1);
+    if (!check(!consumer.adoptFrameIndexSnapshot(snapshot),
+               "index from a different corruption policy cannot be adopted")) return false;
+    consumer.close();
+    if (!consumer.openFile(fixtures.directory.filePath("duplicate-pts.mkv"))) return false;
+    return check(!consumer.adoptFrameIndexSnapshot(snapshot),
+                 "index from another source cannot be adopted");
 }
 }
 

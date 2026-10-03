@@ -564,3 +564,28 @@ export, stabilization, playback and actual-binary media checks passed 7/7 each.
 The regular binary rebuilt and passed the maintained MP4/native-AVS export smoke.
 This limits repeated work during cold
 scrubbing, not the unavoidable initial index cost for exact variable-rate ordinals.
+
+Shared complete indexes and keyframe controls (M16)
+--------------------------------------------------
+
+operation_indexed_navigation failed before repair: a 10fps source with keyframes
+at 0/12/24/36 made the cold next-keyframe button jump to guessed frame 10. It now
+lands on frame 12 and displays the independently verified picture; previous goes
+back to 0. Unknown next keys are no longer manufactured from average FPS.
+
+The worker publishes cached immutable complete-index pointers with generation
+tokens. The editor adopts only matching source path/open-time size/modification,
+stream/timebase/codec and recovery policy. Source transitions and stale generations
+cannot install them. Editor-created complete indexes also go to preview before
+navigation/export continues. Partial growing prefixes are not copied per playback
+frame. Const reads and unchanged revisits retain shared storage rather than
+detaching the full array. The index owns metadata only, not codec/AVS resources.
+
+Decoder regressions adopt VFR timing in another decoder with zero scan decodes,
+verify subsequent pictures and cached pointer stability, and reject another file
+or corruption policy. Playback from a nonzero frame obtains exact timing before
+audio seeking if it has not already arrived from preview. Physical audio output
+is not exercised; VFR jump-to-time and cumulative edited-timeline time remain open.
+
+Validation: full Release 38/38 and sanitizer 34/34 passed. The regular binary
+rebuilt and passed the actual MP4/native-AVS export smoke.

@@ -29,6 +29,7 @@ public:
     void setErrorMode(int errorMode);
     void applyFrameCacheBudget();
     void setFilterChain(const QList<VDFilterInstance>& chain);
+    bool adoptFrameIndexSnapshot(const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot);
 
     void requestFrame(int frameIndex,
                       quint64 generation,
@@ -37,6 +38,8 @@ public:
     void cancelPending(quint64 generation);
 
 Q_SIGNALS:
+    void frameIndexAvailable(quint64 generation,
+                             const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot);
     void frameReady(int frameIndex,
                     quint64 generation,
                     const QImage& inputImage,
