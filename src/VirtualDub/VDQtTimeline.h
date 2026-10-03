@@ -55,6 +55,8 @@ public:
                          bool clearHistory = true);
 
     qint64 mapOutputToSource(qint64 outputFrame) const;
+    // Masks hold the video picture, not sound or the source timing interval.
+    qint64 mapOutputToAudioSource(qint64 outputFrame) const;
     bool isOutputFrameMasked(qint64 outputFrame) const;
     qint64 mapSourceToOutput(qint64 sourceFrame,
                              qint64 outputHint = 0,

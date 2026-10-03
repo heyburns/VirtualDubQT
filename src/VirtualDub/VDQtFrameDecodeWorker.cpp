@@ -181,13 +181,13 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         };
         QImage inputImage = decoder->getFrameImage(
             frameIndex, preserveSequentialDecode, stillRequested);
+        // Resolve timing after decoding/indexing, even for plain input Play.
+        // A masked picture stays fixed while its audio/source interval advances.
+        const VDFilterFrameContext context = VDQtFilterContextForFrame(
+            *decoder, timelineSegments, timelineFrame >= 0 ? timelineFrame : frameIndex);
         QList<QImage> outputImages;
         QString filterError;
         if (!inputImage.isNull() && renderFilteredOutput && stillRequested()) {
-            // Resolve timing after decoding/indexing, not from a stale GUI
-            // estimate. Image identity and advancing edit position are separate.
-            const VDFilterFrameContext context = VDQtFilterContextForFrame(
-                *decoder, timelineSegments, timelineFrame >= 0 ? timelineFrame : frameIndex);
             if (!mFilters.processFrameSequence(inputImage, outputImages, context)) {
                 outputImages.clear();
                 filterError = mFilters.lastError();
@@ -217,7 +217,7 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                     outputImages,
                     decoder->isKeyFrame(frameIndex),
                     decoder->getFrameTimestampSeconds(frameIndex),
-                    decoder->getFrameDurationSeconds(frameIndex),
+                    context.inputDurationSeconds,
                     decoder->getFrameCount(),
                     status,
                     decoder->getSeekCount(),

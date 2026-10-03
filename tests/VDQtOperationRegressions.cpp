@@ -4,6 +4,7 @@
 #include "support/VDQtTestFixtures.h"
 #include "VirtualDub/VDQtMainWindow.h"
 #include "VirtualDub/VDQtFrameServer.h"
+#include "VirtualDub/VDQtFrameDecodeWorker.h"
 #include "VirtualDub/VDQtFilterFrameContext.h"
 
 #include <QApplication>
@@ -1165,6 +1166,28 @@ bool editedFilterContext(VDQtTestFixtures& fixtures) {
                && std::abs(secondMask.timestampSeconds - firstMask.timestampSeconds
                    - reference.getFrameDurationSeconds(2)) < 1e-8,
                "held preview identity does not freeze timeline time or temporal-filter history")) return false;
+    // Hold a short-duration picture while the actual masked frames have longer
+    // durations. Both plain Play and filtered Play Preview must advance using
+    // the latter; a picture timestamp is not the playback interval.
+    VDQtFrameDecodeWorker worker;
+    if (!worker.openSource(vfr, QString(), 0, 0, 0)
+        || !worker.adoptFrameIndexSnapshot(reference.frameIndexSnapshot())) return false;
+    const QList<VDQtTimelineSegment> heldEdits{{0, 1, false}, {12, 2, true}};
+    bool delivered = false;
+    double duration = 0;
+    QObject::connect(&worker, &VDQtFrameDecodeWorker::frameReady, &worker,
+        [&](int frame, quint64, const QImage&, const QList<QImage>&, bool,
+            double, double interval, int, int, quint64, quint64, const QString&) {
+            delivered = frame == 0;
+            duration = interval;
+        });
+    for (bool filtered : {false, true}) {
+        delivered = false;
+        worker.requestFrame(0, filtered ? 2 : 1, true, filtered, 1, heldEdits);
+        if (!check(waitFor([&] { return delivered; })
+                   && std::abs(duration - reference.getFrameDurationSeconds(12)) < 1e-8,
+                   "masked playback reports advancing VFR interval in either preview mode")) return false;
+    }
     VDQtVideoDecoder recipient;
     if (!recipient.openFile(vfr) || !recipient.adoptFrameIndexSnapshot(reference.frameIndexSnapshot())) return false;
     recipient.resetPerformanceCounters();

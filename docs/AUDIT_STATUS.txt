@@ -61,7 +61,8 @@ Remaining execution sequence
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
 [ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
 [ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
-[ ] Audio follow-up: independently verify continuous sound across masked ranges.
+[x] Audio follow-up: separate held-picture and advancing audio mappings, including
+    masked VFR playback intervals. Physical continuous-sound verification is pending.
 [ ] M08/M09/M11/M12/M13: AVS formats, color/aspect metadata and effective codec controls.
 [ ] M20/M21: bounded script evaluation and safe numeric conversion throughout inputs.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.

@@ -12,7 +12,8 @@ bool cases() {
     VDQtTimeline timeline;
     timeline.reset(0, false);
     if (!check(timeline.isIdentity() && timeline.mapOutputToSource(0) == 0
-               && timeline.mapOutputToSource(25) == 25,
+               && timeline.mapOutputToSource(25) == 25
+               && timeline.mapOutputToAudioSource(25) == 25,
                "unknown identity sources permit frame-zero and tail discovery")) return false;
     timeline.reset(10, false);
     if (!check(timeline.mapOutputToSource(10) == 10 && timeline.mapOutputToSource(30) == 30,
@@ -28,10 +29,33 @@ bool cases() {
     timeline.setSourceFrameCount(32, true);
     if (!check(timeline.mapOutputToSource(31) == 31 && timeline.mapOutputToSource(32) == -1,
                "verified identity lengths remain bounded")) return false;
+    if (!check(timeline.mapOutputToAudioSource(31) == 31
+               && timeline.mapOutputToAudioSource(32) == -1
+               && timeline.mapOutputToAudioSource(-1) == -1,
+               "audio identity honors verified and negative bounds")) return false;
+
+    VDQtTimeline masked;
+    masked.reset(32, true);
+    if (!masked.replaceSegments({{10, 2, true}, {12, 2, false}, {14, 3, true}, {2, 2, false}})) return false;
+    for (qint64 frame = 0; frame < 7; ++frame) {
+        const qint64 picture = frame < 2 ? 10 : frame < 4 ? frame + 10 : 13;
+        if (!check(masked.mapOutputToSource(frame) == picture
+                   && masked.mapOutputToAudioSource(frame) == frame + 10,
+                   "leading and subsequent masks hold pictures but retain continuous sound")) return false;
+        if (frame > 0 && !check(masked.mapOutputToAudioSource(frame)
+                    - masked.mapOutputToAudioSource(frame - 1) == 1,
+                    "advancing a mask never triggers the playback cut/seek predicate")) return false;
+    }
+    if (!check(masked.mapOutputToAudioSource(7) == 2
+               && masked.mapOutputToAudioSource(8) == 3
+               && masked.mapOutputToAudioSource(9) == -1,
+               "genuine reordered cuts still remap sound and preserve edit bounds")) return false;
 
     if (!timeline.deleteRange(0, 32)) return false;
     if (!check(timeline.isEmpty() && timeline.isModified() && timeline.mapOutputToSource(0) == -1,
                "deleting all frames makes an explicit empty edit")) return false;
+    if (!check(timeline.mapOutputToAudioSource(0) == -1,
+               "explicit empty edits cannot revive source audio")) return false;
     timeline.setSourceFrameCount(0, false);
     timeline.setSourceFrameCount(40, true);
     if (!check(timeline.isEmpty() && timeline.isModified(),

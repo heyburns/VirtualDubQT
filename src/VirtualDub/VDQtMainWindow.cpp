@@ -6788,6 +6788,12 @@ int VDQtMainWindow::sourceFrameForTimelineFrame(qint64 timelineFrame) const {
         ? static_cast<int>(mapped) : -1;
 }
 
+int VDQtMainWindow::audioSourceFrameForTimelineFrame(qint64 timelineFrame) const {
+    const qint64 mapped = mTimeline.mapOutputToAudioSource(timelineFrame);
+    return mapped >= 0 && mapped <= std::numeric_limits<int>::max()
+        ? static_cast<int>(mapped) : -1;
+}
+
 void VDQtMainWindow::updateTimelineView(qint64 preferredPosition,
                                         bool clearSelection) {
     // An edit changes the source mapping even when the output playhead remains
@@ -7430,9 +7436,9 @@ void VDQtMainWindow::onViewAudioWaveform() {
     double startSeconds = 0.0;
     double durationSeconds = 10.0;
     if (mPositionControl->hasSelection()) {
-        const int firstFrame = sourceFrameForTimelineFrame(
+        const int firstFrame = audioSourceFrameForTimelineFrame(
             mPositionControl->GetSelectionStart());
-        const int lastFrame = sourceFrameForTimelineFrame(
+        const int lastFrame = audioSourceFrameForTimelineFrame(
             mPositionControl->GetSelectionEnd() - 1);
         startSeconds = mVideoDecoder.getFrameTimestampSeconds(firstFrame);
         const double lastTime = mVideoDecoder.getFrameTimestampSeconds(lastFrame);
@@ -7444,7 +7450,7 @@ void VDQtMainWindow::onViewAudioWaveform() {
             durationSeconds = lastTime + lastDuration - startSeconds;
         }
     } else {
-        const int sourceFrame = sourceFrameForTimelineFrame(
+        const int sourceFrame = audioSourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
         startSeconds = mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
         if (!std::isfinite(startSeconds))
@@ -9231,7 +9237,7 @@ void VDQtMainWindow::onPositionChanged(int frame) {
 }
 
 void VDQtMainWindow::seekAudioToVideoFrame(int frameIndex) {
-    const int sourceFrame = sourceFrameForTimelineFrame(frameIndex);
+    const int sourceFrame = audioSourceFrameForTimelineFrame(frameIndex);
     if (sourceFrame < 0) return;
     const double timestamp = mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
     if (std::isfinite(timestamp))
@@ -9287,7 +9293,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
                 ? mFrameRateConfig.customSourceFps : mVideoDecoder.getFps();
             if (!(playbackFps > 0.0)) playbackFps = 29.97;
             mPlaybackFrameDurationSeconds = step / playbackFps;
-            const int sourceFrame = sourceFrameForTimelineFrame(mPlaybackStartFrame);
+            const int sourceFrame = audioSourceFrameForTimelineFrame(mPlaybackStartFrame);
             mPlaybackAudioOriginSeconds = sourceFrame >= 0
                 ? mVideoDecoder.getFrameTimestampSeconds(sourceFrame) : -1.0;
             const bool resumePausedAudio = mPlaybackPausedFrame
@@ -9331,7 +9337,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
                 ? mFrameRateConfig.customSourceFps : mVideoDecoder.getFps();
             if (!(playbackFps > 0.0)) playbackFps = 29.97;
             mPlaybackFrameDurationSeconds = step / playbackFps;
-            const int sourceFrame = sourceFrameForTimelineFrame(mPlaybackStartFrame);
+            const int sourceFrame = audioSourceFrameForTimelineFrame(mPlaybackStartFrame);
             mPlaybackAudioOriginSeconds = sourceFrame >= 0
                 ? mVideoDecoder.getFrameTimestampSeconds(sourceFrame) : -1.0;
             const bool resumePausedAudio = mPlaybackPausedFrame
@@ -9518,8 +9524,8 @@ void VDQtMainWindow::onPlaybackTick() {
         }
         const int currentTimelineFrame = mPlaybackClockFrame;
         const int currentSourceFrame =
-            sourceFrameForTimelineFrame(currentTimelineFrame);
-        const int targetSourceFrame = sourceFrameForTimelineFrame(targetFrame);
+            audioSourceFrameForTimelineFrame(currentTimelineFrame);
+        const int targetSourceFrame = audioSourceFrameForTimelineFrame(targetFrame);
         if (targetSourceFrame >= 0 && currentSourceFrame >= 0
             && targetSourceFrame - currentSourceFrame
                 != targetFrame - currentTimelineFrame) {

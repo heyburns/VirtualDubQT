@@ -255,6 +255,7 @@ private:
     bool selectedTimelineRange(qint64 *startFrame, qint64 *endFrameExclusive,
                                const QString& operationLabel);
     int sourceFrameForTimelineFrame(qint64 timelineFrame) const;
+    int audioSourceFrameForTimelineFrame(qint64 timelineFrame) const;
     void updateRecentFilesMenu();
     void addRecentFile(const QString& filePath);
     void findSceneChange(bool forward);

@@ -260,6 +260,12 @@ the sink's presented playback time instead. Seeking stops and joins the producer
 flushes decoder/filter history, establishes a new sample origin, primes the
 buffer, and then resumes.
 
+Timeline masks hold only the video picture. `mapOutputToAudioSource()` maps the
+advancing source interval for seeking, clock origins and cut detection; using
+the held picture's mapping would repeatedly rewind sound inside a mask. The
+decode worker likewise reports the advancing interval's duration in both plain
+Play and Play Preview. Physical listening remains a separate validation gate.
+
 Offline audio export uses the same conversion rules but writes transactionally
 through a staged file. Small timestamp jitter is smoothed; genuine gaps remain
 silence.

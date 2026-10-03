@@ -148,6 +148,19 @@ qint64 VDQtTimeline::mapOutputToSource(qint64 outputFrame) const {
     return -1;
 }
 
+qint64 VDQtTimeline::mapOutputToAudioSource(qint64 outputFrame) const {
+    if (outputFrame < 0) return -1;
+    if (mIdentity)
+        return !mSourceFrameCountExact || outputFrame < mSourceFrameCount ? outputFrame : -1;
+    qint64 outputCursor = 0;
+    for (const VDQtTimelineSegment& segment : mSegments) {
+        if (outputFrame < outputCursor + segment.frameCount)
+            return segment.sourceStartFrame + outputFrame - outputCursor;
+        outputCursor += segment.frameCount;
+    }
+    return -1;
+}
+
 bool VDQtTimeline::isOutputFrameMasked(qint64 outputFrame) const {
     if (outputFrame < 0) return false;
     qint64 outputCursor = 0;

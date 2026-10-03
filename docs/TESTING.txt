@@ -863,3 +863,22 @@ and cancelling Save Audio without enabling the live session's disabled audio.
 Validation: focused Release 7/7 and ASan/UBSan 7/7 passed (controller, source,
 audio inclusion, queue, stabilization and actual-app media smoke). The regular
 binary rebuilt and independently passed MP4/native-AVS export smoke.
+
+Masked playback picture/audio separation
+---------------------------------------
+
+Review confirmed that mask holds made the playback cut predicate seek on every
+advance. Timeline contracts now check advancing audio through leading/subsequent
+masks, genuine reordered cuts, provisional identity and empty/verified bounds.
+Transport seeks, origins and cut detection use this audio mapping, not held
+picture identity. Waveform starting positions use the same rule.
+
+A real VFR decode-worker regression failed before repair: holding a 42 ms
+picture reused its interval where the advancing masked frame lasts 125 ms.
+Both plain Play and Play Preview now report the advancing interval. These are
+mapping/timing regressions, not a physical listening test; continuous sound
+across masks and real sink behavior remain hardware gates.
+
+Validation: focused Release 7/7 and ASan/UBSan 7/7 passed (timeline, clock,
+controller, masked VFR context, edit preview, stabilization and media smoke).
+The rebuilt regular binary independently passed MP4/native-AVS export smoke.
