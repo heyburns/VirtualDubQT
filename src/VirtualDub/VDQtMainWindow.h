@@ -191,6 +191,7 @@ private:
     // The RAII scopes protect the complete workflow, including event pumping.
     class OperationScope;
     class SourceTransitionScope;
+    class SessionRollbackScope;
     bool editorActionsBlocked() const;
     bool openVideoFileImpl(const QString& filePath);
     void closeVideoSource();

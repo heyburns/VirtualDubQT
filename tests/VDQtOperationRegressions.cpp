@@ -278,9 +278,128 @@ bool projectValidation(VDQtTestFixtures& fixtures) {
         const QJsonObject after = QJsonDocument::fromJson(readFile(original)).object();
         if (!check(after == before, "invalid project preserves selection, zoom, markers, settings and saved-project path")) return false;
     }
+    // Validation succeeds, then the selected audio disappears during Open's
+    // real UI event dispatch. Commit must roll back, not leave the AVS installed.
+    const QString disappearingAudio = fixtures.directory.filePath("late-audio.wav");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+                          "-c:a", "pcm_s16le", disappearingAudio})) return false;
+    candidate.timelineSegments = {{0, 8}};
+    candidate.audioDisabled = false;
+    candidate.audioSourcePath = disappearingAudio;
+    candidate.audioStreamIndex = 0;
+    if (!VDQtProjectFile::saveProject(invalid, candidate, &error)) return false;
+    bool removed = false;
+    QTimer disappearing;
+    disappearing.setInterval(0);
+    QObject::connect(&disappearing, &QTimer::timeout, &window, [&] {
+        if (removed) return;
+        // The original zoom survives validation and is cleared only by source
+        // replacement. Open dispatches queued events during window sizing.
+        if (!position->HasZoomRange()) removed = QFile::remove(disappearingAudio);
+    });
+    disappearing.start();
+    const bool rejected = chooseProjectFile(window, "onFileLoadProject", invalid, true);
+    disappearing.stop();
+    if (!check(removed && rejected && window.windowTitle().contains("source.mp4")
+               && position->GetPosition() == 8, "late audio-open failure rolls back the original session")
+        || !invoke(window, "onFileSaveProject")
+        || !check(QJsonDocument::fromJson(readFile(original)).object() == before,
+                  "late commit rollback preserves the complete saved editor state")) return false;
     const auto panes = window.findChildren<VDVideoDisplayWidget*>();
     return check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
                  "original editor remains usable after rejected project loads");
+}
+
+bool appendState(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4) || !invoke(window, "onEditSelectAll")) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!position) return false;
+    QString error;
+    if (!window.runAutomationText("VirtualDub.audio.SetSource(0);", fixtures.directory.path(), &error)) return false;
+    position->SetPosition(8);
+    position->SetSelection(4, 16);
+    position->SetZoomRange(0, 24);
+    if (!invoke(window, "onEditToggleMarker")) return false;
+    const QString beforePath = fixtures.directory.filePath("before-append.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", beforePath)) return false;
+    VDQtProjectState before;
+    if (!VDQtProjectFile::loadProject(beforePath, &before, &error)) return false;
+    if (!window.runAutomationText("VirtualDub.Append(\"source.mp4\");", fixtures.directory.path(), &error))
+        return check(false, error.toUtf8().constData());
+    QString afterPath = fixtures.directory.filePath("after-append.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", afterPath)) return false;
+    VDQtProjectState after;
+    if (!VDQtProjectFile::loadProject(afterPath, &after, &error)) return false;
+    if (!check(after.sourcePaths.size() == 2 && after.sourceFrameCount == 96,
+               "append includes both complete sources")
+        || !check(after.audioDisabled && after.markers == before.markers,
+                  "append preserves disabled audio and existing source markers")
+        || !check(after.position == before.position && after.hasSelection == before.hasSelection
+                  && after.selectionStart == before.selectionStart && after.selectionEnd == before.selectionEnd
+                  && after.zoomEnabled == before.zoomEnabled && after.zoomStart == before.zoomStart
+                  && after.zoomEnd == before.zoomEnd,
+                  "append preserves playhead, selection and zoom")) return false;
+    // A failed attempt must keep that two-source session and its project path.
+    if (!check(!window.runAutomationText("VirtualDub.Append(\"missing.mp4\");",
+                                        fixtures.directory.path(), &error), "missing append fails cleanly")
+        || !invoke(window, "onFileSaveProject")) return false;
+    bool cancelled = false;
+    QTimer cancel;
+    cancel.setInterval(0);
+    QObject::connect(&cancel, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *progress = qobject_cast<QProgressDialog*>(widget);
+            if (progress && progress->isVisible()
+                && progress->labelText().contains("Validating appended")) {
+                cancelled = true;
+                progress->cancel();
+            }
+        }
+    });
+    cancel.start();
+    const bool appended = window.runAutomationText("VirtualDub.Append(\"source.mp4\");",
+                                                   fixtures.directory.path(), &error);
+    cancel.stop();
+    if (!check(cancelled && !appended && error.contains("cancel", Qt::CaseInsensitive),
+               "append validation cancellation keeps the original session")
+        || !invoke(window, "onFileSaveProject")) return false;
+    VDQtProjectState retained;
+    if (!check(VDQtProjectFile::loadProject(afterPath, &retained, &error)
+                 && retained.sourcePaths == after.sourcePaths && retained.audioDisabled
+                 && retained.markers == after.markers && retained.zoomEnabled,
+                 "failed append retains the complete original session")) return false;
+    const QString externalAudio = fixtures.directory.filePath("append-audio.wav");
+    afterPath = fixtures.directory.filePath("external-append.vdqproject");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+                          "-c:a", "pcm_s16le", externalAudio})
+        || !window.runAutomationText("VirtualDub.audio.SetSource(\"append-audio.wav\");",
+                                     fixtures.directory.path(), &error)
+        || !window.runAutomationText("VirtualDub.Append(\"source.mp4\");",
+                                     fixtures.directory.path(), &error)
+        || !chooseProjectFile(window, "onFileSaveProjectAs", afterPath)
+        || !VDQtProjectFile::loadProject(afterPath, &retained, &error)) return false;
+    if (!check(!retained.audioDisabled && retained.audioSourcePath == externalAudio
+               && retained.audioStreamIndex == 0 && retained.sourceFrameCount == 144,
+               "append preserves external audio and its selected stream")) return false;
+    position->SetSelection(16, 24);
+    if (!invoke(window, "onEditCropToSelection")) return false;
+    position->SetSelection(0, 4);
+    if (!invoke(window, "onEditCopy")) return false;
+    position->SetSelection(0, 0);
+    afterPath = fixtures.directory.filePath("edited-append.vdqproject");
+    if (!window.runAutomationText("VirtualDub.Append(\"source.mp4\");",
+                                  fixtures.directory.path(), &error)
+        || !invoke(window, "onEditPaste")
+        || !chooseProjectFile(window, "onFileSaveProjectAs", afterPath)
+        || !VDQtProjectFile::loadProject(afterPath, &retained, &error)) return false;
+    qint64 outputFrames = 0;
+    for (const auto& segment : retained.timelineSegments) outputFrames += segment.frameCount;
+    return check(retained.sourceFrameCount == 192 && outputFrames == 60
+                 && retained.timelineSegments.first().sourceStartFrame == 16,
+                 "append preserves genuine edits and the frame clipboard for subsequent paste");
 }
 
 bool sourceLifetime(VDQtTestFixtures& fixtures) {
@@ -916,6 +1035,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "recovery") return recoveryRetention(fixtures);
     if (scenario == "edit_preview") return editPreview(fixtures);
     if (scenario == "project_validation") return projectValidation(fixtures);
+    if (scenario == "append_state") return appendState(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);

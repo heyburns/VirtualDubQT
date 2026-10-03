@@ -399,6 +399,122 @@ private:
     VDQtMainWindow& mWindow;
 };
 
+// Source validation cannot prevent a file/device disappearing before commit.
+// Retain the entire editor state until replacement succeeds; append and project
+// loading share the same rollback contract rather than restoring selected fields.
+class VDQtMainWindow::SessionRollbackScope final {
+public:
+    explicit SessionRollbackScope(VDQtMainWindow& window)
+        : mWindow(window), mState(window.captureProjectState()),
+          mTimeline(window.mTimeline), mClipboard(window.mTimelineClipboard),
+          mDecoderPath(window.mVideoDecoder.getFilePath()),
+          mProjectPath(window.mCurrentProjectPath), mHadSource(window.mVideoDecoder.isOpen()),
+          mRecoveryWasProtected(window.mRecoverySnapshotProtected) {
+        if (QFileInfo::exists(window.mRecoveryPath)) window.mRecoverySnapshotProtected = true;
+    }
+    ~SessionRollbackScope() {
+        if (mCommitted) return;
+        QString error;
+        mWindow.applyProcessingState(mState.processing);
+        bool restored = true;
+        if (mHadSource) {
+            restored = mWindow.openVideoFileImpl(mDecoderPath)
+                && applyDetails(mState, mTimeline, mProjectPath, &error);
+        } else {
+            mWindow.closeVideoSource();
+        }
+        mWindow.mRecoverySnapshotProtected = mRecoveryWasProtected;
+        if (!restored) {
+            // If the old source also became unavailable, preserve its edits in
+            // a durable, uniquely named project instead of silently losing them.
+            QString savedPath;
+            if (!mWindow.mRecoveryPath.isEmpty()) {
+                const QString candidate = QDir(QFileInfo(mWindow.mRecoveryPath).absolutePath())
+                    .filePath(QStringLiteral("failed-session-%1.vdqproject")
+                              .arg(QUuid::createUuid().toString(QUuid::Id128)));
+                QString saveError;
+                if (VDQtProjectFile::saveProject(candidate, mState, &saveError)) savedPath = candidate;
+                else error += QStringLiteral("\nCould not save recovery: ") + saveError;
+            }
+            const QString message = QStringLiteral("The previous source could not be restored. %1%2")
+                .arg(error, savedPath.isEmpty() ? QString()
+                     : QStringLiteral("\nIts editing state was preserved at: ") + savedPath);
+            VDLogWindow::instance(&mWindow)->appendLog(QStringLiteral("[Session rollback] ") + message);
+            mWindow.statusBar()->showMessage(message);
+        }
+    }
+    void commit() {
+        mCommitted = true;
+        mWindow.mRecoverySnapshotProtected = mRecoveryWasProtected;
+        if (!mRecoveryWasProtected && !mWindow.mRecoveryPath.isEmpty())
+            QFile::remove(mWindow.mRecoveryPath);
+    }
+    bool preserveForAppend(const QStringList& sources, const VDQtTimeline& timeline,
+                           QString *errorMessage) {
+        VDQtProjectState state = mState;
+        state.sourcePaths = sources;
+        state.sourcePath = sources.value(0);
+        return applyDetails(state, timeline, QString(), errorMessage);
+    }
+    SessionRollbackScope(const SessionRollbackScope&) = delete;
+    SessionRollbackScope& operator=(const SessionRollbackScope&) = delete;
+private:
+    bool applyDetails(const VDQtProjectState& state, const VDQtTimeline& timeline,
+                      const QString& projectPath, QString *errorMessage) {
+        mWindow.applyProcessingState(state.processing);
+        mWindow.mTimelineSources = state.sourcePaths;
+        mWindow.mImageSequenceFps = state.imageSequenceFps;
+        mWindow.mRawInputPixelFormat = state.rawPixelFormat;
+        mWindow.mRawInputWidth = state.rawWidth;
+        mWindow.mRawInputHeight = state.rawHeight;
+        mWindow.mRawInputFrameRate = state.rawFrameRate;
+        mWindow.mRawInputByteOffset = state.rawByteOffset;
+        mWindow.mAudioSourcePath = state.audioSourcePath;
+        mWindow.mAudioStreamIndex = state.audioStreamIndex;
+        mWindow.mAudioDisabled = state.audioDisabled;
+        mWindow.mTimeline = timeline;
+        mWindow.mTimelineClipboard = mClipboard;
+        mWindow.mTimelineMarkers = state.markers;
+        mWindow.mCurrentProjectPath = projectPath;
+        {
+            const QSignalBlocker blocked(mWindow.mPositionControl);
+            mWindow.mPositionControl->SetRange(0, std::max<qint64>(0, timeline.frameCount() - 1));
+            mWindow.mPositionControl->SetSelection(state.selectionStart, state.selectionEnd);
+            mWindow.mPositionControl->SetPosition(state.position);
+            mWindow.mPositionControl->ClearZoomRange();
+            if (state.zoomEnabled) mWindow.mPositionControl->SetZoomRange(state.zoomStart, state.zoomEnd);
+            const double fps = state.imageSequenceFps > 0.0 ? state.imageSequenceFps
+                : state.rawFrameRate > 0.0 ? state.rawFrameRate : mWindow.mVideoDecoder.getFps();
+            mWindow.mPositionControl->SetFrameRate(fps);
+        }
+        // Preserve video edits even if an external audio path also disappears.
+        // A missing soundtrack must not erase an otherwise restorable timeline.
+        if (state.audioDisabled) {
+            mWindow.mAudioPlayer.close();
+        } else if (!state.audioSourcePath.isEmpty()
+                   || (state.audioStreamIndex >= 0 && !mWindow.mVideoDecoder.isAvsNative())) {
+            mWindow.mAudioPlayer.close();
+            const QString audioPath = state.audioSourcePath.isEmpty()
+                ? mWindow.mVideoDecoder.getFilePath() : state.audioSourcePath;
+            if (!mWindow.mAudioPlayer.openFile(audioPath, state.audioStreamIndex)
+                || !mWindow.mAudioPlayer.hasAudio()) {
+                mWindow.updateTimelineView(state.position, false);
+                if (errorMessage) *errorMessage = QStringLiteral("The selected audio source could not be restored: %1").arg(audioPath);
+                return false;
+            }
+        }
+        mWindow.updateTimelineView(state.position, false);
+        return true;
+    }
+    VDQtMainWindow& mWindow;
+    VDQtProjectState mState;
+    VDQtTimeline mTimeline;
+    QList<VDQtTimelineSegment> mClipboard;
+    QString mDecoderPath, mProjectPath;
+    bool mHadSource, mRecoveryWasProtected;
+    bool mCommitted = false;
+};
+
 bool VDQtMainWindow::editorActionsBlocked() const {
     return mOperationDepth > 0 || mSourceTransitionActive
         || mAutomationRunning;
@@ -1363,9 +1479,7 @@ bool VDQtMainWindow::appendVideoSegments(
         return false;
     }
     const QString manifestPath = mTimelineTempDirectory.filePath(
-        QStringLiteral("timeline.ffconcat"));
-    const QStringList oldTimeline = mTimelineSources;
-    const QList<VDQtTimelineSegment> oldEditSegments = mTimeline.segments();
+        QStringLiteral("timeline_%1.ffconcat").arg(QUuid::createUuid().toString(QUuid::Id128)));
     const qint64 oldSourceFrameCount = mTimeline.sourceFrameCount();
     if (!writeConcatManifest(manifestPath, newTimeline, &error)) {
         if (errorMessage) *errorMessage = error;
@@ -1378,58 +1492,55 @@ bool VDQtMainWindow::appendVideoSegments(
         mDecompressionFormatConfig.componentRange);
     validationDecoder.setErrorMode(mDecoderErrorModeConfig.errorMode);
     if (!validationDecoder.openFile(manifestPath)) {
-        writeConcatManifest(manifestPath, oldTimeline, nullptr);
         if (errorMessage) *errorMessage = QString(
             "FFmpeg rejected the concatenated timeline:\n%1")
                 .arg(validationDecoder.getLastError());
         return false;
     }
-    validationDecoder.close();
-    const VDQtProcessingState processing = captureProcessingState();
-    const int oldPosition = mPositionControl->GetPosition();
-    const qint64 oldSelectionStart = mPositionControl->GetSelectionStart();
-    const qint64 oldSelectionEnd = mPositionControl->GetSelectionEnd();
-    const bool hadSelection = mPositionControl->hasSelection();
-    if (!openVideoFileImpl(manifestPath)) {
-        writeConcatManifest(manifestPath, oldTimeline, nullptr);
-        const QString restorationSource = oldTimeline.size() > 1
-            ? manifestPath : oldTimeline.value(0);
-        if (!restorationSource.isEmpty() && openVideoFileImpl(restorationSource)) {
-            applyProcessingState(processing);
-            mTimelineSources = oldTimeline;
-            if (mVideoDecoder.isFrameCountExact()) {
-                mTimeline.reset(mVideoDecoder.getFrameCount(), true);
-                mTimeline.replaceSegments(oldEditSegments, nullptr);
-            }
-            mPositionControl->SetPosition(std::min(
-                oldPosition, std::max(0, mVideoDecoder.getFrameCount() - 1)));
-            if (hadSelection)
-                mPositionControl->SetSelection(oldSelectionStart, oldSelectionEnd);
-        }
-        if (errorMessage) *errorMessage = QStringLiteral(
-            "The concatenated timeline could not be opened.");
+    // Index before replacing the source: cancelling must not leave the editor
+    // halfway through an append. The old manifest is never rewritten in place.
+    QProgressDialog progress("Validating appended timeline...", "Cancel", 0, 0, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    const auto scan = validationDecoder.scanVideoStream([&](int frame, int total) {
+        const int maximum = static_cast<int>(std::min<qint64>(
+            std::numeric_limits<int>::max(), std::max<qint64>(total, qint64(frame) + 1)));
+        progress.setRange(0, total > 0 ? maximum : 0);
+        progress.setValue(frame);
+        QCoreApplication::processEvents();
+        return !progress.wasCanceled();
+    });
+    progress.close();
+    if (scan.cancelled || !scan.errorMessage.isEmpty()) {
+        if (errorMessage) *errorMessage = scan.cancelled
+            ? QStringLiteral("Append was cancelled; the original session was not changed.")
+            : scan.errorMessage;
         return false;
     }
-    applyProcessingState(processing);
-    mTimelineSources = newTimeline;
-    if (!ensureExactFrameRange(QStringLiteral("appended timeline"))) {
-        if (errorMessage) *errorMessage = QStringLiteral(
-            "The appended timeline could not be indexed.");
+    VDQtTimeline appendedTimeline = mTimeline;
+    const qint64 newCount = validationDecoder.getFrameCount();
+    if (newCount <= oldSourceFrameCount) {
+        if (errorMessage) *errorMessage = QStringLiteral("The appended source did not add any valid frames.");
         return false;
     }
-    QList<VDQtTimelineSegment> appendedEditSegments = oldEditSegments;
-    const qint64 appendedFrames = mTimeline.sourceFrameCount() - oldSourceFrameCount;
-    if (appendedFrames > 0)
-        appendedEditSegments.append({oldSourceFrameCount, appendedFrames});
-    if (!mTimeline.replaceSegments(appendedEditSegments, &error)) {
+    appendedTimeline.setSourceFrameCount(newCount, true);
+    if (!mTimeline.isIdentity()
+        && !appendedTimeline.insert(mTimeline.frameCount(),
+                                    {{oldSourceFrameCount, newCount - oldSourceFrameCount}}, &error)) {
         if (errorMessage) *errorMessage = error;
         return false;
     }
-    mCurrentProjectPath.clear();
-    mPositionControl->SetPosition(std::min(
-        oldPosition, std::max(0, static_cast<int>(mTimeline.frameCount()) - 1)));
-    if (hadSelection)
-        mPositionControl->SetSelection(oldSelectionStart, oldSelectionEnd);
+    validationDecoder.close();
+    SessionRollbackScope rollback(*this);
+    if (!openVideoFileImpl(manifestPath)
+        || !rollback.preserveForAppend(newTimeline, appendedTimeline, &error)) {
+        if (errorMessage) *errorMessage = error.isEmpty()
+            ? QStringLiteral("The concatenated timeline could not be opened; restoring the previous session.") : error;
+        return false;
+    }
+    rollback.commit();
     if (errorMessage) errorMessage->clear();
     return true;
 }
@@ -1839,7 +1950,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
         && (!project.audioSourcePath.isEmpty()
             || (project.audioStreamIndex >= 0
                 && !validationDecoder.isAvsNative()))) {
-        VDQtAudioPlayer validationAudio;
+        VDQtAudioPlayer validationAudio(false);
         const QString validationAudioPath = project.audioSourcePath.isEmpty()
             ? sourceToOpen : project.audioSourcePath;
         if (!QFileInfo::exists(validationAudioPath)
@@ -1866,8 +1977,12 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
                                  0, std::max(1, validationDecoder.getFrameCount()), this);
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
+        progress.setAutoClose(false);
+        progress.setAutoReset(false);
         const auto scan = validationDecoder.scanVideoStream([&](int frame, int total) {
-            progress.setRange(0, std::max({1, frame, total}));
+            const int maximum = static_cast<int>(std::min<qint64>(
+                std::numeric_limits<int>::max(), std::max<qint64>(total, qint64(frame) + 1)));
+            progress.setRange(0, total > 0 ? maximum : 0);
             progress.setValue(frame);
             QCoreApplication::processEvents();
             return !progress.wasCanceled();
@@ -1897,6 +2012,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
     }
     validationDecoder.close();
 
+    SessionRollbackScope rollback(*this);
     applyProcessingState(project.processing);
     if (!openVideoFileImpl(sourceToOpen)) return false;
     applyProcessingState(project.processing);
@@ -1976,6 +2092,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
     else updateTimelineView(mPositionControl->GetPosition(), false);
     statusBar()->showMessage(
         QString("Project loaded: %1").arg(QFileInfo(path).fileName()));
+    rollback.commit();
     return true;
 }
 

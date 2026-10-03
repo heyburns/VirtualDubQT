@@ -23,9 +23,9 @@ Remaining execution sequence
 [x] H11: retain failed recovery files through loading, Close, timers and app exit.
 [x] S07: refresh and invalidate preview after every edit, even at the same position.
 [x] S05: prevalidate project references before replacing the active editing session.
-[ ] Project restore: rollback late source/audio-open failure after successful validation;
-    legacy estimated identity lists remain intrinsically ambiguous.
-[ ] S09: preserve and roll back complete Append
+[x] Project restore: rollback late source/audio-open failure after successful validation.
+[ ] Legacy projects: estimated identity lists remain intrinsically ambiguous.
+[x] S09: preserve and roll back complete Append
     state, audio choices, markers, zoom, selection, edits and source intent.
 [ ] H03: sparse EOF must not promote an incomplete prefix to exact source length.
 [ ] H04/H05/P01/P02/M16: exact cancellable seeks, efficient and reusable indexes,

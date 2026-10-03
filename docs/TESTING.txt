@@ -365,3 +365,35 @@ validation and actual opening, or resolve ambiguous legacy estimated identity li
 Validation: Release project/recovery/edit/empty/CLI checks passed (5/5), sanitizer
 controller checks passed (4/4), and the rebuilt regular application passed the
 generated-processing.vcf smoke check under isolated settings.
+
+Append state and late project rollback (S09 / S05 follow-up)
+----------------------------------------------------------
+
+operation_append_state exercises real append, project save dialogs and decoder
+validation. It checks retained audio-disable intent, markers, nonzero position,
+selection and zoom; unchanged state on missing input and cancelled validation;
+external PCM audio across another append; and an edited timeline plus copied frame
+range across a final append. All sources and outputs are disposable fixtures.
+
+operation_project_validation additionally removes its generated external WAV after
+candidate validation, during the real source-opening event dispatch. The late
+audio-open failure must restore the prior video, edits and processing settings.
+Saving again must reproduce the original project's complete document. The shared
+rollback guard preserves the timeline's undo/redo history and clipboard instead of
+reconstructing only the saved edit segments. Candidate progress dialogs remain
+cancellable when source estimates are absent or too short.
+
+If external changes also make the previous session impossible to reopen, rollback
+reports that failure and writes a uniquely named project recovery file. Not every
+fallback I/O failure is fault-injected; this is not a filesystem-lock guarantee.
+Legacy estimated identity ambiguity and instance-owned recovery files remain open.
+
+Validation, 2026-10-03:
+  - Full Release preset: 33/33 checks passed.
+  - Full sanitizer preset: 29/29 checks passed; physical devices excluded,
+    allocator-limit checks Release-only, leak detection disabled as noted above.
+  - Regular build/VirtualDubQt rebuilt and passed the VCF entry-point smoke.
+  - The regular binary also opened a generated 8-frame 64x48 FFV1 source and
+    exported BGRA raw video through the command-line controller. The output was
+    exactly 98,304 bytes (8 * 64 * 48 * 4), despite the source's 9-frame estimate.
+  - The standalone codec troubleshooting suite was not included.

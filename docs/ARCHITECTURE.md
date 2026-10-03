@@ -262,8 +262,22 @@ Loaders parse into temporary values and commit only after full validation.
 Writers use `QSaveFile` so a crash cannot leave a half-written project or queue.
 The GUI also validates/indexes saved frame references using the candidate decoder
 before replacing the current source or processing settings. A failed reference
-check or cancelled validation therefore retains the current editing session;
-late failures while committing a newly opened source/audio still need rollback.
+check or cancelled validation therefore retains the current editing session.
+`SessionRollbackScope` also retains the full timeline (including history), frame
+clipboard, processing/audio choices, markers, selection, zoom, position and saved
+project path during the final source replacement. A late open failure reopens the
+original source and restores that state. If the original source or soundtrack is
+also no longer available, the guard saves the original project to a uniquely named
+recovery document and reports its path rather than silently losing the session.
+These checks are not filesystem locks against concurrent external changes.
+
+Append validates a uniquely named candidate manifest before installing it; it
+never overwrites the manifest backing the active decoder. The same rollback guard
+preserves editor state on failure and preserves audio choices and editing history
+on success. An untouched source remains identity; existing edits receive a bounded
+segment for the appended material. Recovery autosaves are protected during commit.
+Temporary-source lifetime changes must pin the original materialization until the
+guard has either committed or finished restoring it.
 
 Document version 7 stores timeline intent in projects/jobs and source-count
 accuracy in projects. The editor saves untouched sources as implicit identity,
@@ -272,8 +286,8 @@ their original rules: missing/empty edit arrays mean identity, and nonempty arra
 remain explicit. New-format missing/nonboolean/inconsistent intent is rejected.
 Older binaries cannot read newly saved version-7 files; retain older originals
 when a binary rollback is needed. Processing-settings files retain version 6
-because their schema is unchanged. This does not make project/recovery restore
-fully transactional or repair legacy estimated-identity ambiguity.
+because their schema is unchanged. Legacy estimated-identity ambiguity remains;
+nonempty old edit lists cannot safely be reinterpreted as untouched sources.
 
 Codec/filter/decompression choices intentionally persist only while the
 application is open. Recent-file and window UI history may use `QSettings`.
