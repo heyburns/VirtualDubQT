@@ -49,6 +49,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtFrameDecodeWorker.cpp
     src/VirtualDub/VDQtVideoDecoder.h
     src/VirtualDub/VDQtVideoDecoder.cpp
+    src/VirtualDub/VDQtSourceDependencies.h
+    src/VirtualDub/VDQtSourceDependencies.cpp
     src/VirtualDub/VDQtAudioPlayer.h
     src/VirtualDub/VDQtAudioPlayer.cpp
     src/VirtualDub/VDQtAudioFilterSystem.h
@@ -202,6 +204,18 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    add_executable(source_safety_tests
+        tests/test_source_safety.cpp
+        src/VirtualDub/VDQtSourceDependencies.cpp
+        src/VirtualDub/VDQtSourceSafety.cpp)
+    target_include_directories(source_safety_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(source_safety_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(source_safety_tests)
+    add_test(NAME source_safety_tests COMMAND source_safety_tests)
+    add_test(NAME source_safety_scaling COMMAND source_safety_tests --scaling-test)
+    set_tests_properties(source_safety_tests source_safety_scaling PROPERTIES
+        LABELS "filesystem;dependencies" TIMEOUT 120)
+
     add_executable(output_transaction_tests
         tests/test_output_transaction.cpp
         src/VirtualDub/VDQtOutputTransaction.cpp
@@ -236,7 +250,7 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio queue outputs)
+    foreach(operation_case IN ITEMS source snapshot audio queue outputs safety)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -284,6 +298,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtPositionControl.cpp
         src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
     target_compile_definitions(stabilization_tests PRIVATE
@@ -311,6 +326,7 @@ if (BUILD_TESTING)
     add_executable(playback_performance_tests
         src/VirtualDub/test_playback_performance.cpp
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
     target_compile_definitions(playback_performance_tests PRIVATE QT_NO_KEYWORDS)
@@ -341,6 +357,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtAudioFilterSystem.cpp
         src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
     target_compile_definitions(audio_backend_tests PRIVATE QT_NO_KEYWORDS)

@@ -1,10 +1,11 @@
 #ifndef VDQTSAFETYSOURCES_H
 #define VDQTSAFETYSOURCES_H
 
-#include "VDQtVideoDecoder.h"
+#include "VDQtSourceDependencies.h"
 
 #include <QString>
 #include <QStringList>
+#include <memory>
 
 enum class VDQtOutputSafetyIssue {
     None,
@@ -17,19 +18,37 @@ enum class VDQtOutputSafetyIssue {
 struct VDQtOutputSafetyReport {
     VDQtOutputSafetyIssue issue = VDQtOutputSafetyIssue::None;
     QString aliasedPath;
-    VDQtVideoDecoder::ScriptDependencyReport scriptDependencies;
+    VDQtScriptDependencyReport scriptDependencies;
 
     bool isSafe() const { return issue == VDQtOutputSafetyIssue::None; }
 };
 
+// Immutable source/path/inode sets for one operation. Output checks inspect
+// only the destination; refresh() re-audits once before commit and conservatively
+// retains BOTH the original and newly discovered dependency identities.
+class VDQtSourceSafetySnapshot {
+public:
+    VDQtOutputSafetyReport evaluateOutputPath(const QString& outputPath) const;
+    void refresh();
+    VDQtScriptDependencyReport dependencyReport() const;
+private:
+    friend class VDQtSourceSafety;
+    struct Data;
+    std::shared_ptr<const Data> mData;
+};
+
 // Last line of defense against overwriting input media. Lexical path comparison
-// is insufficient because symlinks/hard links may name the same inode, and an
-// AVS/VPY script may reference additional sources. Existing destinations are
-// rejected conservatively whenever a script dependency audit is incomplete.
+// is insufficient because symlinks/hard links may name the same inode, and a
+// script or concat manifest may reference additional sources. Existing
+// destinations are rejected whenever dependency inspection is incomplete.
 class VDQtSourceSafety {
 public:
     static bool pathsReferToSameFile(const QString& firstPath, const QString& secondPath);
     static bool isScriptPath(const QString& path);
+    static VDQtSourceSafetySnapshot captureSources(
+        const QStringList& directlyLoadedSources,
+        const QString& scriptPath = QString(),
+        const QStringList& knownConcatSources = {});
     static VDQtOutputSafetyReport evaluateOutputPath(
         const QString& outputPath,
         const QStringList& directlyLoadedSources,

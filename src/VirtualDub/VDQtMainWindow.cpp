@@ -82,19 +82,23 @@ VDQtVideoExporter::ProcessingSnapshot processingSnapshotForState(
 // Helpers in this namespace are workflow-neutral building blocks used by more
 // than one menu action: overwrite protection, transactional replacement,
 // concat manifests, and stream compatibility probing.
-VDQtOutputSafetyReport loadedOutputSafety(const QString& outputPath,
-                                          const VDQtVideoDecoder& decoder,
-                                          const VDQtAudioPlayer& audioPlayer,
-                                          const QStringList& additionalSources = {}) {
+VDQtSourceSafetySnapshot loadedSourceSnapshot(const VDQtVideoDecoder& decoder,
+                                             const VDQtAudioPlayer& audioPlayer,
+                                             const QStringList& additionalSources = {}) {
     QStringList protectedSources = {
         decoder.getFilePath(), audioPlayer.getSourcePath()
     };
     protectedSources.append(additionalSources);
-    protectedSources.removeDuplicates();
-    const QString scriptPath = decoder.getFilePath();
-    return VDQtSourceSafety::evaluateOutputPath(
-        outputPath, protectedSources,
-        VDQtSourceSafety::isScriptPath(scriptPath) ? scriptPath : QString());
+    return VDQtSourceSafety::captureSources(protectedSources, {},
+        decoder.getInputFormatName() == QStringLiteral("concat")
+            ? QStringList{decoder.getFilePath()} : QStringList{});
+}
+
+VDQtOutputSafetyReport loadedOutputSafety(const QString& outputPath,
+                                        const VDQtVideoDecoder& decoder,
+                                        const VDQtAudioPlayer& audioPlayer,
+                                        const QStringList& additionalSources = {}) {
+    return loadedSourceSnapshot(decoder, audioPlayer, additionalSources).evaluateOutputPath(outputPath);
 }
 
 QString stagedOutputTemplate(const QString& outputPath) {
@@ -945,11 +949,10 @@ bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
         mAudioStreamIndex = -1;
         mAudioDisabled = false;
 
-        const bool concatenated = filePath.endsWith(
-            QStringLiteral(".ffconcat"), Qt::CaseInsensitive);
+        const bool concatenated = mVideoDecoder.getInputFormatName() == QStringLiteral("concat");
         if (concatenated) {
             mTimelineSources =
-                VDQtVideoDecoder::auditScriptDependencies(filePath).resolvedPaths;
+                VDQtVideoDecoder::auditScriptDependencies(filePath).topLevelConcatPaths;
         } else {
             mTimelineSources = { QFileInfo(filePath).absoluteFilePath() };
         }
@@ -2084,8 +2087,9 @@ void VDQtMainWindow::onFileSaveAudio() {
         rememberOutputDirectory(outPath);
         VDAudioCodecConfig audioCfg = dlg.getAudioConfig();
 
+        auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
         const VDQtOutputSafetyReport audioSafety =
-            loadedOutputSafety(outPath, mVideoDecoder, mAudioPlayer, mTimelineSources);
+            sourceSafety.evaluateOutputPath(outPath);
         if (audioSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
             QMessageBox::critical(this, "Unsafe Output Path",
                                   "The output file is a currently loaded source. Choose a different path.");
@@ -2461,8 +2465,9 @@ void VDQtMainWindow::onFileSaveAudio() {
         QCoreApplication::processEvents();
 
         if (ok) {
+            sourceSafety.refresh();
             const VDQtOutputSafetyReport commitSafety =
-                loadedOutputSafety(outPath, mVideoDecoder, mAudioPlayer, mTimelineSources);
+                sourceSafety.evaluateOutputPath(outPath);
             if (!commitSafety.isSafe()) {
                 ok = false;
                 errorMsg = "The destination became unsafe while audio was encoding; the existing file was not changed.";
@@ -2682,6 +2687,12 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
                                            bool raw,
                                            QString *errorMessage) {
     OperationScope operation(*this);
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
+    if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The audio destination aliases a source or cannot be audited safely.");
+        return false;
+    }
     if (!mAudioPlayer.hasAudio()) {
         if (errorMessage) *errorMessage = QStringLiteral("The current source has no decodable audio stream.");
         return false;
@@ -2695,13 +2706,6 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
         }
         const QString sourcePath = !mAudioSourcePath.isEmpty()
             ? mAudioSourcePath : mVideoDecoder.getFilePath();
-        const VDQtOutputSafetyReport safety = loadedOutputSafety(
-            outputPath, mVideoDecoder, mAudioPlayer, mTimelineSources);
-        if (!safety.isSafe()) {
-            if (errorMessage) *errorMessage = QStringLiteral(
-                "The raw-audio destination aliases a loaded source or cannot be audited safely.");
-            return false;
-        }
         QTemporaryFile staged(stagedOutputTemplate(outputPath));
         if (!staged.open()) {
             if (errorMessage) *errorMessage = QStringLiteral(
@@ -2768,9 +2772,9 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
         process.waitForFinished(-1);
         const bool encoded = process.exitStatus() == QProcess::NormalExit
             && process.exitCode() == 0 && QFileInfo(stagedPath).size() > 0;
+        sourceSafety.refresh();
         const bool committed = encoded
-            && loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
-                                  mTimelineSources).isSafe()
+            && sourceSafety.evaluateOutputPath(outputPath).isSafe()
             && replaceWithStagedFile(stagedPath, outputPath);
         if (!committed) {
             const QString diagnostics = QString::fromUtf8(
@@ -2804,8 +2808,25 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
             1, static_cast<int64_t>(std::llround(
                    (end + duration - start) * mAudioPlayer.getSampleRate())));
     }
-    if (!mAudioPlayer.exportAudioToFile(outputPath, startSample, sampleCount)) {
+    // The borrowed AVS audio clip cannot identify its source graph by itself.
+    // Keep script-level dependency protection outside the audio helper and
+    // render to a private path before considering the real destination.
+    QTemporaryFile staged(stagedOutputTemplate(outputPath));
+    if (!staged.open()) {
+        if (errorMessage) *errorMessage = QStringLiteral("An audio staging file could not be created.");
+        return false;
+    }
+    const QString stagedPath = staged.fileName();
+    staged.close();
+    if (!mAudioPlayer.exportAudioToFile(stagedPath, startSample, sampleCount)) {
         if (errorMessage) *errorMessage = QStringLiteral("Audio export failed or was cancelled.");
+        return false;
+    }
+    sourceSafety.refresh();
+    if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()
+        || !replaceWithStagedFile(stagedPath, outputPath)) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The audio destination became unsafe or the completed output could not be committed.");
         return false;
     }
     return true;
@@ -4001,6 +4022,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                 return fail(command, QStringLiteral("An image staging directory could not be created."));
             QStringList targets;
             QStringList stagedPaths;
+            auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
             VDQtFilterSystem::instance().resetRuntimeState();
             qint64 outputIndex = startNumber;
             for (qint64 frame = first; frame < endExclusive; ++frame) {
@@ -4020,8 +4042,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                     const QString number = QStringLiteral("%1").arg(
                         outputIndex++, digits, 10, QLatin1Char('0'));
                     const QString target = prefix + number + suffix;
-                    if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                            mTimelineSources).isSafe())
+                    if (!sourceSafety.evaluateOutputPath(target).isSafe())
                         return fail(command, QString("An image output aliases a source: %1").arg(target));
                     const QString staged = staging.filePath(
                         QStringLiteral("%1%2").arg(stagedPaths.size(), 10, 10,
@@ -4038,9 +4059,9 @@ bool VDQtMainWindow::executeAutomationProgram(
                 || !approveOutputReplacement(this, QStringLiteral("Replace Image Sequence?"),
                                              transaction, mAutomationUnattended, &commitError))
                 return fail(command, commitError);
+            sourceSafety.refresh();
             for (const QString& target : targets) {
-                if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                        mTimelineSources).isSafe())
+                if (!sourceSafety.evaluateOutputPath(target).isSafe())
                     return fail(command, QString("An image output became unsafe: %1").arg(target));
             }
             if (!transaction.commit(stagedPaths, true, &commitError))
@@ -4445,15 +4466,13 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         if (!candidate.audioSourcePath.isEmpty())
             allQueueSources.append(candidate.audioSourcePath);
     }
-    allQueueSources.removeDuplicates();
+    allQueueSources.append({mVideoDecoder.getFilePath(), mAudioPlayer.getSourcePath()});
+    auto sourceSafety = VDQtSourceSafety::captureSources(allQueueSources);
     const bool destinationExistedAtStart = !job.options.outputPath.isEmpty()
         && (QFileInfo(job.options.outputPath).exists()
             || QFileInfo(job.options.outputPath).isSymLink());
     if (!job.options.outputPath.isEmpty()) {
-        const VDQtOutputSafetyReport safety = VDQtSourceSafety::evaluateOutputPath(
-            job.options.outputPath, allQueueSources,
-            VDQtSourceSafety::isScriptPath(job.sourcePaths.value(0))
-                ? job.sourcePaths.value(0) : QString());
+        const VDQtOutputSafetyReport safety = sourceSafety.evaluateOutputPath(job.options.outputPath);
         if (!safety.isSafe()) {
             if (errorMessage) *errorMessage = QStringLiteral(
                 "The destination aliases a queued source or cannot be safely audited.");
@@ -4479,10 +4498,8 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         return true;
     };
     const auto commitQueuedStage = [&](const QString& stagePath) {
-        const VDQtOutputSafetyReport safety = VDQtSourceSafety::evaluateOutputPath(
-            job.options.outputPath, allQueueSources,
-            VDQtSourceSafety::isScriptPath(job.sourcePaths.value(0))
-                ? job.sourcePaths.value(0) : QString());
+        sourceSafety.refresh();
+        const VDQtOutputSafetyReport safety = sourceSafety.evaluateOutputPath(job.options.outputPath);
         if (!safety.isSafe()) {
             QFile::remove(stagePath);
             if (errorMessage) *errorMessage = QStringLiteral(
@@ -4692,7 +4709,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     }
     case VDQtJobOperation::ImageSequenceExport: {
         VDQtJobState mutableJob = job;
-        return executeImageSequenceJob(mutableJob, decoder, errorMessage);
+        return executeImageSequenceJob(mutableJob, decoder, sourceSafety, errorMessage);
     }
     case VDQtJobOperation::VideoAnalysis: {
         const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(progress);
@@ -4719,6 +4736,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
 bool VDQtMainWindow::executeImageSequenceJob(
     VDQtJobState& job,
     VDQtVideoDecoder& decoder,
+    VDQtSourceSafetySnapshot sourceSafety,
     QString *errorMessage) {
     VDQtFilterSystem filters;
     filters.replaceActiveChainTransient(job.processing.filters);
@@ -4790,13 +4808,6 @@ bool VDQtMainWindow::executeImageSequenceJob(
     if (extension.isEmpty()) extension = baseInfo.suffix().toLower();
     if (extension.isEmpty()) extension = QStringLiteral("png");
 
-    QStringList allSources;
-    for (const VDQtJobState& candidate : mJobQueue->jobs()) {
-        allSources.append(candidate.sourcePaths);
-        if (!candidate.audioSourcePath.isEmpty())
-            allSources.append(candidate.audioSourcePath);
-    }
-    allSources.removeDuplicates();
     QStringList targets;
     targets.reserve(outputCount);
     for (int index = 0; index < outputCount; ++index) {
@@ -4806,7 +4817,7 @@ bool VDQtMainWindow::executeImageSequenceJob(
                 .arg(static_cast<qint64>(job.imageStartIndex) + index,
                      std::max(1, job.imageMinimumDigits), 10, QLatin1Char('0'))
                 .arg(extension));
-        if (!VDQtSourceSafety::evaluateOutputPath(target, allSources).isSafe()) {
+        if (!sourceSafety.evaluateOutputPath(target).isSafe()) {
             if (errorMessage) *errorMessage = QStringLiteral(
                 "A generated image path aliases a queued source or cannot be safely audited.");
             return false;
@@ -4878,8 +4889,9 @@ bool VDQtMainWindow::executeImageSequenceJob(
 
     // Revalidate after the potentially long render. A path that appeared in
     // the meantime was never part of the user's replacement approval.
+    sourceSafety.refresh();
     for (const QString& target : targets) {
-        if (!VDQtSourceSafety::evaluateOutputPath(target, allSources).isSafe()) {
+        if (!sourceSafety.evaluateOutputPath(target).isSafe()) {
             if (errorMessage) *errorMessage = QStringLiteral(
                 "A generated image destination became unsafe while rendering; no files were changed.");
             return false;
@@ -5370,6 +5382,7 @@ bool VDQtMainWindow::exportSegmentedVideo(
     const QString& outputPath, int sizeLimitMb, int frameLimit,
     int digitCount, int segmentCount, QString *errorMessage) {
     OperationScope operation(*this);
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
     if (!mVideoDecoder.isOpen()) {
         if (errorMessage) *errorMessage = QStringLiteral("No video is open.");
         return false;
@@ -5503,8 +5516,7 @@ bool VDQtMainWindow::exportSegmentedVideo(
         const QString target = destinationDirectory.filePath(
             QString("%1.%2.avi").arg(prefix).arg(
                 index, digitCount, 10, QLatin1Char('0')));
-        if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                mTimelineSources).isSafe()) {
+        if (!sourceSafety.evaluateOutputPath(target).isSafe()) {
             if (errorMessage) *errorMessage = QString(
                 "A segment destination aliases a source or cannot be audited safely: %1")
                     .arg(target);
@@ -5521,9 +5533,9 @@ bool VDQtMainWindow::exportSegmentedVideo(
     // Approval can run a dialog event loop. Recheck source protection afterward;
     // commit independently verifies that the inspected destination identities
     // and containing directories have not changed.
+    sourceSafety.refresh();
     for (const QString& target : targets) {
-        if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                mTimelineSources).isSafe()) {
+        if (!sourceSafety.evaluateOutputPath(target).isSafe()) {
             if (errorMessage) *errorMessage = QString(
                 "A segment destination became unsafe; no files were changed: %1").arg(target);
             return false;
@@ -5678,8 +5690,8 @@ void VDQtMainWindow::onFileExportFilmstrip() {
     if (QFileInfo(outputPath).suffix().isEmpty())
         outputPath += QStringLiteral(".flm");
     rememberOutputDirectory(outputPath);
-    if (!loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
-                            mTimelineSources).isSafe()) {
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
+    if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()) {
         QMessageBox::critical(this, QStringLiteral("Unsafe Filmstrip Path"),
                               QStringLiteral("The filmstrip path aliases a loaded source or cannot be audited safely."));
         return;
@@ -5816,9 +5828,9 @@ void VDQtMainWindow::onFileExportFilmstrip() {
     }
     staged.close();
     progress.close();
+    sourceSafety.refresh();
     const bool committed = !failed && writtenFrames == outputCount
-        && loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
-                              mTimelineSources).isSafe()
+        && sourceSafety.evaluateOutputPath(outputPath).isSafe()
         && replaceWithStagedFile(stagedPath, outputPath);
     if (!committed) {
         QFile::remove(stagedPath);
@@ -6002,8 +6014,8 @@ bool VDQtMainWindow::exportViaEncoderSet(
             "External encoder set '%1' is missing or invalid.").arg(setName);
         return false;
     }
-    if (!loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
-                            mTimelineSources).isSafe()) {
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
+    if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()) {
         if (errorMessage) *errorMessage = QStringLiteral(
             "The external-encoder destination aliases a source or cannot be audited safely.");
         return false;
@@ -6099,9 +6111,9 @@ bool VDQtMainWindow::exportViaEncoderSet(
     progress.close();
     const bool encoded = process.exitStatus() == QProcess::NormalExit
         && process.exitCode() == 0 && QFileInfo(stagedPath).size() > 0;
+    sourceSafety.refresh();
     if (!encoded
-        || !loadedOutputSafety(outputPath, mVideoDecoder, mAudioPlayer,
-                               mTimelineSources).isSafe()
+        || !sourceSafety.evaluateOutputPath(outputPath).isSafe()
         || !replaceWithStagedFile(stagedPath, outputPath)) {
         const QString diagnostics = QString::fromLocal8Bit(
             process.readAll()).right(16384).trimmed();
@@ -6347,6 +6359,7 @@ void VDQtMainWindow::onFileSaveImageSequence() {
         return;
     }
     const int framesToExport = sourceFramesToExport * filterTiming.outputFramesPerInput;
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
     QStringList targetPaths;
     targetPaths.reserve(framesToExport);
     for (int f = startFrame; f <= endFrame; ++f) {
@@ -6359,8 +6372,7 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                 .arg(outputNumber, 5, 10, QChar('0'))
                 .arg(ext);
             const VDQtOutputSafetyReport imageSafety =
-                loadedOutputSafety(
-                    targetPath, mVideoDecoder, mAudioPlayer, mTimelineSources);
+                sourceSafety.evaluateOutputPath(targetPath);
             if (imageSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
                 QMessageBox::critical(this, "Unsafe Image Sequence Path",
                                       QString("Generated image path aliases a loaded source:\n%1").arg(targetPath));
@@ -6471,10 +6483,10 @@ void VDQtMainWindow::onFileSaveImageSequence() {
 
     // Recheck aliases/collisions after rendering to close the user-visible
     // race window before any destination is changed.
+    sourceSafety.refresh();
     for (const QString& targetPath : targetPaths) {
         const VDQtOutputSafetyReport imageSafety =
-            loadedOutputSafety(
-                targetPath, mVideoDecoder, mAudioPlayer, mTimelineSources);
+            sourceSafety.evaluateOutputPath(targetPath);
         if (imageSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
             QMessageBox::critical(this, "Unsafe Image Sequence Path",
                                   "A generated image path became an alias of a loaded source. Existing files were not changed.");
@@ -8694,9 +8706,8 @@ void VDQtMainWindow::onCaptureVideo() {
                                  QString("Replace this file?\n%1").arg(outputPath),
                                  QMessageBox::Yes | QMessageBox::No,
                                  QMessageBox::No) != QMessageBox::Yes) return;
-    if (mVideoDecoder.isOpen()
-        && !loadedOutputSafety(
-                outputPath, mVideoDecoder, mAudioPlayer, mTimelineSources).isSafe()) {
+    auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
+    if (mVideoDecoder.isOpen() && !sourceSafety.evaluateOutputPath(outputPath).isSafe()) {
         QMessageBox::critical(this, "Unsafe Capture Path",
                               "The capture output aliases a loaded media source.");
         return;
@@ -8942,7 +8953,10 @@ void VDQtMainWindow::onCaptureVideo() {
     bool committed = false;
     QString commitError;
     if (captured && !splitCapture->isChecked()) {
-        committed = replaceWithStagedFile(stagedPath, outputPath);
+        sourceSafety.refresh();
+        committed = sourceSafety.evaluateOutputPath(outputPath).isSafe()
+            && replaceWithStagedFile(stagedPath, outputPath);
+        if (!committed) commitError = QStringLiteral("The capture destination became unsafe or could not be committed.");
     } else if (captured) {
         const QFileInfo requested(outputPath);
         const QString suffix = requested.suffix().isEmpty()
@@ -8955,9 +8969,7 @@ void VDQtMainWindow::onCaptureVideo() {
             const QString target = requested.dir().filePath(
                 QString("%1.%2.%3").arg(prefix).arg(
                     index, 3, 10, QLatin1Char('0')).arg(suffix));
-            if (mVideoDecoder.isOpen()
-                && !loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                       mTimelineSources).isSafe()) {
+            if (mVideoDecoder.isOpen() && !sourceSafety.evaluateOutputPath(target).isSafe()) {
                 safe = false;
                 commitError = QString("A capture segment destination is unsafe: %1").arg(target);
                 break;
@@ -8971,10 +8983,10 @@ void VDQtMainWindow::onCaptureVideo() {
         QStringList stagedSegments;
         for (const QString& segment : capturedSegments)
             stagedSegments.append(segmentStaging.filePath(segment));
+        sourceSafety.refresh();
         for (const QString& target : targets) {
             if (safe && mVideoDecoder.isOpen()
-                && !loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
-                                       mTimelineSources).isSafe()) {
+                && !sourceSafety.evaluateOutputPath(target).isSafe()) {
                 safe = false;
                 commitError = QString("A capture segment destination became unsafe: %1").arg(target);
             }

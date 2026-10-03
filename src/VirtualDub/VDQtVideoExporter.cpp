@@ -1024,23 +1024,22 @@ bool VDQtVideoExporter::exportRawVideo(
     }
 
     const QString loadedSourcePath = decoder.getFilePath();
-    const QString scriptPath = VDQtSourceSafety::isScriptPath(loadedSourcePath)
-        ? loadedSourcePath
-        : (VDQtSourceSafety::isScriptPath(options.inputPath)
-               ? options.inputPath : QString());
     QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
     directlyLoadedSources.append(options.protectedSourcePaths);
-    directlyLoadedSources.removeDuplicates();
     if (audioPlayer) directlyLoadedSources.append(audioPlayer->getSourcePath());
+    auto sourceSafety = VDQtSourceSafety::captureSources(directlyLoadedSources, {},
+        decoder.getInputFormatName() == QStringLiteral("concat")
+            ? QStringList{loadedSourcePath} : QStringList{});
+    bool checkedOutput = false;
     const auto outputIsSafe = [&]() {
-        return VDQtSourceSafety::evaluateOutputPath(
-                   options.outputPath, directlyLoadedSources, scriptPath)
-            .isSafe();
+        if (checkedOutput) sourceSafety.refresh();
+        checkedOutput = true;
+        return sourceSafety.evaluateOutputPath(options.outputPath).isSafe();
     };
     if (!outputIsSafe()) {
         reportError(QStringLiteral(
-            "The destination aliases a loaded/script source, or an existing script-backed "
-            "destination cannot be audited safely. Choose another path."));
+            "The destination aliases an input, or its input dependencies cannot be "
+            "checked safely before replacement. Choose another path."));
         return false;
     }
 
@@ -1438,41 +1437,37 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         }
     }
     const QString loadedSourcePath = decoder.getFilePath();
-    const QString scriptPath = VDQtSourceSafety::isScriptPath(loadedSourcePath)
-        ? loadedSourcePath
-        : (VDQtSourceSafety::isScriptPath(options.inputPath)
-               ? options.inputPath : QString());
     QStringList directlyLoadedSources = { options.inputPath, loadedSourcePath };
     directlyLoadedSources.append(options.protectedSourcePaths);
-    directlyLoadedSources.removeDuplicates();
     if (audioPlayer)
         directlyLoadedSources.append(audioPlayer->getSourcePath());
-    const VDQtOutputSafetyReport outputSafety = VDQtSourceSafety::evaluateOutputPath(
-        options.outputPath, directlyLoadedSources, scriptPath);
+    auto sourceSafety = VDQtSourceSafety::captureSources(directlyLoadedSources, {},
+        decoder.getInputFormatName() == QStringLiteral("concat")
+            ? QStringList{loadedSourcePath} : QStringList{});
+    const VDQtOutputSafetyReport outputSafety = sourceSafety.evaluateOutputPath(options.outputPath);
     if (!outputSafety.isSafe()) {
         mLastError = outputSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource
             ? QStringLiteral("The output aliases a loaded or script-referenced source.")
-            : QStringLiteral("An existing script-backed output cannot be safely audited.");
+            : QStringLiteral("An existing output cannot be safely distinguished from unresolved input dependencies.");
         if (parentWidget) {
             const bool aliases = outputSafety.issue
                 == VDQtOutputSafetyIssue::AliasesLoadedSource;
             QMessageBox::critical(
                 parentWidget,
-                aliases ? "Unsafe Output Path" : "Unsafe Script Output Path",
+                aliases ? "Unsafe Output Path" : "Uncertain Input Dependencies",
                 aliases
                     ? QString("The output aliases a loaded or script-referenced source:\n%1\n"
                               "Choose a different destination.")
                           .arg(outputSafety.aliasedPath)
                     : QStringLiteral(
-                          "An existing destination cannot be replaced because the loaded script "
-                          "contains unresolved or dynamically computed source paths. Choose a new output path."));
+                          "An existing destination cannot be replaced because some input paths "
+                          "are unresolved or computed dynamically. Choose a new output path."));
         }
         return false;
     }
     const auto outputStillSafe = [&]() {
-        return VDQtSourceSafety::evaluateOutputPath(
-                   options.outputPath, directlyLoadedSources, scriptPath)
-            .isSafe();
+        sourceSafety.refresh();
+        return sourceSafety.evaluateOutputPath(options.outputPath).isSafe();
     };
 
     AudioStreamProbe sourceAudioProbe;

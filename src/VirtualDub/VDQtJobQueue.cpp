@@ -365,12 +365,12 @@ bool VDQtJobQueue::validateJobs(const QList<VDQtJobState>& jobs,
         }
         if (!output.isEmpty()) outputs.append(output);
     }
-    allSources.removeDuplicates();
+    const auto sourceSafety = VDQtSourceSafety::captureSources(allSources);
 
     for (int i = 0; i < outputs.size(); ++i) {
         const QString& output = outputs.at(i);
         const VDQtOutputSafetyReport safety =
-            VDQtSourceSafety::evaluateOutputPath(output, allSources);
+            sourceSafety.evaluateOutputPath(output);
         if (!safety.isSafe()) {
             if (errorMessage) {
                 *errorMessage = safety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource

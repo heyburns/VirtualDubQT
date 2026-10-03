@@ -395,6 +395,116 @@ bool outputFamilies(VDQtTestFixtures& fixtures) {
                  && !QImage(queuedFirst).isNull() && !QImage(queuedLast).isNull(),
                  "approved image jobs still install a complete sequence");
 }
+
+bool sourceProtection(VDQtTestFixtures& fixtures) {
+    const QString directory = fixtures.directory.path();
+    const QString list = fixtures.directory.filePath("list.txt");
+    const QString middle = fixtures.directory.filePath("middle.data");
+    const QString outer = fixtures.directory.filePath("outer.ffconcat");
+    if (!fixtures.writeText(list, "ffconcat version 1.0\nfile source.mp4\n")
+        || !fixtures.writeText(middle, "ffconcat version 1.0\nfile list.txt\n")
+        || !fixtures.writeText(outer, "ffconcat version 1.0\nfile middle.data\n")) return false;
+    const QByteArray original = readFile(fixtures.mp4);
+    VDQtVideoExporter exporter;
+    for (const QString& input : {list, outer}) {
+        VDQtVideoDecoder decoder;
+        if (!check(decoder.openFile(input) && decoder.getInputFormatName() == "concat",
+                   "valid misnamed and three-layer inputs open through the concat demuxer")) return false;
+        VDQtVideoExporter::RawExportOptions raw;
+        raw.inputPath = input;
+        raw.outputPath = fixtures.mp4;
+        raw.endFrame = 3;
+        raw.pixelFormat = QStringLiteral("rgb24");
+        raw.unattended = true;
+        if (!check(!exporter.exportRawVideo(raw, &decoder) && exporter.lastError().contains("aliases")
+                   && readFile(fixtures.mp4) == original,
+                   "real raw exporter refuses to replace misnamed/nested-list input media")) return false;
+        VDQtVideoExporter::ExportOptions video;
+        video.inputPath = input;
+        video.outputPath = fixtures.mp4;
+        video.includeAudio = false;
+        video.endFrame = 3;
+        video.unattended = true;
+        if (!check(!exporter.exportVideo(video, &decoder) && exporter.lastError().contains("aliases")
+                   && readFile(fixtures.mp4) == original,
+                   "real video exporter refuses dependency aliases before encoding")) return false;
+        raw.outputPath = fixtures.directory.filePath(input == list ? "misnamed.raw" : "nested.raw");
+        if (!check(exporter.exportRawVideo(raw, &decoder)
+                   && readFile(raw.outputPath).size() == 4 * 320 * 180 * 3,
+                   "unrelated output from misnamed/nested lists remains usable")) return false;
+    }
+
+    VDQtVideoDecoder decoder;
+    if (!decoder.openFile(list)) return false;
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = list;
+    raw.outputPath = fixtures.directory.filePath("newly-referenced.nut");
+    raw.endFrame = 3;
+    raw.unattended = true;
+    fixtures.writeText(raw.outputPath, "foreign source sentinel");
+    bool changed = false;
+    const bool rendered = exporter.exportRawVideo(raw, &decoder, nullptr, nullptr,
+        [&](int completed, int) {
+            if (!changed && completed > 0) {
+                changed = true;
+                fixtures.writeText(list, "ffconcat version 1.0\nfile newly-referenced.nut\n");
+            }
+            return true;
+        });
+    if (!check(changed && !rendered && readFile(raw.outputPath) == "foreign source sentinel"
+               && readFile(fixtures.mp4) == original,
+               "real export's precommit refresh protects newly referenced files")) return false;
+    fixtures.writeText(list, "ffconcat version 1.0\nfile source.mp4\n");
+
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(outer)) return false;
+    QString error;
+    if (!check(!window.runAutomationText("VirtualDub.SaveAVI(\"source.mp4\");", directory, &error)
+               && error.contains("aliases") && readFile(fixtures.mp4) == original,
+               "GUI automation protects deep manifest dependencies")) return false;
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!queue) return false;
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::RawVideoExport;
+    job.sourcePaths = {outer};
+    job.audioDisabled = true;
+    job.replaceExisting = true;
+    job.options.outputPath = fixtures.mp4;
+    if (!check(!queue->addJobs({job}, &error) && error.contains("aliases")
+               && readFile(fixtures.mp4) == original,
+               "queue validation cannot approve replacing a nested input dependency")) return false;
+
+    const QString audioSource = fixtures.directory.filePath("audio-source.mkv");
+    const QString audioList = fixtures.directory.filePath("audio-list.txt");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=24:duration=1",
+                          "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=48000",
+                          "-c:v", "ffv1", "-c:a", "pcm_s16le", audioSource})
+        || !fixtures.writeText(audioList, "ffconcat version 1.0\nfile audio-source.mkv\n")
+        || !window.openVideoFile(audioList)) return false;
+    const QByteArray originalAudio = readFile(audioSource);
+    if (!check(!window.runAutomationText("VirtualDub.SaveWAV(\"audio-source.mkv\");", directory, &error)
+               && error.contains("aliases") && readFile(audioSource) == originalAudio,
+               "audio automation protects a misnamed manifest's audio/video input")) return false;
+
+    // AVS audio borrows the decoder's clip and has no independent source path.
+    // The controller must still protect the script itself and save ordinary WAVs.
+    const QString audioScript = fixtures.directory.filePath("audio-script.avs");
+    QByteArray audioScriptBytes = readFile(fixtures.avs);
+    audioScriptBytes.replace("audio_rate=0", "audio_rate=48000");
+    if (!fixtures.writeText(audioScript, audioScriptBytes) || !window.openVideoFile(audioScript)) return false;
+    if (!check(!window.runAutomationText("VirtualDub.SaveWAV(\"audio-script.avs\");", directory, &error)
+               && error.contains("aliases") && readFile(audioScript) == audioScriptBytes,
+               "borrowed AVS audio cannot overwrite its source script")) return false;
+    if (!window.runAutomationText("VirtualDub.SaveWAV(\"safe-audio.wav\");", directory, &error)) {
+        std::cerr << "Audio export failed: " << error.toStdString() << '\n';
+        return false;
+    }
+    const QByteArray wav = readFile(fixtures.directory.filePath("safe-audio.wav"));
+    return check(wav.startsWith("RIFF") && wav.size() > 44,
+                 "staged script audio export retains normal WAV behavior");
+}
 } // namespace
 
 bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
@@ -403,5 +513,6 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "audio") return audioSnapshot(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);
     if (scenario == "outputs") return outputFamilies(fixtures);
+    if (scenario == "safety") return sourceProtection(fixtures);
     return check(false, "unknown operation regression");
 }

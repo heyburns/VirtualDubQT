@@ -1,6 +1,8 @@
 #ifndef VDQTVIDEODECODER_H
 #define VDQTVIDEODECODER_H
 
+#include "VDQtSourceDependencies.h"
+
 #include <QString>
 #include <QStringList>
 #include <QByteArray>
@@ -102,13 +104,8 @@ public:
     static int getDecoderThreadCount();
     static void setDecoderThreadCount(int threadCount);
     void applyFrameCacheBudget();
-    struct ScriptDependencyReport {
-        // complete=false means output-overwrite safety must remain conservative.
-        QStringList resolvedPaths;
-        QStringList unresolvedPathLiterals;
-        QStringList diagnostics;
-        bool complete = false;
-    };
+    using ScriptDependencyReport = VDQtScriptDependencyReport;
+    QString getInputFormatName() const;
     static ScriptDependencyReport auditScriptDependencies(const QString& scriptPath);
     static QString parseScriptSource(const QString& scriptPath);
     static QStringList parseScriptSources(const QString& scriptPath);

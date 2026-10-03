@@ -211,6 +211,34 @@ Never replace that error with a generic failure message, or re-enable cleanup
 from a caller. Individual moves are atomic; a whole multi-file export is not a
 single atomic filesystem operation or a power-loss recovery guarantee.
 
+## Source protection
+
+`VDQtSourceDependencies` inspects local input files without running scripts or
+opening a media decoder. FFconcat headers take precedence over filename suffixes,
+and an already-open concat demuxer supplies a format hint when available. Nested
+manifests and literal script imports are followed recursively; unknown functions,
+runtime paths, missing files, unsupported playlists, cycles, and exhausted audit
+limits keep the report incomplete. This is conservative inspection, not a full
+AviSynth/Python interpreter or proof of arbitrary plug-in behavior.
+
+Collection uses hash sets, streamed image-pattern enumeration, and bounded text,
+path, reference, document, and recursion budgets. Concat path tokens follow
+FFmpeg's single-quote/backslash rules, not shell quoting. Native filesystem
+resolution preserves `symlink/../` semantics. A manifest reached through another
+directory keeps its own relative-path context. Ordered immediate concat entries
+(including repeats) are separate from deduplicated recursive safety dependencies;
+only the former belong in the editing/project source list.
+
+`VDQtSourceSafety::captureSources()` builds an operation-scoped snapshot containing
+protected paths and device/inode identities. Image/segment loops check only their
+destination paths against this snapshot instead of rereading every input for
+every output. Refresh once after rendering/approval and before commit; refresh
+retains both the original open-file identities and newly discovered dependencies.
+Do not replace the original snapshot with a fresh one that forgets old sources.
+An incomplete audit refuses existing destinations but permits unrelated new paths.
+These checks do not lock external writers or provide an atomic view of the entire
+source graph; staged-output commit must still apply its own destination checks.
+
 ## Persistent and session state
 
 `VDQtProcessingState` contains codec, filter, and processing choices.

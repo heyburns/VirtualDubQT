@@ -29,6 +29,7 @@
 #include <QThread>
 
 class VDQtJobControlWindow;
+class VDQtSourceSafetySnapshot;
 
 // Top-level application controller. Besides constructing menus, this class is
 // the integration boundary between durable session state, the authoritative
@@ -257,8 +258,9 @@ private:
     VDQtJobState currentJobTemplate() const;
     bool executeQueuedJob(int row, QString *errorMessage);
     bool executeImageSequenceJob(VDQtJobState& job,
-                                 VDQtVideoDecoder& decoder,
-                                 QString *errorMessage);
+                                VDQtVideoDecoder& decoder,
+                                VDQtSourceSafetySnapshot sourceSafety,
+                                QString *errorMessage);
     bool executeAutomationProgram(const VDQtScriptProgram& program,
                                   QString *errorMessage);
     bool exportAutomationVideo(const QString& outputPath,
