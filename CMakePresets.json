@@ -1,0 +1,50 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release-checks",
+      "displayName": "Release build and isolated regressions",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-release-checks",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "ON", "ENABLE_SANITIZERS": "OFF" }
+    },
+    {
+      "name": "sanitizer-checks",
+      "inherits": "release-checks",
+      "displayName": "Address/undefined-behavior diagnostics",
+      "binaryDir": "${sourceDir}/build-sanitizer-checks",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "ENABLE_SANITIZERS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release-checks", "configurePreset": "release-checks", "jobs": 4 },
+    { "name": "sanitizer-checks", "configurePreset": "sanitizer-checks", "jobs": 2 }
+  ],
+  "testPresets": [
+    {
+      "name": "release-checks",
+      "configurePreset": "release-checks",
+      "filter": { "exclude": { "label": "hardware" } },
+      "environment": {
+        "QT_QPA_PLATFORM": "offscreen",
+        "VD_DISABLE_AUDIO_OUTPUT": "1",
+        "XDG_CONFIG_HOME": "${sourceDir}/build-release-checks/test-state/config",
+        "XDG_DATA_HOME": "${sourceDir}/build-release-checks/test-state/data"
+      },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" }
+    },
+    {
+      "name": "sanitizer-checks",
+      "inherits": "release-checks",
+      "configurePreset": "sanitizer-checks",
+      "environment": {
+        "XDG_CONFIG_HOME": "${sourceDir}/build-sanitizer-checks/test-state/config",
+        "XDG_DATA_HOME": "${sourceDir}/build-sanitizer-checks/test-state/data",
+        "ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+      }
+    }
+  ]
+}

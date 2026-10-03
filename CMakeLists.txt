@@ -113,10 +113,10 @@ function(vdqt_enable_diagnostics target_name)
     endif()
     if (ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target_name} PRIVATE
-            -fno-omit-frame-pointer -fsanitize=address,undefined
+            -fno-omit-frame-pointer -fsanitize=address,undefined,float-cast-overflow
         )
         target_link_options(${target_name} PRIVATE
-            -fno-omit-frame-pointer -fsanitize=address,undefined
+            -fno-omit-frame-pointer -fsanitize=address,undefined,float-cast-overflow
         )
     endif()
 endfunction()
@@ -200,6 +200,29 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    # Exercise the real controller, including its asynchronous preview worker.
+    # Smaller decoder-only suites cannot cover main-window integration failures.
+    add_executable(application_baseline_tests
+        tests/test_application_baseline.cpp
+        tests/support/VDQtTestFixtures.h
+        tests/support/VDQtTestFixtures.cpp
+        ${VIRTUALDUB_QT_SOURCES}
+    )
+    target_compile_definitions(application_baseline_tests PRIVATE
+        QT_NO_KEYWORDS VDQT_VERSION_STRING="${PROJECT_VERSION}")
+    target_include_directories(application_baseline_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src ${AVISYNTH_INCLUDE_DIR})
+    target_link_libraries(application_baseline_tests PRIVATE
+        Qt6::Widgets Qt6::Multimedia Qt6::DBus Qt6::Concurrent
+        ${AVISYNTH_LIBRARY} PkgConfig::FFMPEG)
+    vdqt_enable_diagnostics(application_baseline_tests)
+    set_target_properties(application_baseline_tests PROPERTIES
+        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
+    add_test(NAME application_baseline_tests COMMAND application_baseline_tests)
+    set_tests_properties(application_baseline_tests PROPERTIES
+        LABELS "integration;baseline" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
     # Large integration suite covering workflows that cross module boundaries.
     add_executable(stabilization_tests
         src/VirtualDub/test_stabilization.cpp

@@ -1,0 +1,86 @@
+Bugfix checkpoints and regression checks
+=======================================
+
+The standalone codec troubleshooting suite is not part of these checks.
+All generated source files, failure fixtures, and exports are temporary. The
+offscreen controller test also isolates its settings and queue from user data.
+
+Build and run (presets require CMake 3.21 or newer):
+
+  cmake --preset release-checks
+  cmake --build --preset release-checks
+  ctest --preset release-checks
+
+  cmake --preset sanitizer-checks
+  cmake --build --preset sanitizer-checks
+  ctest --preset sanitizer-checks
+
+AddressSanitizer, UndefinedBehaviorSanitizer, and float-cast-overflow checks
+are enabled together. Leak detection is disabled in the sandbox preset because
+LeakSanitizer cannot reliably inspect threads under restricted process tracing;
+this does NOT disable address or undefined-behavior checks. For an unrestricted
+host, run CTest directly with ASAN_OPTIONS=detect_leaks=1 if leak coverage is needed.
+
+Physical audio-device checks remain separately selectable:
+
+  ctest --test-dir build-release-checks -L hardware --output-on-failure
+
+They can return skip code 77 when no usable device is available. Offscreen checks
+do not establish real speaker/capture behavior. Do not run performance benchmarks
+alongside other heavy tests when comparing timing results.
+
+Fixtures
+--------
+
+tests/support/VDQtTestFixtures supplies small CFR/silent MP4 and built-in AVS
+clips; VFR, unknown-count H.264, repeated timestamps, longer/shorter audio, high
+bit depth, alpha/padded-row images, PNG sequences, nested/misnamed manifests,
+and an invalid filesystem destination. The controller baseline smoke-decodes
+edge-case media without asserting currently broken timeline/safety semantics.
+Their detailed behavioral assertions belong with the corresponding repair batch.
+
+Performance baseline
+--------------------
+
+  build-release-checks/application_baseline_tests --benchmark 8 \
+      --report build-release-checks/baseline.json
+
+Longer-source comparison (same resolution, ten times as many frames):
+
+  build-release-checks/application_baseline_tests --benchmark 2 --frames 480 \
+      --report build-release-checks/long-source-baseline.json
+
+Reports contain per-cycle source-open, sequential decode, random-scrub, and
+complete ProRes export timings, fps, resident memory, thread count, and test
+directory size. Outputs are removed after each cycle. RSS includes allocator
+high-water retention; an increase alone does not prove leaked live objects.
+Export timings include encoder startup/pipe/finalization, not just encode CPU.
+
+The session benchmark uses one real decoder/exporter repeatedly, a synthetic
+1080p MP4, and AVS BlankClip with no plugins or audio. The separate offscreen test
+exercises the real MainWindow/preview worker. Neither replaces profiling the
+user's AVS plugin chain and audio path or proves the cause of a real-world slowdown.
+
+Initial observations before the filter repair, 2026-10-02:
+  - Release checks: 8 passed; physical-audio test excluded.
+  - Eight alternating 48-frame sessions: ProRes 84.7-92.5 fps.
+  - Threads remained 29; test disk usage remained approximately 4.34 MB.
+  - RSS rose from approximately 183 MiB to 343 MiB. This warrants follow-up;
+    the user's repeated 30% throughput loss was not reproduced by this fixture.
+  - Raw measurements are in the ignored build directory, baseline-before.json.
+
+Filter-memory guardrails
+------------------------
+
+  ctest --preset sanitizer-checks -R filter_memory
+
+Each of Temporal Smoother, Inverse Telecine, Television, and Warp Sharp is tested
+in a separate process. Small serial images and 1080p/4K parallel images use odd
+RGB strides, alpha, temporal history, retained output aliases, and opacity
+snapshots. Whole-frame pixels are compared to a scalar reference; null/failed
+phase sequences must report failure with no partial outputs. High-depth tests
+preserve existing behavior without claiming to implement missing algorithms.
+
+A single-CPU host can check pixels but cannot exercise the multi-worker race.
+Do not turn this memory-safety repair into a field-history, IVTC cadence, or
+high-depth feature rewrite: those findings have their own planned batches.
