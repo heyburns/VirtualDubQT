@@ -2,6 +2,7 @@ Bugfix checkpoints and regression checks
 =======================================
 
 The standalone codec troubleshooting suite is not part of these checks.
+The following checkpoints use maintained application regressions instead.
 All generated source files, failure fixtures, and exports are temporary. The
 offscreen controller test also isolates its settings and queue from user data.
 
@@ -1048,3 +1049,22 @@ idle Release benchmark of lowpass+chorus+pitch+stretch measured 4096-byte pulls
 at 0.586 ms p99 / 0.689 ms worst over ten runs (21.3 ms of S16 stereo audio per
 pull). This measures a buffered PCM source, not a physical sink, AVS plugin
 decode cost or actual audible continuity; those remain separate hardware gates.
+
+BT.2020 output conversion and tags (M08)
+---------------------------------------
+
+The new real-export test reproduced all three defects before repair: raw
+BT.2020 used Rec.601 coefficients, saved raw BT.2020 settings could not reload,
+and processed export failed because bt2020nc was not a valid primaries/transfer
+value. One color-family policy now separates matrix, primaries and transfer,
+including the 10/12-bit BT.2020 transfer distinction. Raw conversion and the
+Fast Recompress/processed pipelines apply the selected coefficients. Converted
+frames also receive the explicit color properties, because FFmpeg can replace
+encoder tags with incoming frame properties. The raw dialog retains BT.2020.
+This corrects matrix/range conversion and tagging, not HDR tone/gamut mapping.
+
+Raw pixels and lossless processed 10-bit pixels match independent ffmpeg
+references exactly; ffprobe verifies the actual stored matrix/primaries/transfer.
+Settings round trips, legacy 601/709 aliases and the 12-bit transfer policy are
+covered. Focused Release 6/6 and ASan/UBSan 6/6 passed, plus the independently
+rebuilt regular application's MP4/native-AVS decode/export smoke.

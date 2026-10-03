@@ -3,6 +3,7 @@
 // namespace helpers build subprocess pipelines and transactional output files;
 // the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
+#include "VDQtColorPolicy.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
@@ -224,7 +225,8 @@ bool appendVideoEncoderArguments(QStringList& args,
                                  bool preserveNativeVfr,
                                  const QString& container,
                                  QString *errorMessage,
-                                 QString *resolvedPixelFormat = nullptr)
+                                 QString *resolvedPixelFormat = nullptr,
+                                 bool rgbInput = false)
 {
     QString outputPixelFormat = params.pixFmt.trimmed().toLower();
     const QString codecId = params.codecId.trimmed();
@@ -301,21 +303,16 @@ bool appendVideoEncoderArguments(QStringList& args,
         args << "-bf" << "0";
     else if (params.bFrames > 0 && params.bFrames <= 16)
         args << "-bf" << QString::number(params.bFrames);
-    if (!params.colorMatrix.isEmpty()
-        && params.colorMatrix != QStringLiteral("auto")
-        && params.colorMatrix != QStringLiteral("none")) {
-        args << "-colorspace" << params.colorMatrix
-             << "-color_primaries" << params.colorMatrix
-             << "-color_trc" << params.colorMatrix;
-    }
-
+    int outputBitDepth = sourceBitDepth;
+    bool outputIsRgb = false;
     if (!outputPixelFormat.isEmpty()) {
         const QByteArray formatName = outputPixelFormat.toUtf8();
         const AVPixelFormat outputFormat = av_get_pix_fmt(formatName.constData());
         const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(outputFormat);
-        int outputBitDepth = 0;
+        outputBitDepth = 0;
         bool outputHasAlpha = false;
         if (descriptor) {
+            outputIsRgb = (descriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
             for (int component = 0; component < descriptor->nb_components; ++component) {
                 outputBitDepth = std::max(
                     outputBitDepth,
@@ -343,6 +340,24 @@ bool appendVideoEncoderArguments(QStringList& args,
             return false;
         }
         args << "-pix_fmt" << outputPixelFormat;
+    }
+    const QString colorName = params.colorMatrix.trimmed().toLower();
+    if (!colorName.isEmpty() && colorName != QStringLiteral("auto")
+        && colorName != QStringLiteral("none")) {
+        VDQtColorMatrixInfo color;
+        if (!VDQtResolveColorMatrix(colorName, outputBitDepth, &color)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Unsupported output color matrix '%1'.")
+                .arg(params.colorMatrix);
+            return false;
+        }
+        args << "-colorspace" << (outputIsRgb ? QStringLiteral("rgb") : color.matrix)
+             << "-color_primaries" << color.primaries << "-color_trc" << color.transfer;
+        // Raw QImages do not carry YUV coefficients. Convert the pixels using
+        // the selected matrix as well as tagging them, including both passes.
+        if (rgbInput) {
+            const QString conversion = VDQtOutputMatrixFilter(colorName, outputPixelFormat);
+            if (!conversion.isEmpty()) args << "-vf" << conversion;
+        }
     }
     if (resolvedPixelFormat)
         *resolvedPixelFormat = outputPixelFormat;
@@ -763,6 +778,11 @@ public:
                 *errorMessage = QStringLiteral("The raw frame dimensions or scanline alignment are invalid.");
             return false;
         }
+        if (!VDQtResolveColorMatrix(colorMatrix, 8)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Unsupported raw output color matrix '%1'.")
+                .arg(colorMatrix);
+            return false;
+        }
 
         mFrame = av_frame_alloc();
         if (!mFrame) {
@@ -858,9 +878,9 @@ public:
 
         if (!(mDescriptor->flags & AV_PIX_FMT_FLAG_RGB)
             && mDescriptor->nb_components >= 3) {
-            const int colorSpace = mColorMatrix == QStringLiteral("bt709")
-                ? SWS_CS_ITU709 : SWS_CS_SMPTE170M;
-            const int *coefficients = sws_getCoefficients(colorSpace);
+            VDQtColorMatrixInfo color;
+            VDQtResolveColorMatrix(mColorMatrix, 8, &color); // validated at initialization
+            const int *coefficients = sws_getCoefficients(color.coefficients);
             if (!coefficients
                 || sws_setColorspaceDetails(
                        mScaleContext, coefficients, 1,
@@ -2055,6 +2075,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                 decoder.sourceHasAlpha(), preserveNativeVfr,
                 options.containerType.toLower(), &videoEncodingError,
                 &fastPixelFormat)) {
+            mLastError = videoEncodingError;
             if (parentWidget)
                 QMessageBox::critical(parentWidget, "Video Precision Error", videoEncodingError);
             removePartialOutput(processOutputPath);
@@ -2067,6 +2088,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                                             : QStringLiteral("yuv420p"));
             encoderArgs << "-pix_fmt" << fastPixelFormat;
         }
+        const QString matrixConversion = VDQtOutputMatrixFilter(
+            selectedVideoParams.colorMatrix, fastPixelFormat);
+        if (!matrixConversion.isEmpty()) videoFilters << matrixConversion;
 
         if (options.convertFpsPreserveDuration || options.customFps > 0.0) {
             encoderArgs << "-r" << QString::number(fps, 'f', 12)
@@ -2622,8 +2646,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         if (!appendVideoEncoderArguments(
                 target, vParams, decoder.getSourceBitDepth(),
                 decoder.sourceHasAlpha(), preserveNativeVfr, container,
-                &videoEncodingError))
+                &videoEncodingError, nullptr, true)) {
+            mLastError = videoEncodingError;
             return false;
+        }
         if (preserveNativeVfr)
             target << "-fps_mode" << "vfr"
                    << "-enc_time_base:v" << "1:1000000"

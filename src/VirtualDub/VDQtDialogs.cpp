@@ -4092,6 +4092,7 @@ VDRawVideoExportDialog::VDRawVideoExportDialog(
     mColorMatrixCombo = new QComboBox(this);
     mColorMatrixCombo->addItem("BT.601", "bt601");
     mColorMatrixCombo->addItem("BT.709", "bt709");
+    mColorMatrixCombo->addItem("BT.2020 (non-constant luminance)", "bt2020");
     int matrixIndex = mColorMatrixCombo->findData(initialConfig.colorMatrix.toLower());
     mColorMatrixCombo->setCurrentIndex(matrixIndex >= 0 ? matrixIndex : 0);
     form->addRow("YUV matrix:", mColorMatrixCombo);

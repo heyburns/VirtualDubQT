@@ -81,6 +81,7 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtCodecEngine.h
     src/VirtualDub/VDQtCodecEngine.cpp
     src/VirtualDub/VDQtVideoExporter.h
+    src/VirtualDub/VDQtColorPolicy.h
     src/VirtualDub/VDQtVideoExporter.cpp
     src/VirtualDub/VDQtSourceSafety.h
     src/VirtualDub/VDQtSourceSafety.cpp
@@ -242,6 +243,14 @@ if (BUILD_TESTING)
     add_test(NAME decoder_index_tests COMMAND decoder_index_tests)
     set_tests_properties(decoder_index_tests PROPERTIES
         LABELS "decoder;index;performance" TIMEOUT 60)
+
+    add_executable(color_contract_tests
+        tests/test_color_contracts.cpp tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(color_contract_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(color_contract_tests)
+    add_test(NAME color_contract_tests COMMAND color_contract_tests)
+    set_tests_properties(color_contract_tests PROPERTIES
+        LABELS "decoder;export;color;contracts" TIMEOUT 120)
 
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp

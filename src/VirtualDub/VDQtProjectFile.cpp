@@ -2,6 +2,7 @@
 // job queues. Helper functions below keep enum/config encoding symmetric and
 // validate bounded values before public loaders commit a reconstructed state.
 #include "VDQtProjectFile.h"
+#include "VDQtColorPolicy.h"
 #include "VDQtFilterValidation.h"
 
 #include <QDir>
@@ -322,8 +323,7 @@ bool parseProcessing(const QJsonObject& object,
     const int alignment = result.rawVideo.scanlineAlignment;
     if (result.rawVideo.pixelFormat.size() > 64 || alignment < 1 || alignment > 64
         || (alignment & (alignment - 1)) != 0
-        || (result.rawVideo.colorMatrix != QStringLiteral("bt601")
-            && result.rawVideo.colorMatrix != QStringLiteral("bt709"))) {
+        || !VDQtResolveColorMatrix(result.rawVideo.colorMatrix, 8)) {
         setError(errorMessage, QStringLiteral("The processing file contains invalid raw-video settings."));
         return false;
     }
