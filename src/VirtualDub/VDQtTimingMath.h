@@ -37,6 +37,18 @@ inline int VDQtScaledProgress(int current, int total, int scale) {
     return static_cast<int>(int64_t(std::clamp(current, 0, total)) * std::max(0, scale) / total);
 }
 
+// The CFR samples inside [0, seconds) are 0, 1/fps, 2/fps, ... . Use the
+// cumulative boundary, not independent per-source-frame rounding (which drifts
+// and incorrectly forces short VFR frames to occupy at least one CFR tick).
+// The fixed tolerance only absorbs reciprocal-clock roundoff at exact ticks;
+// a relative tolerance would swallow whole frames on long streams.
+inline bool VDQtCfrBoundaryFrames(long double seconds, double fps, int64_t *result) {
+    if (!std::isfinite(seconds) || seconds < 0 || !std::isfinite(fps) || fps <= 0)
+        return false;
+    const long double count = std::max(0.0L, std::ceil(seconds * fps - 1e-7L));
+    return VDQtCheckedRoundedNonnegative(count, result);
+}
+
 // Time/rate products can exceed integer domains even when both inputs are
 // finite. Bound in floating-point BEFORE rounding/casting. Positions past a
 // known source end clamp to that end; unknown lengths use the integer ceiling.

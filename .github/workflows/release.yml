@@ -40,10 +40,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake curl desktop-file-utils dpkg-dev file git \
+            build-essential cmake curl desktop-file-utils dpkg-dev ffmpeg file git \
             libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
             libfuse2t64 libswresample-dev libswscale-dev ninja-build pkg-config \
-            qt6-base-dev qt6-multimedia-dev
+            python3 qt6-base-dev qt6-multimedia-dev
 
       - name: Build AviSynth+ runtime
         run: |
@@ -75,10 +75,20 @@ jobs:
           test -n "${deb_file}"
           dpkg-deb --info "${deb_file}"
           dpkg-deb --contents "${deb_file}"
-          package_root="$(mktemp -d)"
-          dpkg-deb --extract "${deb_file}" "${package_root}"
-          QT_QPA_PLATFORM=offscreen \
-            "${package_root}/usr/bin/VirtualDubQt" --help
+          # Shared-library dependencies do not imply ffmpeg/ffprobe commands.
+          dpkg-deb --field "${deb_file}" Depends | grep -Eq '(^|, )ffmpeg( |,|$)'
+          # A clean runtime has no build-tree RPATH or preinstalled Qt/AviSynth.
+          # Install ffmpeg only through the application's package dependency.
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" ubuntu:24.04 bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              packages=(/repo/dist/*.deb)
+              test "${#packages[@]}" -eq 1
+              apt-get install --no-install-recommends -y python3 "${packages[0]}"
+              python3 /repo/packaging/smoke-runtime.py \
+                --application /usr/bin/VirtualDubQt --runtime-path /usr/bin:/bin
+            '
 
       - name: Build and validate AppImage
         shell: bash
@@ -98,18 +108,49 @@ jobs:
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable build-release/VirtualDubQt \
+            --executable "$(command -v ffmpeg)" \
+            --executable "$(command -v ffprobe)" \
             --desktop-file packaging/virtualdubqt.desktop \
             --icon-file packaging/virtualdubqt.png \
+            --custom-apprun packaging/AppRun \
             --plugin qt
           install -Dm644 LICENSE AppDir/usr/share/licenses/virtualdubqt/LICENSE
+          install -Dm644 /usr/share/doc/ffmpeg/copyright \
+            AppDir/usr/share/licenses/ffmpeg/copyright
+          ffmpeg -version > AppDir/usr/share/licenses/ffmpeg/build-configuration.txt
+          test -x AppDir/usr/bin/ffmpeg
+          test -x AppDir/usr/bin/ffprobe
 
           version="${GITHUB_REF_NAME#v}"
           export VERSION="${version}"
           export OUTPUT="${GITHUB_WORKSPACE}/dist/VirtualDubQT-${version}-x86_64.AppImage"
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --custom-apprun packaging/AppRun --output appimage
           test -x "${OUTPUT}"
-          APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen \
-            "${OUTPUT}" --help
+          # No host FFmpeg, Qt or AviSynth packages in this runtime. Desktop
+          # platform basics are retained; hardware/display/audio are not tested.
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
+            --env "PACKAGE_NAME=$(basename "${OUTPUT}")" \
+            ubuntu:24.04 bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --no-install-recommends -y \
+                python3 libgl1 libegl1 libdbus-1-3
+              test ! -e /usr/bin/ffmpeg
+              test ! -e /usr/bin/ffprobe
+              test_root="$(mktemp -d)"
+              cd "${test_root}"
+              "/repo/dist/${PACKAGE_NAME}" --appimage-extract > /dev/null
+              # Fixture generation/validation deliberately uses bundled tools.
+              # The application itself still starts with an empty host PATH.
+              python3 /repo/packaging/smoke-runtime.py \
+                --application "/repo/dist/${PACKAGE_NAME}" \
+                --ffmpeg "${test_root}/squashfs-root/usr/bin/ffmpeg" \
+                --ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
+                --runtime-ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
+                --runtime-library-path "${test_root}/squashfs-root/usr/lib"
+            '
 
       - name: Upload Ubuntu packages
         uses: actions/upload-artifact@v4
@@ -141,8 +182,8 @@ jobs:
         run: |
           dnf install -y \
             cmake file findutils gcc-c++ git ninja-build pkgconf-pkg-config \
-            qt6-qtbase-devel qt6-qtmultimedia-devel ffmpeg-free-devel \
-            rpm-build
+            qt6-qtbase-devel qt6-qtmultimedia-devel ffmpeg-free ffmpeg-free-devel \
+            python3 rpm-build
 
       - name: Build AviSynth+ runtime
         run: |
@@ -174,13 +215,41 @@ jobs:
           rpm -qpi "${rpm_file}"
           rpm -qpl "${rpm_file}"
           rpm -qpR "${rpm_file}"
+          rpm -qpR "${rpm_file}" | grep -Fx /usr/bin/ffmpeg
+          rpm -qpR "${rpm_file}" | grep -Fx /usr/bin/ffprobe
 
-      - name: Upload Fedora package
+      - name: Upload RPM for clean-runtime validation
         uses: actions/upload-artifact@v4
         with:
           name: fedora-package
           path: dist/*.rpm
           if-no-files-found: error
+
+  rpm-runtime:
+    # This separate container has none of the compiler/development packages or
+    # /usr/local runtime used to build the RPM. Native dependencies must suffice.
+    name: Clean Fedora 43 RPM runtime
+    needs: rpm
+    runs-on: ubuntu-24.04
+    container: fedora:43
+    steps:
+      - name: Check out smoke helper
+        uses: actions/checkout@v4
+
+      - name: Download packaged application
+        uses: actions/download-artifact@v4
+        with:
+          name: fedora-package
+          path: dist
+
+      - name: Install only runtime dependencies and test harness
+        shell: bash
+        run: |
+          packages=(dist/*.rpm)
+          test "${#packages[@]}" -eq 1
+          dnf install -y python3 "${packages[0]}"
+          python3 packaging/smoke-runtime.py \
+            --application /usr/bin/VirtualDubQt --runtime-path /usr/bin:/bin
 
   publish:
     # Publishing waits for both platform jobs, combines their artifacts, and
@@ -188,7 +257,7 @@ jobs:
     name: Publish GitHub release
     needs:
       - deb-and-appimage
-      - rpm
+      - rpm-runtime
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -1,0 +1,28 @@
+#!/bin/sh
+# linuxdeploy copies this launcher into the AppDir root. Do not rely on the
+# desktop session's PATH: export/capture and Media Inspector need our matching
+# ffmpeg/ffprobe executables, not merely their linked libraries.
+set -e
+
+APPDIR=$(CDPATH= cd -- "${0%/*}" && pwd -P)
+export APPDIR
+for tool in VirtualDubQt ffmpeg ffprobe; do
+    if [ ! -x "$APPDIR/usr/bin/$tool" ]; then
+        printf '%s\n' "VirtualDubQT AppImage is incomplete: missing $tool" >&2
+        exit 127
+    fi
+done
+
+PATH="$APPDIR/usr/bin${PATH:+:$PATH}"
+LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/virtualdubqt${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH LD_LIBRARY_PATH
+
+# Qt 6 is configured by linuxdeploy's qt.conf. Honor any additional deployment
+# hooks without using external dirname/readlink utilities: this also works when
+# the caller deliberately removes every host executable from PATH.
+for hook in "$APPDIR"/apprun-hooks/*.sh; do
+    if [ -f "$hook" ]; then
+        . "$hook"
+    fi
+done
+exec "$APPDIR/usr/bin/VirtualDubQt" "$@"

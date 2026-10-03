@@ -1,0 +1,72 @@
+name: Linux regressions
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AVISYNTH_VERSION: "3.7.5"
+
+jobs:
+  regressions:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [release-checks, sanitizer-checks]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake ffmpeg git pkg-config python3 \
+            libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev qt6-base-dev qt6-multimedia-dev
+
+      - name: Build pinned AviSynth+ runtime
+        run: |
+          git clone --branch "v${AVISYNTH_VERSION}" --depth 1 \
+            https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
+          cmake -S /tmp/AviSynthPlus -B /tmp/AviSynthPlus/build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_PLUGINS=OFF
+          cmake --build /tmp/AviSynthPlus/build --parallel 2
+          sudo cmake --install /tmp/AviSynthPlus/build
+          sudo ldconfig
+
+      - name: Configure and build maintained regressions
+        run: |
+          cmake --preset "${{ matrix.preset }}"
+          cmake --build --preset "${{ matrix.preset }}" --parallel 2
+
+      - name: Run isolated regressions (hardware excluded)
+        run: ctest --preset "${{ matrix.preset }}"
+
+      - name: Exercise the actual Release application's codec-tool path
+        if: matrix.preset == 'release-checks'
+        run: |
+          python3 packaging/smoke-runtime.py \
+            --application "${GITHUB_WORKSPACE}/build-release-checks/VirtualDubQt" \
+            --runtime-path /usr/bin:/bin
+
+      - name: Retain failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.preset }}
+          path: build-${{ matrix.preset }}/Testing/Temporary/
+          if-no-files-found: ignore

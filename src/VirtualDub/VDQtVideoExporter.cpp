@@ -242,10 +242,13 @@ bool appendVideoEncoderArguments(QStringList& args,
 {
     QString outputPixelFormat = params.pixFmt.trimmed().toLower();
     const QString codecId = params.codecId.trimmed();
+    QStringList encoderArguments;
+    if (!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
+            params, preserveNativeVfr, &encoderArguments, errorMessage)) return false;
+    args.append(encoderArguments);
     if (codecId.compare(QStringLiteral("(Uncompressed)"), Qt::CaseInsensitive) == 0
         || codecId.compare(QStringLiteral("uncompressed"), Qt::CaseInsensitive) == 0
         || codecId.isEmpty()) {
-        args << "-c:v" << "rawvideo";
         if (sourceBitDepth > 8)
             outputPixelFormat = sourceHasAlpha ? QStringLiteral("rgba64le")
                                                : QStringLiteral("rgb48le");
@@ -257,64 +260,20 @@ bool appendVideoEncoderArguments(QStringList& args,
             args << "-allow_raw_vfw" << "1";
         }
     } else if (codecId == QStringLiteral("libx264_10bit")) {
-        args << "-c:v" << "libx264";
         outputPixelFormat = QStringLiteral("yuv420p10le");
-    } else if (codecId == QStringLiteral("libx265_lossless")) {
-        args << "-c:v" << "libx265" << "-x265-params" << "lossless=1";
-        outputPixelFormat = QStringLiteral("yuv420p");
-    } else {
-        args << "-c:v" << codecId;
     }
 
     if (codecId == QStringLiteral("prores_ks")) {
-        args << "-profile:v" << QString::number(params.proresProfile);
-        if (!params.proresVendor.isEmpty())
-            args << "-vendor" << params.proresVendor;
         outputPixelFormat = params.proresProfile >= 4
             ? (sourceHasAlpha ? QStringLiteral("yuva444p10le")
                               : QStringLiteral("yuv444p10le"))
             : QStringLiteral("yuv422p10le");
-    } else if (codecId == QStringLiteral("ffv1")) {
-        args << "-level" << QString::number(params.ffv1Version)
-             << "-coder" << QString::number(params.ffv1Coder)
-             << "-slices" << QString::number(params.ffv1Slices);
     } else if (codecId == QStringLiteral("huffyuv")) {
-        args << "-pred" << QString::number(params.huffyuvPredictor);
         if (outputPixelFormat.isEmpty())
             outputPixelFormat = QStringLiteral("yuv422p");
     } else if (codecId == QStringLiteral("cfhd")) {
-        args << "-quality" << QString::number(params.cineformQuality);
         outputPixelFormat = QStringLiteral("yuv422p10le");
-    } else if (codecId == QStringLiteral("libx264")
-               || codecId == QStringLiteral("libx264_10bit")
-               || codecId == QStringLiteral("libx265")) {
-        if (params.rateMode == QStringLiteral("crf"))
-            args << "-crf" << QString::number(params.crf);
-        else
-            args << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
-        if (!params.preset.isEmpty()) args << "-preset" << params.preset;
-        if (!params.tune.isEmpty() && params.tune != QStringLiteral("none"))
-            args << "-tune" << params.tune;
-    } else if (codecId == QStringLiteral("libvpx")
-               || codecId == QStringLiteral("libvpx-vp9")
-               || codecId == QStringLiteral("libsvtav1")) {
-        if (params.rateMode == QStringLiteral("bitrate"))
-            args << "-b:v" << QString("%1k").arg(
-                std::max(1, params.targetBitrateKbps));
-        else
-            args << "-crf" << QString::number(params.crf)
-                 << "-b:v" << "0";
-    } else if (params.rateMode == QStringLiteral("bitrate")
-               && params.targetBitrateKbps > 0) {
-        args << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
     }
-
-    if (params.keyframeInterval > 0 && params.keyframeInterval <= 10000)
-        args << "-g" << QString::number(params.keyframeInterval);
-    if (preserveNativeVfr && params.bFrames > 0)
-        args << "-bf" << "0";
-    else if (params.bFrames > 0 && params.bFrames <= 16)
-        args << "-bf" << QString::number(params.bFrames);
     int outputBitDepth = sourceBitDepth;
     bool outputIsRgb = false;
     if (!outputPixelFormat.isEmpty()) {
@@ -1463,6 +1422,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             if (parentWidget) QMessageBox::critical(parentWidget, "Video Encoder Not Available", err);
             return false;
         }
+        QStringList validatedArguments;
+        if (!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
+                selectedVideoParams, false, &validatedArguments, &err)) {
+            mLastError = err;
+            if (parentWidget) QMessageBox::critical(parentWidget, "Invalid Video Codec Settings", err);
+            return false;
+        }
     }
 
     VDQtVideoDecoder localDecoder;
@@ -2421,13 +2387,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     // Fetch user-configured codec settings
     const VDVideoCodecParams& vParams = selectedVideoParams;
     const VDAudioCodecParams aParams = processing.audioCodec;
-    const QString twoPassCodec = vParams.codecId == QStringLiteral("libx264_10bit")
-        ? QStringLiteral("libx264") : vParams.codecId;
     const bool twoPassRequested = vParams.twoPass;
-    const bool twoPassSupported = twoPassCodec == QStringLiteral("libx264")
-        || twoPassCodec == QStringLiteral("libx265")
-        || twoPassCodec == QStringLiteral("libvpx")
-        || twoPassCodec == QStringLiteral("libvpx-vp9");
+    const bool twoPassSupported = VDQtCodecEngine::getVideoCapabilities(vParams.codecId).supportsTwoPass;
     if (twoPassRequested
         && (vParams.rateMode != QStringLiteral("bitrate")
             || !twoPassSupported)) {

@@ -18,6 +18,7 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QLabel>
 #include <QPointer>
 #include <QProcess>
 #include <QStandardPaths>
@@ -121,6 +122,67 @@ bool logLifetime() {
         if (!check(log.isNull(), "editor destruction deletes the parent-owned log")) return false;
     }
     return true;
+}
+
+bool queuePersistence(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.show();
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    auto *warning = window.findChild<QLabel*>("queuePersistenceWarning");
+    if (!queue || !warning) return false;
+    VDQtJobState job;
+    job.sourcePaths = {fixtures.mp4};
+    job.operation = VDQtJobOperation::VideoAnalysis;
+    QString error;
+    if (!queue->replaceJobs({job}, &error) || !queue->flush(&error)) return false;
+    const QString destination = queue->autosavePath();
+    const QByteArray original = readFile(destination);
+    // Replace only this test's temporary queue file with a directory to force
+    // QSaveFile failure, regardless of whether tests run as root.
+    if (!QFile::remove(destination) || !QDir().mkdir(destination)) return false;
+    if (!invoke(window, "runPendingJobs")
+        || !check(queue->jobAt(0)->status == VDQtJobStatus::Pending && !queue->isRunning()
+            && !queue->persistenceError().isEmpty() && warning->isVisible(),
+            "failed initial durable checkpoint prevents the runner and exposes a persistent warning")) return false;
+    bool prompted = false;
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *message = qobject_cast<QMessageBox*>(widget);
+            if (!message || !message->isVisible()) continue;
+            prompted = message->windowTitle() == "Job Queue Not Saved";
+            message->done(QMessageBox::Cancel);
+        }
+    });
+    responder.start();
+    const bool closed = window.close();
+    responder.stop();
+    if (!check(prompted && !closed && window.isVisible(),
+        "Cancel keeps the editor open when Close cannot save its queue")) return false;
+    if (!QDir().rmdir(destination) || !fixtures.writeText(destination, original)
+        || !queue->flush(&error)) return false;
+    if (!check(queue->persistenceError().isEmpty() && !warning->isVisible(),
+        "a successful retry clears the persistent save warning")) return false;
+
+    // A status listener can invalidate the destination after the initial save.
+    // The second, per-job checkpoint must also stop before executeQueuedJob.
+    bool invalidated = false;
+    const auto connection = QObject::connect(queue, &VDQtJobQueue::jobChanged, &window,
+        [&](int row) {
+            const auto *record = queue->jobAt(row);
+            if (!invalidated && record && record->status == VDQtJobStatus::Starting) {
+                invalidated = QFile::remove(destination) && QDir().mkdir(destination);
+            }
+        });
+    if (!invoke(window, "runPendingJobs")) return false;
+    QObject::disconnect(connection);
+    if (!check(invalidated && queue->jobAt(0)->status == VDQtJobStatus::Pending
+        && !queue->isRunning() && warning->isVisible(),
+        "a failed per-job intent checkpoint reverts Pending and prevents execution")) return false;
+    if (!QDir().rmdir(destination) || !queue->flush(&error) || !invoke(window, "runPendingJobs")) return false;
+    return check(queue->jobAt(0)->status == VDQtJobStatus::Complete,
+        "after storage recovery the same pending analysis job can run and durably complete");
 }
 
 bool recoveryRetention(VDQtTestFixtures& fixtures) {
@@ -1911,6 +1973,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "audio_inclusion") return audioInclusion(fixtures);
     if (scenario == "audio_export") return audioExportContracts(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);
+    if (scenario == "queue_persistence") return queuePersistence(fixtures);
     if (scenario == "outputs") return outputFamilies(fixtures);
     if (scenario == "safety") return sourceProtection(fixtures);
     if (scenario == "unknown_timeline") return unknownTimeline(fixtures);

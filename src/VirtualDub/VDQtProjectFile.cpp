@@ -479,11 +479,9 @@ bool parseProcessing(const QJsonObject& object,
     return true;
 }
 
-bool writeDocument(const QString& path,
-                   const QJsonObject& root,
-                   QString *errorMessage) {
-    const QByteArray serialized =
-        QJsonDocument(root).toJson(QJsonDocument::Indented);
+bool writeSerializedDocument(const QString& path,
+                             const QByteArray& serialized,
+                             QString *errorMessage) {
     if (serialized.size() > kMaximumDocumentBytes) {
         setError(errorMessage, QStringLiteral(
             "The settings document exceeds the 4 MiB safety limit."));
@@ -504,6 +502,13 @@ bool writeDocument(const QString& path,
         return false;
     }
     return true;
+}
+
+bool writeDocument(const QString& path,
+                   const QJsonObject& root,
+                   QString *errorMessage) {
+    return writeSerializedDocument(path,
+        QJsonDocument(root).toJson(QJsonDocument::Indented), errorMessage);
 }
 
 bool readDocument(const QString& path,
@@ -799,6 +804,20 @@ bool VDQtProjectFile::saveJobQueue(
     const QString& path,
     const QList<VDQtJobState>& jobs,
     QString *errorMessage) {
+    QByteArray serialized;
+    return serializeJobQueue(path, jobs, &serialized, errorMessage)
+        && writeSerializedDocument(path, serialized, errorMessage);
+}
+
+bool VDQtProjectFile::serializeJobQueue(
+    const QString& path,
+    const QList<VDQtJobState>& jobs,
+    QByteArray *serialized,
+    QString *errorMessage) {
+    if (!serialized) {
+        setError(errorMessage, QStringLiteral("No serialized-queue destination was provided."));
+        return false;
+    }
     if (jobs.size() > 1000) {
         setError(errorMessage, QStringLiteral("The job queue exceeds the 1000-job limit."));
         return false;
@@ -939,7 +958,13 @@ bool VDQtProjectFile::saveJobQueue(
     root["kind"] = QStringLiteral("VirtualDubQTJobQueue");
     root["version"] = kDocumentVersion;
     root["jobs"] = serializedJobs;
-    return writeDocument(path, root, errorMessage);
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (bytes.size() > kMaximumDocumentBytes) {
+        setError(errorMessage, QStringLiteral("The job queue exceeds the 4 MiB safety limit."));
+        return false;
+    }
+    *serialized = bytes;
+    return true;
 }
 
 bool VDQtProjectFile::loadJobQueue(

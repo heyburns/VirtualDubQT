@@ -76,6 +76,7 @@ private:
     QLabel *mCurrentJob = nullptr;
     QProgressBar *mProgress = nullptr;
     QLabel *mPercent = nullptr;
+    QLabel *mPersistenceStatus = nullptr;
 };
 
 #endif

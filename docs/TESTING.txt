@@ -1199,3 +1199,71 @@ interactive error dialog; it was corrected and now validates before GUI open.
 After correction and the final integer-precision checks, full Release 59/59 and
 ASan/UBSan 55/55 passed, plus the independently rebuilt regular application's
 MP4/native-AVS smoke. Frame-server timing is a separate pending repair.
+
+Frame serving, effective encoder controls and durable queues (M09/M21/M22-M24/P03)
+--------------------------------------------------------------------------------
+
+Native AVS serving uses its authoritative clip metadata instead of scanning the
+whole graph, while ordinary media establishes one complete index. A billion-frame
+built-in clip verifies prompt startup and cancellable no-reader FIFO serving.
+Actual FIFO consumers check short VFR intervals against pictures at 0 and 1/30 s,
+8/16-bit straight alpha byte-equivalent decoding, decimation, source-rate
+reinterpretation and duration-preserving conversion. Counts use one cumulative
+checked CFR grid; short intervals are not each forced to occupy a tick. This
+protocol remains CFR NUT, with final duration rounded up by less than one tick,
+not a promise of exact VFR timestamps. Existing two-frame/audio server coverage
+remains in stabilization_tests. Physical external consumers are not claimed.
+
+Encoder capability policy and argument construction are shared by Configure and
+both native Fast Recompress/processed exports. Tests verify actual MPEG4 qscale,
+H.264 profile/VBV settings, VP8 constrained quality and VP9/HEVC lossless output,
+dialog choices, legacy fixed-codec schema defaults, unsupported saved modes and
+destination preservation. SVT preset has policy coverage only (encoder absent).
+Uncurated encoders stay available with their own defaults; x264-style options are
+not guessed from a lib-prefixed name. Fast Recompress was not removed.
+
+Queue tests cover 17 escape-heavy diagnostic histories, global count/character
+caps, exact serialized admission, atomic oversized rejection, visible sticky
+save failures and retry, malformed autosave retention, same/cross-process locks,
+secondary-session reuse and Save As protection. Controller tests force initial
+and per-job checkpoint failures and confirm jobs remain pending; Cancel on a
+failed Close retains the window, and storage recovery permits durable completion.
+Old diagnostic text can be trimmed; job snapshots/statuses are never removed for
+log pressure. An unrecoverable old autosave is preserved rather than overwritten.
+
+Focused Release checks passed, then full Release 64/64 and ASan/UBSan 60/60.
+The independently rebuilt regular binary passed MP4/native-AVS raw smoke and
+FFV1/native-AVS raw/encoded smoke. No hardware or leak-sanitizer coverage claimed.
+
+Packaging/runtime checks (Q01/Q03)
+---------------------------------
+
+DEB declares ffmpeg and RPM requires both command paths, not just libraries.
+AppImage deployment includes ffmpeg/ffprobe and a custom launcher with bundled
+tools first. Four launcher contracts pass; missing-tool restricted-PATH smoke
+reproduced the old export failure. Staged AppRun with physically copied commands
+and empty host PATH passed actual raw and eight-frame FFV1 exports. Local system
+libraries were still available, so this is tool routing, not clean deployment.
+New PR checks run Release/sanitizer suites; release gates require real media
+smoke after installation in clean Ubuntu/Fedora containers. Workflow YAML and
+all shell run blocks passed syntax checks. Actual DEB/RPM/AppImage clean runs
+remain unverified locally because Docker/podman/linuxdeploy/dpkg-deb are absent.
+No release publishing, system installation or push was performed.
+
+New independent AviSynth autoload finding
+----------------------------------------
+
+The first startup fixture used built-in WriteFile/current_frame instrumentation.
+Its sanitizer process failed during AVSFunction/Turn_filters static teardown.
+A minimal executable containing no application code reproduces the failure on
+both main and worker threads with the installed local libavisynth.so.12
+(Build ID 66cdf3ab8678e239356abd586fe00ae8a0f6fd0b). With a correctly invoked
+ClearAutoloadDirs and the same script, both installed library versions pass.
+An initial ClearAutoloadDirs probe incorrectly passed a scalar void instead of
+an empty argument array, so it did not disable autoload; those initial failures
+are NOT proof that the built-in filter itself is faulty. Normal system-runtime
+autoload additionally fails in libconvertstacked.so initialization. The precise
+runtime/plugin incompatibility remains unassigned; installed plugins were not
+modified. See AVISYNTH_AUTOLOAD_CHECK.txt for a no-application reproduction.
+The maintained startup regression instead uses huge exact clip metadata and
+does not suppress sanitizer errors or avoid process teardown.

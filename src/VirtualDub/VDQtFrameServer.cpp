@@ -3,6 +3,7 @@
 // requested named pipe. Cancellation closes the pipeline and removes the FIFO.
 #include "VDQtFrameServer.h"
 #include "VDQtFilterFrameContext.h"
+#include "VDQtTimingMath.h"
 
 #include "VDQtVideoDecoder.h"
 
@@ -26,17 +27,26 @@ QString processError(QProcess& process) {
 
 bool writeImage(QProcess& process,
                 const QImage& image,
+                QImage::Format format,
                 std::atomic_bool& cancelled) {
     // QProcess buffers stdin in memory. Bound that buffer so a slow FIFO reader
     // creates backpressure instead of letting a long serve consume all RAM.
-    const QImage rgb = image.convertToFormat(QImage::Format_RGB888);
+    const QImage rgb = image.convertToFormat(format);
+    if (rgb.isNull()) return false;
+    const int bytesPerPixel = format == QImage::Format_RGBA64 ? 8
+        : format == QImage::Format_RGBA8888 ? 4 : 3;
     for (int row = 0; row < rgb.height(); ++row) {
         const char *data = reinterpret_cast<const char *>(rgb.constScanLine(row));
-        qint64 remaining = static_cast<qint64>(rgb.width()) * 3;
+        qint64 remaining = static_cast<qint64>(rgb.width()) * bytesPerPixel;
         while (remaining > 0) {
             if (cancelled.load(std::memory_order_relaxed)) return false;
             const qint64 accepted = process.write(data, remaining);
             if (accepted < 0) return false;
+            if (!accepted) {
+                if (!process.waitForBytesWritten(100) && process.state() == QProcess::NotRunning)
+                    return false;
+                continue;
+            }
             data += accepted;
             remaining -= accepted;
             while (process.bytesToWrite() > 2 * 1024 * 1024) {
@@ -81,6 +91,12 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
         if (errorMessage) *errorMessage = QStringLiteral("The edited timeline contains no frames to serve.");
         return false;
     }
+    if (!std::isfinite(config.customFps) || config.customFps < 0
+        || config.decimateFactor < 1
+        || (config.convertFpsPreserveDuration && config.customFps <= 0)) {
+        if (errorMessage) *errorMessage = QStringLiteral("The frame-server rate settings are invalid.");
+        return false;
+    }
     if (QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
         if (errorMessage) *errorMessage = QStringLiteral("The ffmpeg executable was not found in PATH.");
         return false;
@@ -122,8 +138,9 @@ bool VDQtFrameServer::isRunning() const {
 }
 
 void VDQtFrameServer::run(Config config) {
-    // Phase 1: open the source and make the timeline length exact. A FIFO cannot
-    // revise its declared duration after the consumer has started reading it.
+    // Phase 1: prove ordinary-media count/timestamps once. Native AVS already
+    // has an authoritative clip length and rational CFR clock; ensureFrameIndex
+    // returns that proof without evaluating the entire (possibly heavy) graph.
     QString error;
     VDQtVideoDecoder decoder;
     decoder.setDecompressionConfig(
@@ -134,8 +151,8 @@ void VDQtFrameServer::run(Config config) {
     }
 
     int endFrame = config.endFrame;
-    if (error.isEmpty() && endFrame < 0) {
-        const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
+    if (error.isEmpty()) {
+        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameIndex(
             [this](int, int) {
                 return !mCancelRequested.load(std::memory_order_relaxed);
             });
@@ -143,22 +160,10 @@ void VDQtFrameServer::run(Config config) {
             error = QStringLiteral("Frame serving was cancelled.");
         } else if (!scan.errorMessage.isEmpty()) {
             error = scan.errorMessage;
-        } else {
-            endFrame = decoder.getFrameCount() - 1;
         }
     }
     VDQtTimeline timeline;
     if (error.isEmpty()) {
-        if (!decoder.isFrameCountExact()) {
-            const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
-                [this](int, int) {
-                    return !mCancelRequested.load(std::memory_order_relaxed);
-                });
-            if (scan.cancelled)
-                error = QStringLiteral("Frame serving was cancelled.");
-            else if (!scan.errorMessage.isEmpty())
-                error = scan.errorMessage;
-        }
         timeline.reset(decoder.getFrameCount(), true);
         if (error.isEmpty() && config.hasExplicitTimeline()
             && !timeline.replaceSegments(config.timelineSegments, &error)) {
@@ -181,8 +186,16 @@ void VDQtFrameServer::run(Config config) {
     filters.replaceActiveChainTransient(config.filters);
     const int outputPhases = std::max(
         1, filters.getTimingInfo().outputFramesPerInput);
-    const double sourceFps = decoder.getFps() > 0.0 ? decoder.getFps() : 30.0;
-    const double outputFps = sourceFps * outputPhases;
+    const double nativeFps = decoder.getFps() > 0.0 ? decoder.getFps() : 30.0;
+    const double sourceFps = config.customFps > 0 && !config.convertFpsPreserveDuration
+        ? config.customFps : nativeFps;
+    const int step = config.convertFpsPreserveDuration ? 1 : config.decimateFactor;
+    const double outputFps = (config.convertFpsPreserveDuration
+        ? config.customFps : sourceFps / step) * outputPhases;
+    if (error.isEmpty() && (!std::isfinite(outputFps) || outputFps <= 0))
+        error = QStringLiteral("The frame-server output rate cannot be represented.");
+    const QList<VDQtTimelineSegment> segments = timeline.isIdentity()
+        ? QList<VDQtTimelineSegment>() : timeline.segments();
 
     QList<QImage> firstImages;
     if (error.isEmpty()) {
@@ -190,7 +203,7 @@ void VDQtFrameServer::run(Config config) {
             timeline.mapOutputToSource(config.startFrame));
         const QImage first = decoder.getFrameImage(sourceFrame);
         const VDFilterFrameContext context = VDQtFilterContextForFrame(
-            decoder, timeline.isIdentity() ? QList<VDQtTimelineSegment>() : timeline.segments(), config.startFrame, sourceFps);
+            decoder, segments, config.startFrame, sourceFps);
         if (first.isNull() || !filters.processFrameSequence(first, firstImages, context)
             || firstImages.isEmpty() || firstImages.first().isNull()) {
             error = QStringLiteral("Could not prepare the first served frame.");
@@ -202,14 +215,27 @@ void VDQtFrameServer::run(Config config) {
     // real muxer supplies timestamps and stream metadata that raw FIFO bytes do
     // not carry, while keeping video processing inside this application.
     QProcess ffmpeg;
+    QImage::Format imageFormat = QImage::Format_RGB888;
+    QString pixelFormat = QStringLiteral("rgb24");
+    if (!firstImages.isEmpty() && firstImages.first().depth() > 32) {
+        imageFormat = QImage::Format_RGBA64;
+#if Q_BYTE_ORDER == Q_BIG_ENDIAN
+        pixelFormat = QStringLiteral("rgba64be");
+#else
+        pixelFormat = QStringLiteral("rgba64le");
+#endif
+    } else if (!firstImages.isEmpty() && firstImages.first().hasAlphaChannel()) {
+        imageFormat = QImage::Format_RGBA8888;
+        pixelFormat = QStringLiteral("rgba");
+    }
     if (error.isEmpty()) {
         const QSize size = firstImages.first().size();
         QStringList arguments{
             QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
             QStringLiteral("-f"), QStringLiteral("rawvideo"),
-            QStringLiteral("-pixel_format"), QStringLiteral("rgb24"),
+            QStringLiteral("-pixel_format"), pixelFormat,
             QStringLiteral("-video_size"), QString("%1x%2").arg(size.width()).arg(size.height()),
-            QStringLiteral("-framerate"), QString::number(outputFps, 'f', 12),
+            QStringLiteral("-framerate"), QString::number(outputFps, 'g', 17),
             QStringLiteral("-i"), QStringLiteral("pipe:0")
         };
         const bool hasAudio = !config.audioPath.isEmpty()
@@ -220,7 +246,8 @@ void VDQtFrameServer::run(Config config) {
         if (hasAudio)
             arguments << QStringLiteral("-map") << QStringLiteral("1:a:0");
         arguments << QStringLiteral("-c:v") << QStringLiteral("rawvideo")
-                  << QStringLiteral("-pix_fmt") << QStringLiteral("rgb24");
+                  << QStringLiteral("-pix_fmt") << pixelFormat
+                  << QStringLiteral("-threads:v") << QStringLiteral("1");
         if (hasAudio) {
             arguments << QStringLiteral("-af") << QStringLiteral("apad")
                       << QStringLiteral("-c:a") << QStringLiteral("pcm_s16le")
@@ -241,9 +268,15 @@ void VDQtFrameServer::run(Config config) {
     // stateful filters and the decoder's sequential fast path depend on order.
     if (error.isEmpty()) Q_EMIT serverStarted(config.pipePath);
     QSize outputSize = firstImages.isEmpty() ? QSize() : firstImages.first().size();
-    for (int frameIndex = config.startFrame;
-         error.isEmpty() && frameIndex <= endFrame;
-         ++frameIndex) {
+    const int outputDepth = firstImages.isEmpty() ? 0 : firstImages.first().depth();
+    const bool outputAlpha = !firstImages.isEmpty() && firstImages.first().hasAlphaChannel();
+    long double elapsed = 0;
+    int64_t emitted = 0;
+    // Widen the loop/chunk boundary before adding a potentially maximal step.
+    for (int64_t ordinal = config.startFrame;
+         error.isEmpty() && ordinal <= endFrame;
+         ordinal += step) {
+        const int frameIndex = static_cast<int>(ordinal);
         if (mCancelRequested.load(std::memory_order_relaxed)) {
             error = QStringLiteral("Frame serving was stopped.");
             break;
@@ -256,7 +289,7 @@ void VDQtFrameServer::run(Config config) {
                 timeline.mapOutputToSource(frameIndex));
             const QImage frame = decoder.getFrameImage(sourceFrame);
             const VDFilterFrameContext context = VDQtFilterContextForFrame(
-                decoder, timeline.isIdentity() ? QList<VDQtTimelineSegment>() : timeline.segments(), frameIndex, sourceFps);
+                decoder, segments, frameIndex, sourceFps);
             if (frame.isNull() || !filters.processFrameSequence(frame, images, context)
                 || images.isEmpty()) {
                 error = QString("Could not decode frame %1.").arg(frameIndex);
@@ -264,44 +297,61 @@ void VDQtFrameServer::run(Config config) {
                 break;
             }
         }
+        if (images.size() != outputPhases) {
+            error = QStringLiteral("The filter chain changed its output phase count while frame serving.");
+            break;
+        }
         for (const QImage& image : images) {
-            if (image.isNull() || image.size() != outputSize) {
+            if (image.isNull() || image.size() != outputSize
+                || image.depth() != outputDepth || image.hasAlphaChannel() != outputAlpha) {
                 error = QStringLiteral(
-                    "The filter chain changed dimensions while frame serving.");
+                    "The filter chain changed dimensions or pixel precision while frame serving.");
                 break;
             }
         }
         if (!error.isEmpty()) break;
 
-        // NUT/rawvideo is CFR. Duplicate phases as needed so VFR timestamp
-        // gaps retain their displayed duration instead of collapsing time.
-        const int sourceFrame = static_cast<int>(
-            timeline.mapOutputToSource(frameIndex));
-        double duration = config.preserveEmptyFrames
-            ? decoder.getFrameDurationSeconds(sourceFrame)
-            : 1.0 / sourceFps;
-        if (!std::isfinite(duration) || duration <= 0.0)
-            duration = 1.0 / sourceFps;
-        const int emittedFrames = std::max(
-            static_cast<int>(images.size()),
-            static_cast<int>(std::llround(duration * outputFps)));
-        for (int outputIndex = 0; outputIndex < emittedFrames; ++outputIndex) {
-            const int phase = std::min(
-                static_cast<int>(images.size()) - 1,
-                outputIndex * static_cast<int>(images.size()) / emittedFrames);
-            if (!writeImage(ffmpeg, images.at(phase), mCancelRequested)) {
-                error = mCancelRequested.load(std::memory_order_relaxed)
-                    ? QStringLiteral("Frame serving was stopped.")
-                    : processError(ffmpeg);
+        // This server's documented wire format is CFR NUT, not exact VFR.
+        // Sample a single cumulative clock: short phases may have no output
+        // tick, long phases repeat, and masks retain their advancing edit time.
+        const qint64 chunkEnd = std::min<int64_t>(int64_t(endFrame) + 1, ordinal + step);
+        double duration = (chunkEnd - ordinal) / sourceFps;
+        if (config.preserveEmptyFrames) {
+            const auto begin = VDQtFilterContextForFrame(decoder, segments, ordinal, sourceFps);
+            const auto end = VDQtFilterContextForFrame(decoder, segments, chunkEnd, sourceFps);
+            const double actual = end.timestampSeconds - begin.timestampSeconds;
+            if (std::isfinite(actual) && actual > 0) duration = actual;
+        }
+        if (!std::isfinite(duration) || duration <= 0) {
+            error = QStringLiteral("The served frame duration cannot be represented.");
+            break;
+        }
+        for (int phase = 0; phase < images.size(); ++phase) {
+            const long double boundary = elapsed
+                + static_cast<long double>(duration) * (phase + 1) / images.size();
+            int64_t through = 0;
+            if (!VDQtCfrBoundaryFrames(boundary, outputFps, &through) || through < emitted) {
+                error = QStringLiteral("The frame-server clock exceeds the supported timestamp range.");
                 break;
             }
+            while (emitted < through) {
+                if (!writeImage(ffmpeg, images.at(phase), imageFormat, mCancelRequested)) {
+                    error = mCancelRequested.load(std::memory_order_relaxed)
+                        ? QStringLiteral("Frame serving was stopped.")
+                        : QStringLiteral("Could not write the served frame: %1").arg(processError(ffmpeg));
+                    break;
+                }
+                ++emitted;
+            }
+            if (!error.isEmpty()) break;
         }
+        elapsed += duration;
     }
 
     if (ffmpeg.state() != QProcess::NotRunning) {
         if (error.isEmpty()) {
             ffmpeg.closeWriteChannel();
-            while (!ffmpeg.waitForFinished(100)) {
+            while (ffmpeg.state() != QProcess::NotRunning && !ffmpeg.waitForFinished(100)) {
                 if (mCancelRequested.load(std::memory_order_relaxed)) {
                     error = QStringLiteral("Frame serving was stopped.");
                     ffmpeg.kill();
@@ -309,7 +359,7 @@ void VDQtFrameServer::run(Config config) {
                     break;
                 }
             }
-            if (error.isEmpty() && ffmpeg.exitCode() != 0)
+            if (error.isEmpty() && (ffmpeg.exitCode() != 0 || ffmpeg.exitStatus() != QProcess::NormalExit))
                 error = processError(ffmpeg);
         } else {
             ffmpeg.kill();

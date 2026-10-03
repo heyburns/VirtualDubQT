@@ -631,15 +631,32 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
     createStatusBar();
 
     mJobQueue = new VDQtJobQueue(this);
+    // A persistent, non-modal warning survives transient status messages even
+    // when Job Control is closed. Encoding must not continue past a failed
+    // durable checkpoint; users can retry or rescue the list with Save As.
+    auto *queueWarning = new QLabel(this);
+    queueWarning->setObjectName(QStringLiteral("queuePersistenceWarning"));
+    queueWarning->setStyleSheet(QStringLiteral("color: #c43b3b;"));
+    queueWarning->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    statusBar()->addPermanentWidget(queueWarning);
+    queueWarning->hide();
+    connect(mJobQueue, &VDQtJobQueue::persistenceStatusChanged, this,
+        [this, queueWarning](const QString& error) {
+            queueWarning->setText(error.isEmpty() ? QString()
+                : QStringLiteral("Job queue is not saved"));
+            queueWarning->setToolTip(error);
+            queueWarning->setVisible(!error.isEmpty());
+            if (!error.isEmpty()) VDLogWindow::instance(this)->appendLog(
+                QStringLiteral("[Job queue] Durable save failed: %1").arg(error));
+        });
     const QString queueDirectory = QStandardPaths::writableLocation(
         QStandardPaths::AppDataLocation);
     if (!queueDirectory.isEmpty()) {
         QDir().mkpath(queueDirectory);
         mJobQueue->setAutosavePath(
             QDir(queueDirectory).filePath(QStringLiteral("VirtualDub.vdqjobs")));
-        mRecoveryPath = QDir(queueDirectory).filePath(
-            QStringLiteral("crash-recovery.vdqproject"));
-        mRecoverySnapshotProtected = QFileInfo::exists(mRecoveryPath);
+        mRecoveryPath = mJobQueue->recoveryPath();
+        mRecoverySnapshotProtected = !mRecoveryPath.isEmpty() && QFileInfo::exists(mRecoveryPath);
     }
     connect(mJobQueue, &VDQtJobQueue::runRequested,
             this, &VDQtMainWindow::runPendingJobs);
@@ -4301,6 +4318,12 @@ void VDQtMainWindow::runPendingJobs() {
     }
     if (mJobQueue->pendingCount() <= 0) return;
 
+    QString checkpointError;
+    if (!mJobQueue->flush(&checkpointError)) {
+        statusBar()->showMessage(QStringLiteral("Job queue was not started: its list could not be saved."));
+        return;
+    }
+
     mPlaybackTimer->stop();
     mAudioPlayer.stop();
     mQueueStopRequested = false;
@@ -4323,6 +4346,12 @@ void VDQtMainWindow::runPendingJobs() {
             row, QStringLiteral("[%1] Starting %2")
                      .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
                           VDQtJobQueue::operationText(job.operation)));
+        // Publish intent before any output work. A failed checkpoint leaves
+        // the job pending and never starts an encoder or replaces a file.
+        if (!mJobQueue->flush(&checkpointError)) {
+            mJobQueue->setJobStatus(row, VDQtJobStatus::Pending);
+            break;
+        }
         mJobQueue->setJobStatus(row, VDQtJobStatus::Running);
         QCoreApplication::processEvents();
 
@@ -4346,7 +4375,7 @@ void VDQtMainWindow::runPendingJobs() {
                 row, QStringLiteral("[%1] Failed: %2")
                          .arg(QDateTime::currentDateTime().toString(Qt::ISODate), error));
         }
-        mJobQueue->flush(nullptr);
+        if (!mJobQueue->flush(&checkpointError)) break;
         QCoreApplication::processEvents();
         if (mQueueStopRequested) break;
     }
@@ -4355,8 +4384,12 @@ void VDQtMainWindow::runPendingJobs() {
     mJobQueue->setRunning(false);
     mQueueAbortRequested = false;
     mQueueStopRequested = false;
-    mJobQueue->flush(nullptr);
-    statusBar()->showMessage(QStringLiteral("Job queue run finished"));
+    QString finalSaveError;
+    if (!mJobQueue->flush(&finalSaveError) && checkpointError.isEmpty())
+        checkpointError = finalSaveError;
+    statusBar()->showMessage(checkpointError.isEmpty()
+        ? QStringLiteral("Job queue run finished")
+        : QStringLiteral("Job queue stopped because its durable save failed. Check Job Control or the log."));
     if (mCloseAfterQueueStops) {
         mCloseAfterQueueStops = false;
         QTimer::singleShot(0, this, &QWidget::close);
@@ -4992,6 +5025,10 @@ bool VDQtMainWindow::startFrameServerAtPath(
     config.errorMode = mDecoderErrorModeConfig.errorMode;
     config.filters = VDQtFilterSystem::instance().getActiveChain();
     config.preserveEmptyFrames = mPreserveEmptyFrames;
+    const auto rateOptions = currentExportOptions(QString(), QString(), false);
+    config.customFps = rateOptions.customFps;
+    config.convertFpsPreserveDuration = rateOptions.convertFpsPreserveDuration;
+    config.decimateFactor = rateOptions.decimateFactor;
     config.timelineExplicit = mTimeline.isModified();
     if (config.timelineExplicit) config.timelineSegments = mTimeline.segments();
 
@@ -5098,9 +5135,20 @@ void VDQtMainWindow::closeEvent(QCloseEvent *event) {
     }
     if (mJobQueue) {
         QString error;
-        if (!mJobQueue->flush(&error) && !error.isEmpty())
+        if (!mJobQueue->flush(&error)) {
             VDLogWindow::instance(this)->appendLog(
                 QStringLiteral("[Job queue] Save failed: %1").arg(error));
+            const auto answer = QMessageBox::warning(this,
+                QStringLiteral("Job Queue Not Saved"),
+                QStringLiteral("The job list could not be saved:\n%1\n\n"
+                    "Choose Cancel to keep the application open and save the list "
+                    "elsewhere from Job Control. Discard closes the application without saving queue changes.").arg(error),
+                QMessageBox::Cancel | QMessageBox::Discard, QMessageBox::Cancel);
+            if (answer != QMessageBox::Discard) {
+                event->ignore();
+                return;
+            }
+        }
     }
     QMainWindow::closeEvent(event);
     if (event->isAccepted()) {

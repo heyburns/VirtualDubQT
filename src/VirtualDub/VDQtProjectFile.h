@@ -9,6 +9,7 @@
 #include "VDQtVideoExporter.h"
 
 #include <QMap>
+#include <QByteArray>
 #include <QDateTime>
 #include <QString>
 #include <QStringList>
@@ -141,6 +142,14 @@ public:
     static bool saveJobQueue(
         const QString& path,
         const QList<VDQtJobState>& jobs,
+        QString *errorMessage = nullptr);
+    // The queue uses exactly the writer's representation for admission checks,
+    // including relative paths and JSON escaping; character counts alone do
+    // not bound a UTF-8 settings file.
+    static bool serializeJobQueue(
+        const QString& path,
+        const QList<VDQtJobState>& jobs,
+        QByteArray *serialized,
         QString *errorMessage = nullptr);
     static bool loadJobQueue(
         const QString& path,

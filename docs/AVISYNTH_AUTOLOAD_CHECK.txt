@@ -1,0 +1,69 @@
+Independent installed-runtime/plugin autoload check (2026-10-03)
+================================================================
+
+This is a dependency diagnostic, not an application regression or a proposed
+plugin removal. It does not use VirtualDubQT classes, filters or worker setup.
+Everything written belongs in a disposable temporary directory. Do not change
+installed plugins just to make this check pass.
+
+With the installed local libavisynth.so.12, Import + GetFrame(0) + normal release
+of the script below passes until process exit, where ASan reports a double-free
+in AVSFunction::~AVSFunction and __tcfTurn_filters. Allocation happens on the
+calling thread. Main-thread and QThread cases reproduce; warming the main thread
+first does not help. A BlankClip-only control passes. With plugin autoload
+cleared CORRECTLY before Import, the WriteFile script also passes. This does not
+establish which particular plugin/library is responsible or prove a fault in
+the upstream built-in WriteFile implementation.
+
+Disposable script (replace LOG_PATH with an absolute test-owned path):
+
+  BlankClip(length=8,width=64,height=48,pixel_type="RGB24",fps=25,audio_rate=0)
+  WriteFile("LOG_PATH","current_frame",append=false,flush=true)
+
+Minimal C++ probe (argv[1] is that disposable script; argv[2] disables autoload):
+
+  #include <avisynth/avisynth_c.h>
+  #include <cstdio>
+  int main(int argc, char **argv) {
+      if (argc < 2) return 2;
+      auto *env = avs_create_script_environment(AVISYNTH_INTERFACE_VERSION);
+      if (!env) return 3;
+      if (argc > 2) {
+          // An empty array means zero arguments. avs_void is ONE scalar
+          // argument and can fail lookup, triggering autoload instead.
+          auto result = avs_invoke(env, "ClearAutoloadDirs",
+              avs_new_value_array(nullptr, 0), nullptr);
+          if (avs_is_error(result)) {
+              std::fprintf(stderr, "%s\n", avs_as_string(result));
+              avs_release_value(result);
+              avs_delete_script_environment(env);
+              return 4;
+          }
+          avs_release_value(result);
+      }
+      auto value = avs_invoke(env, "Import", avs_new_value_string(argv[1]), nullptr);
+      bool ok = avs_is_clip(value);
+      if (ok) {
+          auto *clip = avs_take_clip(value, env);
+          auto *frame = avs_get_frame(clip, 0);
+          ok = frame != nullptr;
+          if (frame) avs_release_video_frame(frame);
+          avs_release_clip(clip);
+      } else if (avs_is_error(value)) {
+          std::fprintf(stderr, "%s\n", avs_as_string(value));
+      }
+      avs_release_value(value);
+      avs_delete_script_environment(env);
+      return ok ? 0 : 1;
+  }
+
+Compile with the SAME installed runtime/header pair as the application and
+-fsanitize=address,undefined, then run with ASAN_OPTIONS=detect_leaks=0. This
+check does not claim leak detection (unavailable in this tracing environment).
+The local library Build ID was 66cdf3ab8678e239356abd586fe00ae8a0f6fd0b; system
+libavisynth.so.11 was c9dfb7daef7ac8827886ad84f2dd521bc9f994fa. The latter fails
+earlier in libconvertstacked.so when autoload remains enabled, so that failure
+must not be confused with the local library's exit-time double-free.
+
+Official autoload semantics:
+https://avisynthplus.readthedocs.io/en/3.7/avisynthdoc/syntax/syntax_plugins.html

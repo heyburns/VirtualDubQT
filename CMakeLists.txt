@@ -212,10 +212,14 @@ set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+# Shared-library dependency scanners cannot discover commands launched through
+# QProcess. Native packages must install both ffmpeg and ffprobe as well.
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "ffmpeg (>= 6.0)")
 
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
+set(CPACK_RPM_PACKAGE_REQUIRES "/usr/bin/ffmpeg, /usr/bin/ffprobe")
 
 include(CPack)
 
@@ -275,6 +279,14 @@ if (BUILD_TESTING)
     set_tests_properties(filter_cache_tests PROPERTIES
         LABELS "filters;cache;performance;contracts" TIMEOUT 60)
 
+    add_executable(frame_server_contract_tests
+        tests/test_frame_server_contracts.cpp tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(frame_server_contract_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(frame_server_contract_tests)
+    add_test(NAME frame_server_contract_tests COMMAND frame_server_contract_tests)
+    set_tests_properties(frame_server_contract_tests PROPERTIES
+        LABELS "avs;serving;performance;contracts" TIMEOUT 60)
+
     add_executable(timeline_contract_tests
         tests/test_timeline_contract.cpp
         src/VirtualDub/VDQtTimeline.cpp)
@@ -324,7 +336,33 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+
+    add_executable(queue_durability_tests tests/test_queue_durability.cpp)
+    target_link_libraries(queue_durability_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(queue_durability_tests)
+    add_test(NAME queue_durability_tests COMMAND queue_durability_tests)
+    set_tests_properties(queue_durability_tests PROPERTIES
+        LABELS "queue;contracts;durability" TIMEOUT 60)
+
+    add_executable(codec_controls_tests tests/test_codec_controls.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(codec_controls_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(codec_controls_tests)
+    add_test(NAME codec_controls_tests COMMAND codec_controls_tests)
+    set_tests_properties(codec_controls_tests PROPERTIES
+        LABELS "encoder;export;dialog;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME package_runtime_contract_tests
+            COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_package_runtime.py -v)
+        set_tests_properties(package_runtime_contract_tests PROPERTIES
+            LABELS "packaging;runtime;contracts" TIMEOUT 15
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES

@@ -22,6 +22,50 @@ VDQtCodecEngine& VDQtCodecEngine::instance() {
     return inst;
 }
 
+VDVideoCodecCapabilities VDQtCodecEngine::getVideoCapabilities(const QString& codecId) {
+    VDVideoCodecCapabilities result;
+    const QString id = codecId.trimmed().toLower();
+    if (id == "libx264" || id == "libx264_10bit"
+        || id == "libx265" || id == "libx265_lossless") {
+        result.rateModes = id == "libx265_lossless"
+            ? QStringList{"lossless"} : QStringList{"crf", "bitrate", "cqp", "lossless"};
+        result.qualityMaximum = 51;
+        result.presets = {"ultrafast", "superfast", "veryfast", "faster", "fast",
+                          "medium", "slow", "slower", "veryslow", "placebo"};
+        result.tunes = id.startsWith("libx265")
+            ? QStringList{"psnr", "ssim", "grain", "fastdecode", "zerolatency", "animation"}
+            : QStringList{"film", "animation", "grain", "stillimage", "psnr",
+                          "ssim", "fastdecode", "zerolatency"};
+        result.profiles = id.startsWith("libx265")
+            ? QStringList{"main", "main10", "main12", "main422-10", "main422-12",
+                          "main444-8", "main444-10", "main444-12"}
+            : QStringList{"baseline", "main", "high", "high10", "high422", "high444"};
+        result.supportsMaxBitrate = id != "libx265_lossless";
+        result.supportsTwoPass = id != "libx265_lossless";
+        result.supportsKeyframes = result.supportsBFrames = true;
+    } else if (id == "libvpx" || id == "libvpx-vp9") {
+        result.rateModes = {"crf", "bitrate"};
+        if (id == "libvpx-vp9") result.rateModes.append("lossless");
+        result.supportsMaxBitrate = result.supportsTwoPass = true;
+        result.supportsKeyframes = true;
+    } else if (id == "libsvtav1") {
+        result.rateModes = {"crf", "bitrate", "cqp"};
+        for (int preset = 0; preset <= 13; ++preset)
+            result.presets.append(QString::number(preset));
+        result.supportsKeyframes = true;
+    } else if (id == "mpeg4" || id == "mpeg2video" || id == "mpeg1video") {
+        result.rateModes = {"cqp", "bitrate"};
+        result.qualityMinimum = 1;
+        result.qualityMaximum = 31;
+        result.supportsMaxBitrate = result.supportsKeyframes = result.supportsBFrames = true;
+    } else if (id == "mjpeg") {
+        result.rateModes = {"cqp"};
+        result.qualityMinimum = 1;
+        result.qualityMaximum = 31;
+    }
+    return result;
+}
+
 // -----------------------------------------------------------------------------
 // Runtime encoder catalog
 // -----------------------------------------------------------------------------
@@ -85,10 +129,12 @@ QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
             && (descriptor->props & AV_CODEC_PROP_LOSSLESS);
         const QString longName = codec->long_name
             ? QString::fromUtf8(codec->long_name) : id;
-        const bool controls = id.startsWith(QStringLiteral("lib"));
+        const auto controls = getVideoCapabilities(id);
         discovered.append({id, longName,
             QStringLiteral("Installed FFmpeg video encoder (%1).").arg(id),
-            controls, !lossless, controls, controls, controls, lossless});
+            controls.rateModes.contains("crf"), controls.rateModes.contains("bitrate"),
+            !controls.presets.isEmpty(), !controls.tunes.isEmpty(),
+            !controls.profiles.isEmpty(), lossless});
         included.insert(id);
     }
     std::sort(discovered.begin(), discovered.end(),
@@ -159,6 +205,12 @@ QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
 VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &codecId) {
     VDVideoCodecParams p;
     p.codecId = codecId;
+    // Fields from other codec families are retained in the saved schema for
+    // compatibility, but neutral defaults must not look like active controls.
+    p.rateMode = "default";
+    p.preset.clear();
+    p.profile.clear();
+    p.tune = "none";
     if (codecId == "libx264" || codecId == "libx264_10bit") {
         p.rateMode = "crf";
         p.crf = 23;
@@ -225,9 +277,15 @@ VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString 
         p.cineformQuality = 3;
         p.pixFmt = "yuv422p10le";
         p.keyframeInterval = 1;
+    } else if (codecId == "mpeg4" || codecId == "mpeg2video" || codecId == "mpeg1video"
+               || codecId == "mjpeg") {
+        p.rateMode = "cqp";
+        p.crf = 5; // Native MPEG/MJPEG qscale, not an x264-style CRF value.
+        p.pixFmt = codecId == "mjpeg" ? "yuvj420p" : "yuv420p";
+        p.keyframeInterval = codecId == "mjpeg" ? 0 : 250;
     } else {
         p.pixFmt = "yuv420p";
-        p.keyframeInterval = 250;
+        p.keyframeInterval = 0;
     }
     return p;
 }
@@ -298,6 +356,138 @@ VDAudioCodecParams VDQtCodecEngine::audioParamsFromConfig(
 // -----------------------------------------------------------------------------
 // FFmpeg command-line translation and capability checks
 // -----------------------------------------------------------------------------
+
+bool VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
+    const VDVideoCodecParams& params, bool preserveNativeVfr,
+    QStringList *arguments, QString *errorMessage)
+{
+    const QString id = params.codecId.trimmed().toLower();
+    const auto capabilities = getVideoCapabilities(id);
+    const auto fail = [&](const QString& message) {
+        if (errorMessage) *errorMessage = QStringLiteral("%1: %2").arg(params.codecId, message);
+        return false;
+    };
+    if (!arguments) return fail(QStringLiteral("No encoder argument destination was supplied."));
+    const bool fixedMode = capabilities.rateModes == QStringList{"default"};
+    // Old files inherited CRF 23/preset medium/profile high even for intra-frame
+    // encoders with their own quality controls. These inert schema defaults are
+    // accepted, but a non-default ignored rate request is not.
+    const bool legacyFixedDefault = fixedMode && params.rateMode == "crf" && params.crf == 23;
+    const bool intrinsicLossless = (id == "ffv1" || id == "huffyuv" || id == "rawvideo"
+        || id == "(uncompressed)" || id == "uncompressed" || id.isEmpty())
+        && params.rateMode == "lossless";
+    if (!capabilities.rateModes.contains(params.rateMode) && !legacyFixedDefault && !intrinsicLossless)
+        return fail(QStringLiteral("Rate-control mode '%1' is unsupported. Available modes: %2.")
+                    .arg(params.rateMode, capabilities.rateModes.join(", ")));
+    if ((params.rateMode == "crf" || params.rateMode == "cqp") && !fixedMode
+        && (params.crf < capabilities.qualityMinimum || params.crf > capabilities.qualityMaximum))
+        return fail(QStringLiteral("Quality must be between %1 and %2.")
+                    .arg(capabilities.qualityMinimum).arg(capabilities.qualityMaximum));
+    if (params.targetBitrateKbps < 0 || params.targetBitrateKbps > 1000000
+        || params.maxBitrateKbps < 0 || params.maxBitrateKbps > 1000000)
+        return fail(QStringLiteral("Bitrates must be between 0 and 1000000 kbps."));
+    if (params.rateMode == "bitrate" && params.targetBitrateKbps == 0)
+        return fail(QStringLiteral("Target bitrate must be greater than zero."));
+    if (id == "libvpx" && params.rateMode == "crf" && params.targetBitrateKbps == 0)
+        return fail(QStringLiteral("VP8 constrained quality also requires a positive target bitrate."));
+    if (params.maxBitrateKbps > 0) {
+        if (!capabilities.supportsMaxBitrate || params.rateMode == "cqp" || params.rateMode == "lossless")
+            return fail(QStringLiteral("A maximum bitrate is unsupported in the selected mode."));
+        if (params.rateMode == "bitrate" && params.maxBitrateKbps < params.targetBitrateKbps)
+            return fail(QStringLiteral("Maximum bitrate cannot be lower than the target bitrate."));
+        if (id.startsWith("libvpx") && params.rateMode != "bitrate")
+            return fail(QStringLiteral("VP8/VP9 maximum bitrate requires bitrate mode."));
+    }
+    if (params.twoPass && (!capabilities.supportsTwoPass || params.rateMode != "bitrate"))
+        return fail(QStringLiteral("Two-pass encoding requires a supported encoder in bitrate mode."));
+    const auto validateChoice = [&](const QString& value, const QStringList& choices,
+                                    const QString& neutral, const QString& label) {
+        if (value.isEmpty() || value == neutral) return true;
+        if (choices.isEmpty() || !choices.contains(value))
+            return fail(QStringLiteral("Unsupported %1 '%2'.").arg(label, value));
+        return true;
+    };
+    if (!validateChoice(params.preset, capabilities.presets,
+                        capabilities.presets.isEmpty() ? "medium" : QString(), "preset")
+        || !validateChoice(params.tune, capabilities.tunes, "none", "tune")
+        || !validateChoice(params.profile, capabilities.profiles,
+                           capabilities.profiles.isEmpty() ? "high" : QString(), "profile")) return false;
+    if (params.keyframeInterval < 0 || params.keyframeInterval > 10000
+        || params.bFrames < 0 || params.bFrames > 16)
+        return fail(QStringLiteral("Keyframe interval must be 0..10000 and B-frames 0..16."));
+    if (!capabilities.supportsBFrames && params.bFrames > 0)
+        return fail(QStringLiteral("B-frame control is unsupported by this encoder."));
+    if (!capabilities.supportsKeyframes && params.keyframeInterval > 1)
+        return fail(QStringLiteral("Keyframe control is unsupported by this encoder."));
+    const bool x264 = id == "libx264" || id == "libx264_10bit";
+    const bool x265 = id == "libx265" || id == "libx265_lossless";
+    if (x264 && (params.rateMode == "lossless"
+        || (params.rateMode == "cqp" && params.crf == 0))
+        && !params.profile.isEmpty() && params.profile != "high444")
+        return fail(QStringLiteral("Lossless x264 requires the encoder-default or high444 profile."));
+
+    QStringList result;
+    const QString encoder = id == "libx264_10bit" ? QStringLiteral("libx264")
+        : id == "libx265_lossless" ? QStringLiteral("libx265")
+        : (id.isEmpty() || id == "(uncompressed)" || id == "uncompressed")
+            ? QStringLiteral("rawvideo") : id;
+    result << "-c:v" << encoder;
+    if (id == "prores_ks") {
+        if (params.proresProfile < 0 || params.proresProfile > 5)
+            return fail(QStringLiteral("ProRes profile must be 0..5."));
+        result << "-profile:v" << QString::number(params.proresProfile);
+        if (!params.proresVendor.isEmpty()) result << "-vendor" << params.proresVendor;
+    } else if (id == "ffv1") {
+        if ((params.ffv1Version != 1 && params.ffv1Version != 3)
+            || params.ffv1Coder < 0 || params.ffv1Coder > 1
+            || !QList<int>{1, 4, 6, 9, 12, 16, 24, 30}.contains(params.ffv1Slices))
+            return fail(QStringLiteral("Invalid FFV1 version, coder or slice count."));
+        result << "-level" << QString::number(params.ffv1Version)
+               << "-coder" << QString::number(params.ffv1Coder)
+               << "-slices" << QString::number(params.ffv1Slices);
+    } else if (id == "huffyuv") {
+        if (params.huffyuvPredictor < 0 || params.huffyuvPredictor > 2)
+            return fail(QStringLiteral("HuffYUV predictor must be 0..2."));
+        result << "-pred" << QString::number(params.huffyuvPredictor);
+    } else if (id == "cfhd") {
+        if (params.cineformQuality < 0 || params.cineformQuality > 12)
+            return fail(QStringLiteral("CineForm quality must be 0..12."));
+        result << "-quality" << QString::number(params.cineformQuality);
+    } else if (params.rateMode == "lossless") {
+        if (x264) result << "-qp" << "0";
+        else if (x265) result << "-x265-params" << "lossless=1";
+        else if (id == "libvpx-vp9") result << "-lossless" << "1" << "-b:v" << "0";
+    } else if (params.rateMode == "bitrate") {
+        result << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
+    } else if (params.rateMode == "crf" && !fixedMode) {
+        result << "-crf" << QString::number(params.crf);
+        if (id == "libvpx") result << "-b:v" << QString("%1k").arg(params.targetBitrateKbps);
+        else if (id == "libvpx-vp9" || id == "libsvtav1") result << "-b:v" << "0";
+    } else if (params.rateMode == "cqp") {
+        result << ((x264 || x265 || id == "libsvtav1") ? "-qp" : "-q:v")
+               << QString::number(params.crf);
+        if (id == "libsvtav1") result << "-b:v" << "0";
+    }
+    if (!capabilities.presets.isEmpty() && !params.preset.isEmpty())
+        result << "-preset" << params.preset;
+    if (!capabilities.tunes.isEmpty() && !params.tune.isEmpty() && params.tune != "none")
+        result << "-tune" << params.tune;
+    if (!capabilities.profiles.isEmpty() && !params.profile.isEmpty())
+        result << "-profile:v" << params.profile;
+    if (params.maxBitrateKbps > 0) {
+        // FFmpeg requires a VBV buffer with maxrate. Use an explicit two-second
+        // reservoir; multiply in 64 bits rather than overflowing an int.
+        result << "-maxrate" << QString("%1k").arg(params.maxBitrateKbps)
+               << "-bufsize" << QString("%1k").arg(qint64(params.maxBitrateKbps) * 2);
+    }
+    if (capabilities.supportsKeyframes && params.keyframeInterval > 0)
+        result << "-g" << QString::number(params.keyframeInterval);
+    if (capabilities.supportsBFrames)
+        result << "-bf" << QString::number(preserveNativeVfr ? 0 : params.bFrames);
+    *arguments = result;
+    if (errorMessage) errorMessage->clear();
+    return true;
+}
 
 QStringList VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
     const VDAudioCodecParams& params)

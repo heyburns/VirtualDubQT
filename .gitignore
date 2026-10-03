@@ -42,3 +42,4 @@ CMakeLists.txt.user
 /tmp/
 *.log
 devel/
+__pycache__/

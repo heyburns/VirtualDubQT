@@ -64,6 +64,25 @@ The local frame server and some export subprocess pipelines use additional
 worker threads or child `ffmpeg` processes. Their owners synchronously cancel
 and join them during teardown.
 
+Serving uses exact native AVS metadata without evaluating the whole graph and
+indexes ordinary media once. Its documented wire format is CFR NUT: a cumulative
+sample grid repeats long VFR intervals and can omit short ones. Expanded filter
+phases are sampled in their own intervals; alpha/16-bit RGB is not forced to
+RGB24. Existing reinterpretation, conversion and decimation settings determine
+the output clock. Unrepresentable counts/rates fail before narrowing.
+
+Encoder capabilities and validated arguments live in `VDQtCodecEngine`, shared
+by Configure, native Fast Recompress and processed/two-pass export. Unknown
+encoder families retain their defaults rather than guessed x264 controls.
+
+`VDQtJobQueue` owns a lifetime QLockFile. Concurrent editors use independent
+paired queue/recovery paths, with an empty marker making a recovery-only session
+discoverable after a crash. Structural snapshots have a serialized admission
+budget; global diagnostic retention leaves space under the JSON document cap.
+Save failures are sticky and visible even with Job Control closed. The runner
+checkpoints before encoding and after completion, stopping on failure. Malformed
+old autosaves are protected, and Close defaults to keeping an unsaved editor open.
+
 ## Source-open lifecycle
 
 Source replacement is serialized by `SourceTransitionScope`. Public Open/Close

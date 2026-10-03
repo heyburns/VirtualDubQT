@@ -71,9 +71,11 @@ Remaining execution sequence
     Explicit user overrides remain authoritative; unsupported matrices report an error.
 [x] M11: native integer AVS grayscale/planar RGB/YUV/alpha layouts render at 8-16 bits.
     Unsupported floating-point video fails clearly at open, not as a null preview.
-[ ] M09/M13: aspect metadata and effective codec controls.
+[x] M09: encoder-specific effective codec controls and shared validated arguments.
+    Unsupported saved combinations report errors; Fast Recompress remains intact.
+[ ] M13: source/display/export pixel-aspect metadata.
 [x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
-[ ] M21: safe numeric conversion throughout execution, saved inputs and runtime calculations.
+[x] M21: known numeric conversion defects in saved inputs and runtime calculations.
     Project/job positions, segments and raw offsets now reject unsafe casts,
     fractions and wrong types before conversion. Script integer domains now
     preflight before execution. Processing/codec integer selectors and saved
@@ -82,11 +84,17 @@ Remaining execution sequence
     time-to-sample rounding are bounded, and temporal-history increments are safe.
     Export counts, audio sample ranges, microsecond timestamps and progress are
     checked; status/jump times share overflow-safe formatting and saved 64-bit
-    offsets retain exact integer precision. Frame-server clock math remains open.
-[ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
+    offsets retain exact integer precision. Frame serving checks cumulative
+    output counts before conversion and uses widened decimation boundaries.
+[x] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
+    Old diagnostics are bounded globally; malformed autosaves stay protected.
+    Queue execution stops before any job whose durable checkpoint cannot be saved.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
 [x] M07: timed capture stops independently of preview output (hardware verification pending).
-[ ] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
+[x] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
+    Wire format remains CFR NUT: sampling can omit short intervals or repeat
+    long ones, with less than one output tick of boundary quantization. Existing
+    rate conversion/decimation applies; RGB alpha and 16-bit channels are retained.
 [ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.
 [x] P10: source-owned Close cleanup and bounded, metadata-checked bitmap caches.
 [x] P04 cache substep: reuse immutable six-axis tables across preview restarts.
@@ -101,8 +109,15 @@ Remaining execution sequence
     Common multi-output transactions and audio-save processing are already extracted.
 [x] Q03 follow-up: repeatable real-binary MP4/AVS decode/export smoke test.
 [x] Q02: accurate CMake minimum, Release instructions and optimized default builds.
-[ ] Q01/Q03: command-tool packaging, PR CI and clean
-    package runtime checks. Local regression infrastructure already exists.
+[x] Q01: native-package command dependencies and bundled AppImage ffmpeg/ffprobe.
+[x] Q03 CI infrastructure: PR Release/sanitizer checks and actual package smoke gates.
+[ ] Q03 clean package execution: new Ubuntu/Fedora clean-runtime release gates
+    await execution; local container/linuxdeploy/DEB tooling is unavailable.
+    Staged AppRun/tool smoke passes with an empty host PATH, not clean libraries.
+[ ] Dependency follow-up: the installed AviSynth autoload environment fails an
+    independent logging-script sanitizer probe; correctly disabled autoload
+    passes. No application source is needed for reproduction. Diagnose installed
+    runtime/plugin compatibility separately; no plugins/system files were changed.
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
 

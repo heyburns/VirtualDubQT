@@ -28,6 +28,12 @@ public:
         int errorMode = 0;
         QList<VDFilterInstance> filters;
         bool preserveEmptyFrames = true;
+        // Existing frame-rate settings: reinterpret the source clock, or
+        // sample its unchanged duration at a new output rate. Decimation keeps
+        // a source frame per chunk while retaining the chunk's elapsed time.
+        double customFps = 0.0;
+        bool convertFpsPreserveDuration = false;
+        int decimateFactor = 1;
         bool timelineExplicit = false;
         QList<VDQtTimelineSegment> timelineSegments;
         bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }

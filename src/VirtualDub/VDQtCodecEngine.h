@@ -26,7 +26,7 @@ struct VDVideoCodecParams {
     QString codecId = "libx264";
     
     // Rate Control
-    QString rateMode = "crf";           // "crf", "bitrate", "cqp", "lossless"
+    QString rateMode = "crf";           // "default", "crf", "bitrate", "cqp", "lossless"
     int crf = 23;                       // 0..51
     int targetBitrateKbps = 0;          // e.g. 6000
     int maxBitrateKbps = 0;
@@ -59,6 +59,23 @@ struct VDVideoCodecParams {
     
     // CineForm specific
     int cineformQuality = 3;            // 0: medium+, 1: high+, 2: film1+, 3: film2+, 4: film3+
+};
+
+// Explicitly supported controls, shared by the dialog and command builder.
+// An encoder name starting with "lib" does not imply x264-compatible options.
+// Uncurated encoders remain usable with their encoder defaults, but we do not
+// advertise rate-control options whose effect this application cannot promise.
+struct VDVideoCodecCapabilities {
+    QStringList rateModes = {QStringLiteral("default")};
+    QStringList presets;
+    QStringList tunes;
+    QStringList profiles;
+    int qualityMinimum = 0;
+    int qualityMaximum = 63;
+    bool supportsMaxBitrate = false;
+    bool supportsTwoPass = false;
+    bool supportsKeyframes = false;
+    bool supportsBFrames = false;
 };
 
 // Audio counterpart to VDVideoCodecInfo/VDVideoCodecParams.
@@ -96,6 +113,14 @@ public:
     QList<VDAudioCodecInfo> getAvailableAudioCodecs() const;
 
     static VDVideoCodecParams getDefaultVideoParamsForCodec(const QString &codecId);
+    static VDVideoCodecCapabilities getVideoCapabilities(const QString &codecId);
+
+    // Applies only verified encoder controls. Unsupported saved combinations
+    // fail with a diagnostic instead of silently choosing a different mode.
+    // The destination argument list is untouched on failure.
+    static bool buildFfmpegVideoEncodeArguments(
+        const VDVideoCodecParams& params, bool preserveNativeVfr,
+        QStringList *arguments, QString *errorMessage = nullptr);
 
     const VDVideoCodecParams& getVideoParams() const { return mVideoParams; }
     void setVideoParams(const VDVideoCodecParams& params);

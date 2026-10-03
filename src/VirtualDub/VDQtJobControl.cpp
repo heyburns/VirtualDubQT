@@ -232,6 +232,23 @@ VDQtJobControlWindow::VDQtJobControlWindow(VDQtJobQueue *queue,
     progressRow->addWidget(mPercent);
     outer->addLayout(progressRow);
 
+    mPersistenceStatus = new QLabel(this);
+    mPersistenceStatus->setObjectName(QStringLiteral("jobQueuePersistenceStatus"));
+    mPersistenceStatus->setTextFormat(Qt::PlainText);
+    mPersistenceStatus->setWordWrap(true);
+    mPersistenceStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    const auto updatePersistence = [this](const QString& error) {
+        mPersistenceStatus->setText(error.isEmpty()
+            ? QStringLiteral("Local job list: %1").arg(mQueue->autosavePath())
+            : QStringLiteral("Job list not saved: %1").arg(error));
+        mPersistenceStatus->setStyleSheet(error.isEmpty()
+            ? QString() : QStringLiteral("color: #c62828;"));
+    };
+    connect(mQueue, &VDQtJobQueue::persistenceStatusChanged,
+            this, updatePersistence);
+    updatePersistence(mQueue->persistenceError());
+    outer->addWidget(mPersistenceStatus);
+
     connect(mCloseButton, &QPushButton::clicked, this, &QWidget::hide);
     connect(mMoveUpButton, &QPushButton::clicked, this, [this]() {
         const int row = selectedRow();

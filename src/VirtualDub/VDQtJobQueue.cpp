@@ -6,13 +6,39 @@
 #include "VDQtSourceSafety.h"
 
 #include <QDebug>
+#include <QDir>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace {
+
+constexpr qsizetype kMaximumStructuralBytes = qsizetype{3} * 1024 * 1024;
+// JSON can escape one QString code unit into six bytes. These combined limits
+// leave space below the document's 4 MiB cap for diagnostics, indentation,
+// timestamps and future status transitions of all 1000 permitted records.
+constexpr qsizetype kMaximumDiagnosticCharacters = qsizetype{128} * 1024;
+constexpr qsizetype kMaximumDiagnosticEntries = 2048;
+
+QString ownedPath(const QString& path) {
+    const QFileInfo info(path);
+    const QString existing = info.canonicalFilePath();
+    if (!existing.isEmpty()) return existing;
+    const QString parent = info.absoluteDir().canonicalPath();
+    return QDir(parent.isEmpty() ? info.absolutePath() : parent).filePath(info.fileName());
+}
+
+std::unique_ptr<QLockFile> claimPath(const QString& path) {
+    auto lock = std::make_unique<QLockFile>(path + QStringLiteral(".lock"));
+    // Long exports legitimately exceed the default lock age. Only a provably
+    // dead owner, not an old modification time, makes this lock stale.
+    lock->setStaleLockTime(0);
+    return lock->tryLock(0) ? std::move(lock) : nullptr;
+}
 
 void trimJobLog(QStringList *entries) {
     // Jobs are persisted, so an unlimited encoder log would make autosave files
@@ -53,7 +79,7 @@ const VDQtJobState *VDQtJobQueue::jobAt(int index) const {
     return index >= 0 && index < mJobs.size() ? &mJobs.at(index) : nullptr;
 }
 
-VDQtJobState *VDQtJobQueue::jobAt(int index) {
+VDQtJobState *VDQtJobQueue::mutableJobAt(int index) {
     return index >= 0 && index < mJobs.size() ? &mJobs[index] : nullptr;
 }
 
@@ -78,12 +104,62 @@ void VDQtJobQueue::normalizeNewJob(VDQtJobState *job) {
             "The previous application session ended while this job was running.");
     }
     job->progress = std::clamp(job->progress, 0.0, 1.0);
+    trimJobLog(&job->logEntries);
+    job->error = job->error.left(4096);
+}
+
+void VDQtJobQueue::boundDiagnostics(QList<VDQtJobState> *jobs) {
+    qsizetype characters = 0;
+    qsizetype entries = 0;
+    for (const VDQtJobState& job : std::as_const(*jobs)) {
+        characters += job.error.size();
+        entries += job.logEntries.size();
+        for (const QString& entry : job.logEntries) characters += entry.size();
+    }
+    // Completed/earlier jobs surrender their oldest messages first. Operational
+    // snapshots and statuses never disappear just because an encoder is noisy.
+    for (VDQtJobState& job : *jobs) {
+        while (!job.logEntries.isEmpty()
+               && (characters > kMaximumDiagnosticCharacters
+                   || entries > kMaximumDiagnosticEntries)) {
+            characters -= job.logEntries.constFirst().size();
+            job.logEntries.removeFirst();
+            --entries;
+        }
+    }
+    if (characters > kMaximumDiagnosticCharacters) {
+        // At most 1000 short error summaries now use 128000 code units. Keep
+        // every failure visible even if there are no log entries left to trim.
+        for (VDQtJobState& job : *jobs) job.error = job.error.left(128);
+    }
+}
+
+bool VDQtJobQueue::validateAdmission(const QList<VDQtJobState>& jobs,
+                                    QString *errorMessage) const {
+    QList<VDQtJobState> structural = jobs;
+    for (VDQtJobState& job : structural) {
+        job.error.clear();
+        job.logEntries.clear();
+    }
+    QByteArray serialized;
+    const QString path = mAutosavePath.isEmpty()
+        ? QDir::temp().filePath(QStringLiteral("VirtualDub.vdqjobs")) : mAutosavePath;
+    if (!VDQtProjectFile::serializeJobQueue(path, structural, &serialized, errorMessage))
+        return false;
+    if (serialized.size() > kMaximumStructuralBytes) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The queue's processing snapshots exceed the 3 MiB admission limit. "
+            "Remove jobs or save a separate job list; space is reserved for durable "
+            "progress, errors and diagnostic history.");
+        return false;
+    }
+    return true;
 }
 
 bool VDQtJobQueue::addJobs(const QList<VDQtJobState>& jobs,
                            QString *errorMessage) {
     if (jobs.isEmpty()) return true;
-    if (mJobs.size() + jobs.size() > 1000) {
+    if (jobs.size() > 1000 - mJobs.size()) {
         if (errorMessage)
             *errorMessage = QStringLiteral("The session queue is limited to 1000 jobs.");
         return false;
@@ -95,7 +171,9 @@ bool VDQtJobQueue::addJobs(const QList<VDQtJobState>& jobs,
         normalizeNewJob(&job);
         candidates.append(job);
     }
-    if (!validateJobs(candidates, errorMessage)) return false;
+    boundDiagnostics(&candidates);
+    if (!validateJobs(candidates, errorMessage)
+        || !validateAdmission(candidates, errorMessage)) return false;
     Q_EMIT queueAboutToReset();
     mJobs = candidates;
     Q_EMIT queueReset();
@@ -111,9 +189,11 @@ bool VDQtJobQueue::replaceJobs(const QList<VDQtJobState>& jobs,
             *errorMessage = QStringLiteral("The queue cannot be replaced while it is running.");
         return false;
     }
-    if (jobs.size() > 1000 || !validateJobs(jobs, errorMessage)) return false;
+    if (!validateJobs(jobs, errorMessage)) return false;
     QList<VDQtJobState> normalized = jobs;
     for (VDQtJobState& job : normalized) normalizeNewJob(&job);
+    boundDiagnostics(&normalized);
+    if (!validateAdmission(normalized, errorMessage)) return false;
     Q_EMIT queueAboutToReset();
     mJobs = normalized;
     Q_EMIT queueReset();
@@ -135,7 +215,20 @@ bool VDQtJobQueue::replaceFromFile(const QString& path, QString *errorMessage) {
 }
 
 bool VDQtJobQueue::saveToFile(const QString& path, QString *errorMessage) const {
-    return VDQtProjectFile::saveJobQueue(path, mJobs, errorMessage);
+    // Explicit Save As is not allowed to bypass another editor's ownership.
+    // Our own autosave lock already proves ownership of the local destination.
+    std::unique_ptr<QLockFile> temporaryLock;
+    const QString destination = ownedPath(path);
+    if (destination != mAutosavePath || !mAutosaveLock) {
+        temporaryLock = claimPath(destination);
+        if (!temporaryLock) {
+            if (errorMessage) *errorMessage = QStringLiteral(
+                "The selected job list is in use by another application instance, "
+                "or its ownership lock could not be created.");
+            return false;
+        }
+    }
+    return VDQtProjectFile::saveJobQueue(destination, mJobs, errorMessage);
 }
 
 void VDQtJobQueue::removeRows(const QList<int>& rows) {
@@ -232,9 +325,12 @@ bool VDQtJobQueue::moveJob(int from, int to) {
 }
 
 bool VDQtJobQueue::setJobName(int index, const QString& name) {
-    VDQtJobState *job = jobAt(index);
+    VDQtJobState *job = mutableJobAt(index);
     const QString normalized = name.trimmed();
     if (!job || normalized.isEmpty() || normalized.size() > 1024) return false;
+    QList<VDQtJobState> candidates = mJobs;
+    candidates[index].name = normalized;
+    if (!validateAdmission(candidates, nullptr)) return false;
     job->name = normalized;
     Q_EMIT jobChanged(index);
     scheduleAutosave();
@@ -243,10 +339,11 @@ bool VDQtJobQueue::setJobName(int index, const QString& name) {
 
 bool VDQtJobQueue::setJobStatus(int index, VDQtJobStatus status,
                                 const QString& error) {
-    VDQtJobState *job = jobAt(index);
-    if (!job) return false;
+    VDQtJobState *job = mutableJobAt(index);
+    if (!job || status < VDQtJobStatus::Pending || status > VDQtJobStatus::Interrupted)
+        return false;
     job->status = status;
-    job->error = error;
+    job->error = error.left(4096);
     if (status == VDQtJobStatus::Starting) {
         job->startedAtUtc = QDateTime::currentDateTimeUtc();
         job->endedAtUtc = QDateTime();
@@ -258,6 +355,7 @@ bool VDQtJobQueue::setJobStatus(int index, VDQtJobStatus status,
         job->endedAtUtc = QDateTime::currentDateTimeUtc();
         if (status == VDQtJobStatus::Complete) job->progress = 1.0;
     }
+    boundDiagnostics(&mJobs);
     Q_EMIT jobChanged(index);
     scheduleAutosave();
     return true;
@@ -265,13 +363,14 @@ bool VDQtJobQueue::setJobStatus(int index, VDQtJobStatus status,
 
 bool VDQtJobQueue::setJobProgress(int index, double progress,
                                   const QString& message) {
-    VDQtJobState *job = jobAt(index);
-    if (!job) return false;
+    VDQtJobState *job = mutableJobAt(index);
+    if (!job || !std::isfinite(progress)) return false;
     job->progress = std::clamp(progress, 0.0, 1.0);
     if (!message.isEmpty()
         && (job->logEntries.isEmpty() || job->logEntries.constLast() != message)) {
         job->logEntries.append(message.left(65536));
         trimJobLog(&job->logEntries);
+        boundDiagnostics(&mJobs);
     }
     Q_EMIT jobChanged(index);
     // Progress is deliberately not autosaved on every callback; exporters can
@@ -281,17 +380,18 @@ bool VDQtJobQueue::setJobProgress(int index, double progress,
 }
 
 bool VDQtJobQueue::appendJobLog(int index, const QString& message) {
-    VDQtJobState *job = jobAt(index);
+    VDQtJobState *job = mutableJobAt(index);
     if (!job || message.isEmpty()) return false;
     job->logEntries.append(message.left(65536));
     trimJobLog(&job->logEntries);
+    boundDiagnostics(&mJobs);
     Q_EMIT jobChanged(index);
     scheduleAutosave();
     return true;
 }
 
 bool VDQtJobQueue::setReplaceExisting(int index, bool enabled) {
-    VDQtJobState *job = jobAt(index);
+    VDQtJobState *job = mutableJobAt(index);
     if (!job) return false;
     job->replaceExisting = enabled;
     Q_EMIT jobChanged(index);
@@ -319,18 +419,109 @@ void VDQtJobQueue::setAutoRunEnabled(bool enabled) {
     if (mAutoRun && !mRunning && pendingCount() > 0) Q_EMIT runRequested();
 }
 
-void VDQtJobQueue::setAutosavePath(const QString& path) {
-    mAutosavePath = path;
+bool VDQtJobQueue::setAutosavePath(const QString& path, QString *errorMessage) {
+    const QString requested = path.isEmpty() ? QString() : ownedPath(path);
+    if (requested == mAutosavePath && mAutosaveLock) return true;
+    if (!mAutosavePath.isEmpty() && mAutosaveLock && !flush(errorMessage)) return false;
+    mAutosaveTimer.stop();
+    mAutosaveLock.reset();
+    mAutosavePath.clear();
+    mRecoveryPath.clear();
+    mAutosaveProtected = false;
+    if (requested.isEmpty()) {
+        reportPersistence(QString());
+        return true;
+    }
+    QString selected = requested;
+    auto lock = claimPath(selected);
+    if (!lock) {
+        // Reuse an abandoned secondary session instead of allocating a new
+        // orphan on every restart. Live sessions retain their locks and cannot
+        // be mistaken for crash-recovery candidates.
+        const QFileInfo original(requested);
+        const QString prefix = original.completeBaseName() + QStringLiteral("-session-");
+        const QString suffix = original.suffix().isEmpty()
+            ? QString() : QLatin1Char('.') + original.suffix();
+        const QDir directory = original.absoluteDir();
+        const QStringList candidates = directory.entryList(
+            {prefix + QLatin1Char('*') + suffix}, QDir::Files, QDir::Time);
+        for (const QString& candidate : candidates) {
+            const QString candidatePath = directory.filePath(candidate);
+            auto candidateLock = claimPath(candidatePath);
+            if (candidateLock) {
+                selected = candidatePath;
+                lock = std::move(candidateLock);
+                break;
+            }
+        }
+        if (!lock) {
+            selected = directory.filePath(prefix
+                + QUuid::createUuid().toString(QUuid::WithoutBraces) + suffix);
+            lock = claimPath(selected);
+        }
+    }
+    mAutosavePath = selected;
+    if (!lock) {
+        const QString error = QStringLiteral(
+            "The local job list could not acquire an ownership lock. "
+            "Queue changes cannot be saved automatically: %1").arg(selected);
+        reportPersistence(error);
+        if (errorMessage) *errorMessage = error;
+        return false;
+    }
+    mAutosaveLock = std::move(lock);
+    // Preserve the established primary recovery filename for existing sessions.
+    // Secondary editors have an independent, equally durable snapshot path.
+    mRecoveryPath = QFileInfo(selected).absoluteDir().filePath(
+        selected == requested && QFileInfo(selected).fileName() == QStringLiteral("VirtualDub.vdqjobs")
+        ? QStringLiteral("crash-recovery.vdqproject")
+        : QFileInfo(selected).completeBaseName() + QStringLiteral("-recovery.vdqproject"));
+    // Publish the session marker before any recovery snapshot can be written.
+    // A secondary editor may crash without ever adding a job; its empty queue
+    // still lets the next eligible instance find that paired recovery file.
+    if (!QFileInfo::exists(mAutosavePath) && !flush(errorMessage)) {
+        mRecoveryPath.clear();
+        return false;
+    }
+    reportPersistence(QString());
+    return true;
 }
 
 bool VDQtJobQueue::loadAutosave(QString *errorMessage) {
     if (mAutosavePath.isEmpty() || !QFileInfo::exists(mAutosavePath)) return true;
-    return replaceFromFile(mAutosavePath, errorMessage);
+    QString error;
+    const bool loaded = replaceFromFile(mAutosavePath, &error);
+    if (!loaded) {
+        mAutosaveProtected = true;
+        reportPersistence(QStringLiteral(
+            "The previous local job list could not be restored and is preserved. "
+            "Automatic saving is paused; save new jobs to a separate job list. %1").arg(error));
+        if (errorMessage) *errorMessage = mPersistenceError;
+    }
+    return loaded;
 }
 
-bool VDQtJobQueue::flush(QString *errorMessage) const {
+void VDQtJobQueue::reportPersistence(const QString& error) {
+    if (mPersistenceError == error) return;
+    mPersistenceError = error;
+    Q_EMIT persistenceStatusChanged(error);
+}
+
+bool VDQtJobQueue::flush(QString *errorMessage) {
     if (mAutosavePath.isEmpty()) return true;
-    return VDQtProjectFile::saveJobQueue(mAutosavePath, mJobs, errorMessage);
+    QString error;
+    bool saved = false;
+    if (!mAutosaveLock) {
+        error = QStringLiteral("The local job list has no ownership lock; automatic saving is unavailable.");
+    } else if (mAutosaveProtected) {
+        error = mPersistenceError;
+    } else {
+        boundDiagnostics(&mJobs);
+        saved = VDQtProjectFile::saveJobQueue(mAutosavePath, mJobs, &error);
+    }
+    if (errorMessage) *errorMessage = error;
+    reportPersistence(saved ? QString() : error);
+    return saved;
 }
 
 void VDQtJobQueue::scheduleAutosave() {
