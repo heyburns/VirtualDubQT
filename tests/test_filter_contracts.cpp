@@ -50,6 +50,16 @@ bool fieldHistory() {
             }
         }
     }
+    VDQtFilterSystem boundary;
+    boundary.addFilter(VDFilterType::MotionBlur);
+    QImage red(8, 8, QImage::Format_RGB888), blue(red.size(), red.format());
+    red.fill(Qt::red);
+    blue.fill(Qt::blue);
+    const VDFilterFrameContext maximum{std::numeric_limits<qint64>::max(), 0, 25};
+    if (!check(!boundary.processFrame(red, maximum).isNull()
+               && boundary.processFrame(blue, maximum) == blue
+               && !boundary.processFrame(red).isNull(),
+               "maximum frame context and following unknown context cannot overflow history")) return false;
     return true;
 }
 

@@ -1,4 +1,5 @@
 #include "VirtualDub/VDQtPlaybackClock.h"
+#include "VirtualDub/VDQtTimingMath.h"
 #include <iostream>
 #include <limits>
 
@@ -11,6 +12,23 @@ bool near(double actual, double expected) {
 }
 
 int main() {
+    const auto ordinary = VDQtAdvanceFrame(5, 0.1, 0.04, 3);
+    const auto decimated = VDQtAdvanceFrame(10, 3.0, 0.001, 1000000);
+    const auto delayed = VDQtAdvanceFrame(0, 1e100, 0.001, 1);
+    if (ordinary.framesElapsed != 2 || ordinary.targetFrame != 11
+        || decimated.targetFrame != std::numeric_limits<int>::max()
+        || delayed.targetFrame != std::numeric_limits<int>::max()
+        || VDQtAdvanceFrame(std::numeric_limits<int>::max(), 1, 1, 1).targetFrame
+            != std::numeric_limits<int>::max()
+        || VDQtAdvanceFrame(5, 0.01, 0.04, 1).targetFrame != 5
+        || VDQtSamplePosition(1.25, 48000) != 60000
+        || VDQtSamplePosition(1e100, 48000, 96000) != 96000
+        || VDQtSamplePosition(1e100, 48000) != std::numeric_limits<int64_t>::max()
+        || VDQtSamplePosition(-10, 48000) != 0
+        || VDQtRoundedNonnegative(1e100L, 32767) != 32767) {
+        std::cerr << "Bounded playback/sample timing math failed\n";
+        return 1;
+    }
     VDQtPlaybackClock clock;
     if (!near(clock.elapsed(0), 0) || !near(clock.elapsed(0.3), 0.3)) return 1;
     clock.reset();

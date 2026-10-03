@@ -78,7 +78,9 @@ Remaining execution sequence
     fractions and wrong types before conversion. Script integer domains now
     preflight before execution. Processing/codec integer selectors and saved
     source/output rates reject present malformed values instead of defaulting;
-    remaining packed-color/runtime math is still open.
+    packed colors and filter size types are checked, playback/frame stepping and
+    time-to-sample rounding are bounded, and temporal-history increments are safe.
+    Remaining exporter/server timestamp/count calculations are still open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
 [x] M07: timed capture stops independently of preview output (hardware verification pending).

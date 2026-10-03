@@ -1151,3 +1151,24 @@ string, null and boolean values, malformed source/output rates and job enums,
 atomic destination preservation, and omitted legacy fields. After the final
 strengthened checks, full Release 59/59 and ASan/UBSan 55/55 passed, plus the
 regular application's independent MP4/native-AVS decode/export smoke.
+
+Script color/size and playback runtime bounds (M21 follow-up)
+-------------------------------------------------------------
+
+Tests reproduced fractional packed colors executing and UBSan reported signed
+overflow at maximum frame context in temporal history. Configured packed colors
+now accept only signed-int32 or unsigned-uint32 integer spellings, retaining -1
+and 0xFFFFFFFF. Numeric resize/canvas arguments are checked before rounding;
+named interpolation strings still work. Playback timer advance and frame stepping
+bound their int domain before narrowing. Time/rate sample products are rounded
+only after a floating-point bound; audio clock bases follow accepted producer
+positions, and rescaled seek timestamps reject overflow.
+
+Checks exercise valid legacy color spellings, malformed color/size arguments,
+maximum then unknown temporal contexts, huge/delayed/decimated playback positions,
+negative/huge sample times, and normal rounding. The public offline seek path is
+also exercised before existing PCM export checks; no audible cursor is invented
+when the test intentionally has no output device. Full Release 59/59 and
+ASan/UBSan 55/55 passed, plus the independently rebuilt regular application's
+MP4/native-AVS smoke. Remaining exporter/server timestamp arithmetic is tracked
+separately; physical sink/listening coverage is not claimed.

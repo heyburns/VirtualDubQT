@@ -536,6 +536,11 @@ bool audioSnapshot(VDQtTestFixtures& fixtures) {
     VDQtAudioPlayer audio(false);
     if (!check(audio.openFile(source) && audio.hasAudio(), "offline audio opens without a playback sink"))
         return false;
+    // With playback disabled there is intentionally no producer cursor/sink.
+    // Exercise the public boundary and subsequent export, not an invented
+    // audible-position assertion. Sample clamping itself has pure math tests.
+    audio.seekToTimeSeconds(1e100);
+    audio.seekToTimeSeconds(0);
     auto& editor = VDQtAudioFilterSystem::instance();
     auto mute = editor.createFilter(VDAudioFilterType::Gain);
     mute.params["decibels"] = -120;
@@ -1705,8 +1710,20 @@ bool scriptIntegerInputs(VDQtTestFixtures& fixtures) {
         QString("VirtualDub.audio.SetCompressionWithHint(1,48000,2,16,9223372036854775807,4);"),
         QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
                 "VirtualDub.video.filters.instance[0].Config(1e100,24,\"point\");"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+                "VirtualDub.video.filters.instance[0].Config(\"64\",48,\"point\");"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"canvas\");"
+                "VirtualDub.video.filters.instance[0].Config(\"80\",60,0,0,0,0,0);"),
         QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"fill\");"
                 "VirtualDub.video.filters.instance[0].Config(2147483647,0,-2147483648,10,0);"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"fill\");"
+                "VirtualDub.video.filters.instance[0].Config(0,0,10,10,1.5);"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"canvas\");"
+                "VirtualDub.video.filters.instance[0].Config(80,60,0,0,0,0,\"4\");"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+                "VirtualDub.video.filters.instance[0].Config(64,48,\"point\",80,60,-3000000000);"),
+        QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
+                "VirtualDub.video.filters.instance[0].Config(64,48,0,4,3,0,80,60,4,3,1,0,0,1.5);"),
         QString("VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
                 "VirtualDub.video.filters.instance[9999999999999999999999].SetEnabled(0);"),
         QString("VirtualDub.video.SetRangeFrames(0,1e100);"),
@@ -1723,6 +1740,8 @@ bool scriptIntegerInputs(VDQtTestFixtures& fixtures) {
     return check(window.runAutomationText(
         "VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
         "VirtualDub.video.filters.instance[0].Config(64,48,\"point\",80,60,0xFFFFFFFF);"
+        "VirtualDub.video.filters.Add(\"fill\");"
+        "VirtualDub.video.filters.instance[1].Config(0,0,10,10,-1);"
         "VirtualDub.audio.SetConversion(0,0,0);"
         "VirtualDub.audio.filters.Clear();VirtualDub.audio.filters.Add(\"gain\");"
         "VirtualDub.audio.filters.instance[0].SetLong(2,1234567890123);"

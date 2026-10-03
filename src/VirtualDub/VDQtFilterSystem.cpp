@@ -1013,7 +1013,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             TemporalState& temporal = mTemporalStates[stateKey];
             const bool sequential = !temporal.previousFrame.isNull()
                 && (context.frameNumber < 0
-                    || temporal.lastFrameNumber + 1 == context.frameNumber);
+                    || (context.frameNumber > 0
+                        && temporal.lastFrameNumber == context.frameNumber - 1));
             const QImage previous = sequential
                 ? temporal.previousFrame.convertToFormat(result.format()) : QImage();
             if (sequential && previous.isNull()) return {};
@@ -1101,7 +1102,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             temporal.previousFrame = incomingHistory ? incomingFieldFrame : result;
             temporal.lastFrameNumber = context.frameNumber >= 0
-                ? context.frameNumber : temporal.lastFrameNumber + 1;
+                ? context.frameNumber : temporal.lastFrameNumber < std::numeric_limits<qint64>::max()
+                ? temporal.lastFrameNumber + 1 : temporal.lastFrameNumber;
             break;
         }
         case VDFilterType::InverseTelecine: {

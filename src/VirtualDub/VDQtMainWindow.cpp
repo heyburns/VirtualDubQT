@@ -5,6 +5,7 @@
 #include "VDQtMainWindow.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtCapturePolicy.h"
+#include "VDQtTimingMath.h"
 #include "VDQtFilterValidation.h"
 #include "VDQtAudioExport.h"
 #include "VDQtSourceSafety.h"
@@ -2882,15 +2883,37 @@ bool VDQtMainWindow::executeAutomationProgram(
             return false;
         }
         VDFilterInstance& filter = processing.filters[index];
-        bool integersValid = true;
+        bool numbersValid = true;
         const auto integer = [&](int argument) {
             qint64 checked = 0;
             if (!VDQtScriptEngine::readInteger(values.value(argument),
                     std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), &checked)) {
-                integersValid = false;
+                numbersValid = false;
                 return 0;
             }
             return static_cast<int>(checked);
+        };
+        const auto packedColor = [&](int argument) {
+            qint64 checked = 0;
+            // Upstream scripts use both signed int32 (-1 for white) and
+            // unsigned 0xFFFFFFFF spellings. Neither accepts fractional/string
+            // coercion or arbitrary negative values modulo 2^32.
+            if (!VDQtScriptEngine::readInteger(values.value(argument),
+                    std::numeric_limits<qint32>::min(), std::numeric_limits<quint32>::max(), &checked))
+                numbersValid = false;
+            return static_cast<quint32>(checked);
+        };
+        const auto number = [&](int argument) {
+            const QVariant value = values.value(argument);
+            bool converted = false;
+            const double result = value.toDouble(&converted);
+            constexpr double limit = std::numeric_limits<quint32>::max();
+            if (!value.isValid() || value.isNull() || value.typeId() == QMetaType::QString
+                || !converted || !std::isfinite(result) || result < -limit || result > limit) {
+                numbersValid = false;
+                return 0.0;
+            }
+            return result;
         };
         const auto configure = [&]() -> bool {
         switch (filter.type) {
@@ -2900,40 +2923,39 @@ bool VDQtMainWindow::executeAutomationProgram(
                 filter.params[QStringLiteral("sizeMode")] = relative ? 1 : 0;
                 if (relative) {
                     filter.params[QStringLiteral("relW")] =
-                        std::max(0.001, values.at(0).toDouble());
+                        std::max(0.001, number(0));
                     filter.params[QStringLiteral("relH")] =
-                        std::max(0.001, values.at(1).toDouble());
+                        std::max(0.001, number(1));
                 } else {
                     filter.params[QStringLiteral("width")] = std::llround(
-                        std::max(1.0, values.at(0).toDouble()));
+                        std::max(1.0, number(0)));
                     filter.params[QStringLiteral("height")] = std::llround(
-                        std::max(1.0, values.at(1).toDouble()));
+                        std::max(1.0, number(1)));
                 }
                 filter.params[QStringLiteral("aspectW")] =
-                    values.at(3).toDouble();
+                    number(3);
                 filter.params[QStringLiteral("aspectH")] =
-                    values.at(4).toDouble();
+                    number(4);
                 filter.params[QStringLiteral("aspectMode")] = integer(5);
                 filter.params[QStringLiteral("frameW")] = integer(6);
                 filter.params[QStringLiteral("frameH")] = integer(7);
                 filter.params[QStringLiteral("frameAspectW")] =
-                    values.at(8).toDouble();
+                    number(8);
                 filter.params[QStringLiteral("frameAspectH")] =
-                    values.at(9).toDouble();
+                    number(9);
                 filter.params[QStringLiteral("framingMode")] = integer(10);
                 int mode = integer(11);
                 filter.params[QStringLiteral("interlaced")] =
                     (mode & 128) != 0;
                 filter.params[QStringLiteral("filterMode")] = mode & 127;
-                const quint32 color = static_cast<quint32>(
-                    values.at(13).toULongLong());
+                const quint32 color = packedColor(13);
                 filter.params[QStringLiteral("fillColorR")] = color & 0xffU;
                 filter.params[QStringLiteral("fillColorG")] = (color >> 8) & 0xffU;
                 filter.params[QStringLiteral("fillColorB")] = (color >> 16) & 0xffU;
                 return true;
             } else if (values.size() >= 3) {
-                const double width = std::max(1.0, values.at(0).toDouble());
-                const double height = std::max(1.0, values.at(1).toDouble());
+                const double width = std::max(1.0, number(0));
+                const double height = std::max(1.0, number(1));
                 filter.params[QStringLiteral("sizeMode")] = 0;
                 filter.params[QStringLiteral("absW")] = width;
                 filter.params[QStringLiteral("absH")] = height;
@@ -2959,8 +2981,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                 }
                 filter.params[QStringLiteral("filterMode")] = mode;
                 if (values.size() >= 6) {
-                    const quint32 color = static_cast<quint32>(
-                        values.at(5).toULongLong());
+                    const quint32 color = packedColor(5);
                     filter.params[QStringLiteral("framingMode")] = 1;
                     filter.params[QStringLiteral("frameW")] = integer(3);
                     filter.params[QStringLiteral("frameH")] = integer(4);
@@ -2974,13 +2995,12 @@ bool VDQtMainWindow::executeAutomationProgram(
         case VDFilterType::Canvas:
             if (values.size() >= 7) {
                 filter.params[QStringLiteral("width")] =
-                    std::max(1.0, values.at(0).toDouble());
+                    std::max(1.0, number(0));
                 filter.params[QStringLiteral("height")] =
-                    std::max(1.0, values.at(1).toDouble());
-                filter.params[QStringLiteral("x")] = values.at(4).toDouble();
-                filter.params[QStringLiteral("y")] = values.at(5).toDouble();
-                const quint32 color = static_cast<quint32>(
-                    values.at(6).toULongLong());
+                    std::max(1.0, number(1));
+                filter.params[QStringLiteral("x")] = number(4);
+                filter.params[QStringLiteral("y")] = number(5);
+                const quint32 color = packedColor(6);
                 filter.params[QStringLiteral("red")] = color & 0xffU;
                 filter.params[QStringLiteral("green")] = (color >> 8) & 0xffU;
                 filter.params[QStringLiteral("blue")] = (color >> 16) & 0xffU;
@@ -2993,8 +3013,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                 const int y1 = integer(1);
                 const int x2 = integer(2);
                 const int y2 = integer(3);
-                const quint32 color = static_cast<quint32>(
-                    values.at(4).toULongLong());
+                const quint32 color = packedColor(4);
                 filter.params[QStringLiteral("x")] = x1;
                 filter.params[QStringLiteral("y")] = y1;
                 filter.params[QStringLiteral("width")] = std::max<qint64>(0, qint64(x2) - x1);
@@ -3101,8 +3120,8 @@ bool VDQtMainWindow::executeAutomationProgram(
         return false;
         };
         const bool configured = configure();
-        if (!integersValid) {
-            if (filterError) *filterError = QStringLiteral("A filter integer argument is out of range or fractional.");
+        if (!numbersValid) {
+            if (filterError) *filterError = QStringLiteral("A filter numeric argument has an invalid type or range.");
             return false;
         }
         return configured;
@@ -5012,10 +5031,8 @@ bool VDQtMainWindow::startFrameServerAtPath(
                 && lastTimestamp + lastDuration > startSeconds)
                 durationSeconds = lastTimestamp + lastDuration - startSeconds;
             ranges.append({
-                std::max<int64_t>(0, static_cast<int64_t>(
-                    std::llround(startSeconds * sampleRate))),
-                std::max<int64_t>(1, static_cast<int64_t>(
-                    std::llround(durationSeconds * sampleRate)))
+                VDQtSamplePosition(startSeconds, sampleRate),
+                std::max<int64_t>(1, VDQtSamplePosition(durationSeconds, sampleRate))
             });
         }
         QFile::remove(mFrameServerAudioPath);
@@ -5712,10 +5729,9 @@ void VDQtMainWindow::onFileExportFilmstrip() {
                << static_cast<qint16>(0) << static_cast<qint16>(0)
                << static_cast<qint16>(width) << static_cast<qint16>(height)
                << static_cast<qint16>(0)
-               << static_cast<qint16>(std::clamp(
-                      static_cast<int>(std::llround(
-                          std::max(1.0, mVideoDecoder.getFps())
-                          * timing.outputFramesPerInput)), 1, 32767));
+               << static_cast<qint16>(std::max(1, VDQtRoundedNonnegative(
+                      static_cast<long double>(mVideoDecoder.getFps())
+                          * timing.outputFramesPerInput, 32767)));
         header.append(16, '\0');
         failed = header.size() != 36
             || staged.write(header) != header.size();
@@ -7163,10 +7179,8 @@ void VDQtMainWindow::onViewAudioWaveform() {
             startSeconds = sourceFrame / std::max(0.001, mVideoDecoder.getFps());
     }
     durationSeconds = std::clamp(durationSeconds, 0.05, 30.0);
-    const int64_t firstSample = static_cast<int64_t>(
-        std::llround(std::max(0.0, startSeconds) * sampleRate));
-    const int64_t sampleCount = static_cast<int64_t>(
-        std::llround(durationSeconds * sampleRate));
+    const int64_t firstSample = VDQtSamplePosition(startSeconds, sampleRate);
+    const int64_t sampleCount = VDQtSamplePosition(durationSeconds, sampleRate);
     QTemporaryDir directory;
     if (!directory.isValid()) return;
     const QString wavPath = directory.filePath(QStringLiteral("waveform.wav"));
@@ -9084,7 +9098,8 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
         mPlaybackTimer->stop();
         mAudioPlayer.pause();
         mPlaybackPausedFrame = -1;
-        const int target = static_cast<int>(mPositionControl->GetPosition()) + 1;
+        const int target = static_cast<int>(std::clamp<qint64>(
+            mPositionControl->GetPosition(), 0, std::numeric_limits<int>::max() - 1)) + 1;
         if (!mTimeline.sourceFrameCountExact() && mTimeline.isIdentity()) {
             const int rangeEnd = std::max(target, mVideoDecoder.getFrameCount() - 1);
             mPositionControl->SetRange(0, rangeEnd);
@@ -9208,9 +9223,10 @@ void VDQtMainWindow::onPlaybackTick() {
     else if (mFrameRateConfig.convMode == 2) frameStep = 3;
     else if (mFrameRateConfig.convMode == 3)
         frameStep = std::max(1, mFrameRateConfig.decimateN);
-    const int framesElapsed = std::max(
-        1, static_cast<int>(std::floor(withinFrame / frameDuration)));
-    const int targetFrame = mPlaybackClockFrame + framesElapsed * frameStep;
+    const auto advance = VDQtAdvanceFrame(
+        mPlaybackClockFrame, withinFrame, frameDuration, frameStep);
+    const int framesElapsed = advance.framesElapsed;
+    const int targetFrame = advance.targetFrame;
 
     if (targetFrame != mPlaybackClockFrame) {
         const bool exactTimelineEnd = mTimeline.isModified()

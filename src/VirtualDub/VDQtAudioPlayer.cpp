@@ -5,6 +5,7 @@
 #include "VDQtAudioPlayer.h"
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
+#include "VDQtTimingMath.h"
 
 #include <QAudioDevice>
 #include <QDataStream>
@@ -569,8 +570,10 @@ public:
         if (!mFormatContext || !mCodecContext || !mStream || mOutputRate <= 0) return false;
 
         sample = std::max<int64_t>(0, sample);
-        const int64_t targetTimestamp = mTimelineOriginTimestamp +
-            av_rescale_q(sample, AVRational{1, mOutputRate}, mStream->time_base);
+        const int64_t delta = av_rescale_q(sample, AVRational{1, mOutputRate}, mStream->time_base);
+        if (delta < 0 || mTimelineOriginTimestamp > std::numeric_limits<int64_t>::max() - delta)
+            return fail(QStringLiteral("The requested audio seek timestamp is too large."), 0);
+        const int64_t targetTimestamp = mTimelineOriginTimestamp + delta;
         const int64_t seekTimestamp = mStream->start_time != AV_NOPTS_VALUE
             ? std::max(targetTimestamp, mStream->start_time)
             : targetTimestamp;
@@ -1263,6 +1266,11 @@ public:
         const int64_t outputSample = (mSourceRate > 0 && mOutputRate > 0)
             ? av_rescale_rnd(sample, mOutputRate, mSourceRate, AV_ROUND_NEAR_INF)
             : sample;
+        if (outputSample < 0) {
+            QMutexLocker locker(&mMutex);
+            mError = QStringLiteral("The requested audio seek sample cannot be represented.");
+            return false;
+        }
         if (!mDecoder->seekToSample(outputSample)) {
             QMutexLocker locker(&mMutex);
             mError = mDecoder->error();
@@ -2705,18 +2713,19 @@ void VDQtAudioPlayer::seekToTimeSeconds(double timeSeconds)
         mAudioSink->reset();
     }
 
-    timeSeconds = std::max(0.0, timeSeconds);
-    mPlaybackBaseTimeSeconds = timeSeconds;
-    int64_t sample = static_cast<int64_t>(std::llround(timeSeconds * mSampleRate));
-    if (mTotalSamplesExact && mTotalSamples > 0) {
-        sample = std::min(sample, mTotalSamples);
-    }
+    const int64_t maximum = mTotalSamplesExact && mTotalSamples > 0
+        ? mTotalSamples : std::numeric_limits<int64_t>::max();
+    const int64_t sample = VDQtSamplePosition(timeSeconds, mSampleRate, maximum);
 
+    bool sought = false;
     if (mIsAvsAudio && mAvsAudioDevice) {
-        mAvsAudioDevice->seekToSample(sample);
+        sought = mAvsAudioDevice->seekToSample(sample);
     } else if (mFFmpegAudioDevice) {
-        mFFmpegAudioDevice->seekToSample(sample);
+        sought = mFFmpegAudioDevice->seekToSample(sample);
     }
+    // Use the producer's accepted/clamped cursor, not the original out-of-range
+    // request, as the presentation clock base. A failed seek keeps its error.
+    if (sought) mPlaybackBaseTimeSeconds = getCurrentAudioTimeSeconds();
     if (mFilteredAudioDevice) mFilteredAudioDevice->resetProcessor();
     mIsPlaying = false;
 }
