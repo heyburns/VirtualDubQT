@@ -2745,7 +2745,12 @@ double VDQtAudioPlayer::getCurrentAudioTimeSeconds() const
 
 double VDQtAudioPlayer::getPlaybackTimeSeconds() const
 {
-    if (!mHasAudio || !mAudioSink) return -1.0;
+    // Idle follows the last drained sample, not just producer EOF: buffered
+    // audio is still audible while the sink remains active. A failed/stopped
+    // sink is not a usable clock merely because its object still exists.
+    if (!mHasAudio || !mIsPlaying || !mAudioSink
+        || mAudioSink->state() != QAudio::ActiveState
+        || mAudioSink->error() != QAudio::NoError) return -1.0;
     return mPlaybackBaseTimeSeconds
         + std::max<qint64>(0, mAudioSink->processedUSecs()) / 1000000.0;
 }

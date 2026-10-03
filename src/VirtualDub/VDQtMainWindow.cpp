@@ -9293,6 +9293,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
             mDecodedPreviewFrames.clear();
             mDecodedPreviewTimelineFrame = -1;
             mPlaybackElapsedTimer.restart();
+            mPlaybackClock.reset();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(mPreferencesConfig.playbackTimerIntervalMs);
             updateFrameDisplay(mPlaybackStartFrame);
@@ -9336,6 +9337,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
             mDecodedPreviewFrames.clear();
             mDecodedPreviewTimelineFrame = -1;
             mPlaybackElapsedTimer.restart();
+            mPlaybackClock.reset();
             mPlaybackTimer->setTimerType(Qt::PreciseTimer);
             mPlaybackTimer->start(mPreferencesConfig.playbackTimerIntervalMs);
             updateFrameDisplay(mPlaybackStartFrame);
@@ -9446,7 +9448,7 @@ void VDQtMainWindow::onPlaybackTick() {
         return;
     }
 
-    double elapsedSeconds = mPlaybackElapsedTimer.elapsed() / 1000.0;
+    double audioElapsed = -1.0;
     // With an active output device, use the samples actually presented as the
     // clock. Decoder read-ahead can be hundreds of milliseconds ahead and is
     // intentionally not used here.
@@ -9455,10 +9457,13 @@ void VDQtMainWindow::onPlaybackTick() {
         const double audioTime = mAudioPlayer.getPlaybackTimeSeconds();
         if (std::isfinite(audioTime)
             && audioTime + 0.050 >= mPlaybackAudioOriginSeconds) {
-            elapsedSeconds = std::max(0.0,
+            audioElapsed = std::max(0.0,
                 audioTime - mPlaybackAudioOriginSeconds);
         }
     }
+
+    const double elapsedSeconds = mPlaybackClock.elapsed(
+        mPlaybackElapsedTimer.elapsed() / 1000.0, audioElapsed);
 
     const double frameDuration = std::max(
         1.0 / 1000.0, mPlaybackFrameDurationSeconds);
@@ -9516,6 +9521,7 @@ void VDQtMainWindow::onPlaybackTick() {
                 ? mVideoDecoder.getFrameTimestampSeconds(targetSourceFrame) : -1.0;
             mPlaybackAudioOriginSeconds = timestamp;
             mPlaybackElapsedTimer.restart();
+            mPlaybackClock.reset();
             mPlaybackClockFrameStartSeconds = 0.0;
         } else {
             mPlaybackClockFrameStartSeconds += framesElapsed * frameDuration;

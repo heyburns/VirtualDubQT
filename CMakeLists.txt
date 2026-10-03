@@ -219,6 +219,11 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    add_executable(playback_clock_tests tests/test_playback_clock.cpp)
+    target_include_directories(playback_clock_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    vdqt_enable_diagnostics(playback_clock_tests)
+    add_test(NAME playback_clock_tests COMMAND playback_clock_tests)
+    set_tests_properties(playback_clock_tests PROPERTIES LABELS "playback;audio;contracts" TIMEOUT 10)
     add_executable(decoder_index_tests
         tests/test_decoder_index.cpp
         tests/support/VDQtTestFixtures.cpp)

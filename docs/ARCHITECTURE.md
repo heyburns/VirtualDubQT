@@ -55,6 +55,11 @@ Audio has its own bounded decode-ahead producer thread. `QAudioSink` pulls only
 already-converted PCM from a `QIODevice`; codec, resampler, and AviSynth graph
 work must never migrate into the real-time audio callback.
 
+Playback uses device-presented audio time only while the sink is active and
+error-free. `VDQtPlaybackClock` switches an ended/failed or 250 ms nonadvancing
+sink to monotonic elapsed time anchored at the last heard position. This fallback
+is reset at play/seek; a lagging recovered sink cannot pin the picture again.
+
 The local frame server and some export subprocess pipelines use additional
 worker threads or child `ffmpeg` processes. Their owners synchronously cancel
 and join them during teardown.

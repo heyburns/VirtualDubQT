@@ -826,3 +826,22 @@ plugins and their platform-specific assumptions are not covered by this fixture.
 Validation: focused Release 11/11 and ASan/UBSan 11/11 passed, including native
 module callbacks, filter/context contracts, stabilization and actual-app media
 smoke. The rebuilt regular app independently passed MP4/native-AVS export smoke.
+
+Playback clock fallback (M04)
+----------------------------
+
+The original sink getter returned its final timestamp even in Idle/Stopped state.
+It now reports only active, error-free playback as a usable clock; active audio
+already buffered in the sink remains authoritative until drained. The controller
+uses a small resettable monotonic clock. EOF/failure or 250 ms of nonadvancement
+anchors fallback at the last presented position. It never uses decode-ahead time
+and never reattaches to a lagging recovered sink until the next play/seek reset.
+
+Deterministic clock tests cover absent audio, short audio, frozen active clocks,
+backward jitter, invalid values, recovery and reset without physical sound output.
+Existing offscreen playback covers frame-zero advancement. Physical sink EOF,
+underrun and pause/resume checks remain required; no listening result is claimed.
+
+Validation: focused Release 6/6 and ASan/UBSan 6/6 passed (clock, controller
+playback, audio snapshot, stabilization, decoder performance and actual-app
+media smoke). The regular binary rebuilt and passed MP4/native-AVS export smoke.

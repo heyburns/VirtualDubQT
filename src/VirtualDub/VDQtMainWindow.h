@@ -18,6 +18,7 @@
 #include "VDQtPositionControl.h"
 #include "VDQtDialogs.h"
 #include "VDQtVideoDecoder.h"
+#include "VDQtPlaybackClock.h"
 #include "VDQtAudioPlayer.h"
 #include "VDQtVideoExporter.h"
 #include "VDQtProjectFile.h"
@@ -300,6 +301,7 @@ private:
     // explicit discard. Source switches, timers and a clean exit are not discard.
     bool mRecoverySnapshotProtected = false;
     QElapsedTimer mPlaybackElapsedTimer;
+    VDQtPlaybackClock mPlaybackClock;
     int mPlaybackStartFrame = 0;
     int mPlaybackPausedFrame = -1;
     bool mPlaybackPreview = false;

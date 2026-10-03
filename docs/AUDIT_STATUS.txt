@@ -56,7 +56,9 @@ Remaining execution sequence
 [x] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
     Private pipeline runtime reset/destruction is already fixed.
 [x] P05: stage-wise expanded frame sequences, correct histories and memory budgets.
-[ ] M04/M05/S10: usable audio clock, consistent inclusion/disable and silent sources.
+[x] M04: continuous fallback from ended/failed/nonadvancing audio clocks.
+    Physical sink/short-track playback verification remains a hardware gate.
+[ ] M05/S10: consistent inclusion/disable and silent sources.
 [ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
 [ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
 [ ] Audio follow-up: independently verify continuous sound across masked ranges.
