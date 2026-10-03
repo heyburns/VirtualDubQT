@@ -1481,7 +1481,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     };
 
     AudioStreamProbe sourceAudioProbe;
-    if (!decoder.isAvsNative()) {
+    if (options.includeAudio && !decoder.isAvsNative()) {
         sourceAudioProbe = probeAudioStream(options.inputPath);
         if (!sourceAudioProbe.succeeded) {
             mLastError = QStringLiteral("Audio stream probe failed: %1")
@@ -2412,7 +2412,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
     QTemporaryDir temporaryDirectory;
     QString tempAudioPath;
-    if (!isDirectCopyMediaAudio && audioPlayer && audioPlayer->hasAudio()) {
+    if (options.includeAudio && !isDirectCopyMediaAudio && audioPlayer && audioPlayer->hasAudio()) {
         if (!temporaryDirectory.isValid()) {
             qWarning() << "[Exporter] Unable to create a secure temporary directory.";
             return false;

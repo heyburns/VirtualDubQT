@@ -648,6 +648,111 @@ bool queueIsolation(VDQtTestFixtures& fixtures) {
                  "abort stays available and operation ownership is released");
 }
 
+bool audioInclusion(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("inclusion-source.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=24:duration=0.5",
+                          "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5:sample_rate=48000",
+                          "-c:v", "ffv1", "-c:a", "pcm_s16le", source})) return false;
+    VDQtVideoDecoder decoder;
+    VDQtAudioPlayer audio(false);
+    if (!decoder.openFile(source) || !audio.openFile(source) || !audio.hasAudio()) return false;
+    VDQtVideoExporter exporter;
+    VDQtVideoExporter::ExportOptions options;
+    options.inputPath = source;
+    options.outputPath = fixtures.directory.filePath("video-only.mkv");
+    options.includeAudio = false;
+    options.audioMode = AudioMode_FullProcessing;
+    options.videoCodecOverride = "ffv1";
+    options.videoPixelFormatOverride = "yuv420p";
+    options.endFrame = 3;
+    options.unattended = true;
+    VDQtVideoExporter::ProcessingSnapshot processing;
+    options.processing = processing;
+    if (!exporter.exportVideo(options, &decoder, &audio)) return check(false, "video-only rendered export succeeds");
+    VDQtAudioPlayer probe(false);
+    if (!check(probe.openFile(options.outputPath) && !probe.hasAudio(),
+               "includeAudio=false cannot prepare or map a supplied audio player")) return false;
+    for (const QString& animation : {QString("gif"), QString("apng")}) {
+        options.outputPath = fixtures.directory.filePath("video-only." + animation);
+        options.videoCodecOverride = animation;
+        options.videoPixelFormatOverride = animation == "gif" ? "rgb8" : "rgba";
+        options.containerType = animation;
+        if (!check(exporter.exportVideo(options, &decoder, &audio),
+                   "GIF/APNG with a supplied audio player remains video-only")) return false;
+    }
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!queue) return false;
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::VideoExport;
+    job.sourcePaths = {fixtures.mp4}; // Intentionally silent.
+    job.audioDisabled = false;
+    job.options.includeAudio = true;
+    job.options.audioMode = AudioMode_FullProcessing;
+    job.options.videoCodecOverride = "ffv1";
+    job.options.videoPixelFormatOverride = "yuv420p";
+    job.options.outputPath = fixtures.directory.filePath("silent-queue.mkv");
+    job.options.endFrame = 3;
+    QString error;
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    if (!check(queue->jobAt(0)->status == VDQtJobStatus::Complete,
+               "default audio inclusion does not make a silent queued video fail")) {
+        std::cerr << queue->jobAt(0)->error.toStdString() << '\n';
+        return false;
+    }
+    job.sourcePaths = {source};
+    job.audioDisabled = true;
+    job.options.outputPath = fixtures.directory.filePath("disabled-queue.mkv");
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    if (!check(queue->jobAt(1)->status == VDQtJobStatus::Complete
+               && probe.openFile(job.options.outputPath) && !probe.hasAudio(),
+               "queue audioDisabled overrides stale includeAudio=true")) return false;
+    job.audioDisabled = false;
+    job.audioStreamIndex = 0; // A video stream, not a valid explicit audio choice.
+    job.options.outputPath = fixtures.directory.filePath("invalid-audio-queue.mkv");
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    if (!check(queue->jobAt(2)->status == VDQtJobStatus::Failed
+               && !QFileInfo::exists(job.options.outputPath),
+               "unavailable explicitly selected audio still fails instead of becoming silent")) return false;
+    if (!window.openVideoFile(source)
+        || !window.runAutomationText("VirtualDub.audio.SetSource(0);", fixtures.directory.path(), &error)) return false;
+    bool dialogSeen = false, unexpected = false;
+    QElapsedTimer deadline;
+    deadline.start();
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<VDSaveAudioDialog*>(widget); dialog && dialog->isVisible()) {
+                dialogSeen = true;
+                dialog->reject();
+            } else if (auto *message = qobject_cast<QMessageBox*>(widget); message && message->isVisible()) {
+                unexpected = true;
+                message->reject();
+            } else if (deadline.elapsed() > 5000) {
+                if (auto *dialog = qobject_cast<QDialog*>(widget); dialog && dialog->isVisible()) {
+                    unexpected = true;
+                    dialog->reject();
+                }
+            }
+        }
+    });
+    responder.start();
+    invoke(window, "onFileSaveAudio");
+    responder.stop();
+    if (!check(dialogSeen && !unexpected, "disabled audio can be inspected in Save Audio and cancelled")) return false;
+    if (!check(!window.runAutomationText("VirtualDub.SaveWAV(\"still-disabled.wav\");", fixtures.directory.path(), &error)
+               && error.contains("no decodable audio")
+               && !QFileInfo::exists(fixtures.directory.filePath("still-disabled.wav")),
+               "Save Audio must not reopen the session's disabled live player")) return false;
+    return true;
+}
+
 bool outputFamilies(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1358,6 +1463,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);
+    if (scenario == "audio_inclusion") return audioInclusion(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);
     if (scenario == "outputs") return outputFamilies(fixtures);
     if (scenario == "safety") return sourceProtection(fixtures);

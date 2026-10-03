@@ -2237,18 +2237,22 @@ void VDQtMainWindow::onFileSaveAudio() {
     mPlaybackTimer->stop();
     mAudioPlayer.stop();
 
-    if (!mAudioPlayer.hasAudio()) {
+    // Save Audio may inspect a disabled source, but must not reopen the live
+    // player and accidentally restore sound for later playback/exports.
+    VDQtAudioPlayer standaloneAudio(false);
+    VDQtAudioPlayer& exportAudio = mAudioPlayer.hasAudio() ? mAudioPlayer : standaloneAudio;
+    if (!exportAudio.hasAudio()) {
         if (mVideoDecoder.isAvsNative() && mVideoDecoder.getAvsClip() && mVideoDecoder.getAvsVi()) {
-            mAudioPlayer.openAvsClip(
+            exportAudio.openAvsClip(
                 mVideoDecoder.getAvsClip(), mVideoDecoder.getAvsVi(),
                 mVideoDecoder.getAvsAccessMutex());
         } else {
             QString srcFile = mVideoDecoder.getFilePath();
-            mAudioPlayer.openFile(srcFile);
+            exportAudio.openFile(srcFile);
         }
     }
 
-    if (!mAudioPlayer.hasAudio()) {
+    if (!exportAudio.hasAudio()) {
         QMessageBox::warning(this, "Save audio", "The currently opened file has no audio stream to save.");
         return;
     }
@@ -2258,8 +2262,8 @@ void VDQtMainWindow::onFileSaveAudio() {
     QString baseName = srcInfo.baseName().isEmpty() ? "test" : srcInfo.baseName();
     QString defaultName = baseName + ".wav";
 
-    QString compStr = mAudioPlayer.getAudioCompressionString();
-    QString layoutStr = mAudioPlayer.getAudioLayoutString();
+    QString compStr = exportAudio.getAudioCompressionString();
+    QString layoutStr = exportAudio.getAudioLayoutString();
 
     VDSaveAudioDialog dlg(defaultDir, defaultName, compStr, layoutStr, this);
     if (dlg.exec() == QDialog::Accepted) {
@@ -2267,7 +2271,7 @@ void VDQtMainWindow::onFileSaveAudio() {
         rememberOutputDirectory(outPath);
         VDAudioCodecConfig audioCfg = dlg.getAudioConfig();
 
-        auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
+        auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, exportAudio, mTimelineSources);
         const VDQtOutputSafetyReport audioSafety =
             sourceSafety.evaluateOutputPath(outPath);
         if (audioSafety.issue == VDQtOutputSafetyIssue::AliasesLoadedSource) {
@@ -2317,7 +2321,7 @@ void VDQtMainWindow::onFileSaveAudio() {
 
         double fps = mVideoDecoder.getFps();
         if (fps <= 0) fps = 29.97;
-        int sampleRate = mAudioPlayer.getSampleRate();
+        int sampleRate = exportAudio.getSampleRate();
         if (sampleRate <= 0) sampleRate = 48000;
 
         int64_t startSample = 0;
@@ -2376,7 +2380,7 @@ void VDQtMainWindow::onFileSaveAudio() {
             [&](const QString& destination,
                 std::function<bool(int, int)> progressCallback) -> bool {
             if (audioEditSegments.isEmpty()) {
-                return mAudioPlayer.exportAudioToFile(
+                return exportAudio.exportAudioToFile(
                     destination, startSample, sampleCount, progressCallback);
             }
 
@@ -2407,7 +2411,7 @@ void VDQtMainWindow::onFileSaveAudio() {
                         std::llround(durationSeconds * sampleRate)));
                 const QString segmentPath = segmentDirectory.filePath(
                     QString("segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
-                const bool extracted = mAudioPlayer.exportAudioToFile(
+                const bool extracted = exportAudio.exportAudioToFile(
                     segmentPath, segmentStart, segmentSamples,
                     [&, index](int current, int total) {
                         const double fraction = total > 0
@@ -2574,12 +2578,12 @@ void VDQtMainWindow::onFileSaveAudio() {
                     args << "-y" << "-i" << tempWav;
                     const VDAudioCodecParams encodeParams =
                         VDQtCodecEngine::audioParamsFromConfig(
-                            audioCfg, sampleRate, mAudioPlayer.getChannels());
+                            audioCfg, sampleRate, exportAudio.getChannels());
                     args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(encodeParams);
 
                     const int64_t progressSamples = sampleCount > 0
                         ? sampleCount
-                        : std::max<int64_t>(1, mAudioPlayer.getTotalSamples() - startSample);
+                        : std::max<int64_t>(1, exportAudio.getTotalSamples() - startSample);
                     const int64_t totalDurationUs = sampleRate > 0
                         ? std::max<int64_t>(1, static_cast<int64_t>(
                               static_cast<long double>(progressSamples) * 1000000.0L / sampleRate))
@@ -4749,7 +4753,8 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     }
 
     VDQtAudioPlayer audioPlayer(false); // Offline jobs need no sink/producer.
-    const bool needsAudio = job.operation == VDQtJobOperation::VideoExport
+    const bool needsAudio = (job.operation == VDQtJobOperation::VideoExport
+                            && job.options.includeAudio && !job.audioDisabled)
                          || job.operation == VDQtJobOperation::AudioExport;
     bool audioPrepared = !needsAudio || job.audioDisabled;
     if (needsAudio && !job.audioDisabled && !job.audioSourcePath.isEmpty()) {
@@ -4768,7 +4773,9 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
                 decoder.getAvsAccessMutex());
         }
     } else if (needsAudio && !job.audioDisabled) {
-        audioPrepared = audioPlayer.openFile(inputPath) && audioPlayer.hasAudio();
+        // Automatic source selection may legitimately find no audio. Failure
+        // opening a specifically selected stream/source is handled above.
+        audioPrepared = audioPlayer.openFile(inputPath);
     }
 
     const auto progress = [this, row](int completed, int total) {
@@ -4789,6 +4796,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
             return false;
         }
         VDQtVideoExporter::ExportOptions options = job.options;
+        options.includeAudio = options.includeAudio && !job.audioDisabled;
         options.processing = processingSnapshotForState(job.processing);
         options.inputPath = inputPath;
         options.protectedSourcePaths = allQueueSources;

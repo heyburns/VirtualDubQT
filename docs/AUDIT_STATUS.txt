@@ -58,7 +58,7 @@ Remaining execution sequence
 [x] P05: stage-wise expanded frame sequences, correct histories and memory budgets.
 [x] M04: continuous fallback from ended/failed/nonadvancing audio clocks.
     Physical sink/short-track playback verification remains a hardware gate.
-[ ] M05/S10: consistent inclusion/disable and silent sources.
+[x] M05/S10: consistent inclusion/disable and silent automatic sources.
 [ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
 [ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
 [ ] Audio follow-up: independently verify continuous sound across masked ranges.

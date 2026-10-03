@@ -845,3 +845,21 @@ underrun and pause/resume checks remain required; no listening result is claimed
 Validation: focused Release 6/6 and ASan/UBSan 6/6 passed (clock, controller
 playback, audio snapshot, stabilization, decoder performance and actual-app
 media smoke). The regular binary rebuilt and passed MP4/native-AVS export smoke.
+
+Explicit audio inclusion and silent jobs (M05/S10)
+------------------------------------------------
+
+The new integration regression first reproduced audio preparation/mapping with
+includeAudio=false. After gating that path it independently reproduced a silent
+full-processing video job failing as an unavailable audio source. Automatic
+absence is now distinguished from an invalid explicit stream/source, queue
+audioDisabled wins over stale includeAudio, and Save Audio uses an offline local
+player to inspect disabled audio without changing live session ownership.
+
+Tests inspect rendered video-only streams, GIF/APNG supplied with an audio
+player, silent/disabled queue completion, explicit unavailable-stream failure,
+and cancelling Save Audio without enabling the live session's disabled audio.
+
+Validation: focused Release 7/7 and ASan/UBSan 7/7 passed (controller, source,
+audio inclusion, queue, stabilization and actual-app media smoke). The regular
+binary rebuilt and independently passed MP4/native-AVS export smoke.
