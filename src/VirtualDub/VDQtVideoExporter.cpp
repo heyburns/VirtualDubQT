@@ -4,6 +4,7 @@
 // the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
 #include "VDQtColorPolicy.h"
+#include "VDQtTimingMath.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
@@ -29,6 +30,7 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <utility>
 #include "VDQtDialogs.h"
 extern "C" {
@@ -44,6 +46,16 @@ namespace {
 constexpr qint64 kMaxQueuedFfmpegBytes = 8 * 1024 * 1024;
 constexpr int kProcessPollMs = 25;
 constexpr int kMaxDiagnosticBytes = 1024 * 1024;
+
+bool audioSampleRange(double startSeconds, double durationSeconds, int rate,
+                      int64_t *first, int64_t *count) {
+    if (!std::isfinite(startSeconds) || !std::isfinite(durationSeconds)
+        || durationSeconds <= 0 || rate <= 0
+        || !VDQtCheckedRoundedNonnegative(static_cast<long double>(std::max(0.0, startSeconds)) * rate, first)
+        || !VDQtCheckedRoundedNonnegative(static_cast<long double>(durationSeconds) * rate, count)) return false;
+    *count = std::max<int64_t>(1, *count);
+    return *first <= std::numeric_limits<int64_t>::max() - *count;
+}
 
 // Export is synchronous from the caller's perspective but continues pumping Qt
 // events for progress/cancel. This filter blocks edits and close/drop actions on
@@ -1186,18 +1198,16 @@ bool VDQtVideoExporter::exportRawVideo(
         }
     }
 
-    int inputFramesToProcess = (selectedSourceFrames + step - 1) / step;
+    int inputFramesToProcess = VDQtDecimatedFrameCount(selectedSourceFrames, step);
     double selectionOutputFps = sourceFps / step;
     if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
         const long double requestedFrames =
             static_cast<long double>(sourceDurationSeconds) * options.customFps;
-        if (!std::isfinite(requestedFrames)
-            || requestedFrames > std::numeric_limits<int>::max()) {
+        if (!VDQtCheckedRoundedNonnegative(requestedFrames, &inputFramesToProcess)) {
             reportError(QStringLiteral("The requested raw frame-rate conversion is too large."));
             return false;
         }
-        inputFramesToProcess = std::max(
-            1, static_cast<int>(std::llround(requestedFrames)));
+        inputFramesToProcess = std::max(1, inputFramesToProcess);
         selectionOutputFps = options.customFps;
         step = 1;
     }
@@ -1279,10 +1289,9 @@ bool VDQtVideoExporter::exportRawVideo(
                 }
                 sourceFrame = low;
             } else {
-                const double sourceOffset = static_cast<double>(inputIndex)
+                const long double sourceOffset = static_cast<long double>(inputIndex)
                     * sourceFps / selectionOutputFps;
-                sourceFrame = startFrame
-                    + static_cast<int>(std::floor(sourceOffset + 1e-9));
+                sourceFrame = VDQtSourceFrameAtOffset(startFrame, endFrame, sourceOffset);
             }
         } else {
             sourceFrame += inputIndex * step;
@@ -1871,17 +1880,17 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         useTimestampFrameMapping = presentationTimestampsUsable;
 
     double fps = sourceFps;
-    int framesToExport = (selectedSourceFrames + step - 1) / step;
+    int framesToExport = VDQtDecimatedFrameCount(selectedSourceFrames, step);
     if (options.convertFpsPreserveDuration && options.customFps > 0.0) {
         fps = options.customFps;
         const long double requestedFrames = static_cast<long double>(sourceDurationSeconds) * fps;
-        if (!std::isfinite(requestedFrames)
-            || requestedFrames > std::numeric_limits<int>::max()) {
+        if (!VDQtCheckedRoundedNonnegative(requestedFrames, &framesToExport)) {
+            mLastError = QStringLiteral("The requested frame-rate conversion is too large.");
             if (parentWidget)
                 QMessageBox::critical(parentWidget, "Export Error", "The requested frame-rate conversion is too large.");
             return false;
         }
-        framesToExport = std::max(1, static_cast<int>(std::llround(requestedFrames)));
+        framesToExport = std::max(1, framesToExport);
         step = 1;
     } else if (options.customFps > 0.0) {
         fps = options.customFps;
@@ -1992,10 +2001,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             processedAudioPath = processedAudioDirectory.filePath(
                 QStringLiteral("fast-recompress-audio.wav"));
             const int sampleRate = std::max(1, audioPlayer->getSampleRate());
-            const int64_t startSample = std::max<int64_t>(0,
-                static_cast<int64_t>(std::llround(sourceStartSeconds * sampleRate)));
-            const int64_t sampleCount = std::max<int64_t>(1,
-                static_cast<int64_t>(std::llround(outputDurationSeconds * sampleRate)));
+            int64_t startSample = 0, sampleCount = 0;
+            if (!audioSampleRange(sourceStartSeconds, outputDurationSeconds, sampleRate, &startSample, &sampleCount)) {
+                mLastError = QStringLiteral("The selected audio time range cannot be represented.");
+                if (parentWidget) QMessageBox::critical(parentWidget, "Audio Export Error", mLastError);
+                removePartialOutput(processOutputPath);
+                return false;
+            }
             QProgressDialog audioProgress(
                 QStringLiteral("Preparing selected audio for fast recompress..."),
                 QStringLiteral("Cancel"), 0, 100, parentWidget);
@@ -2451,8 +2463,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         int sampleRate = audioPlayer->getSampleRate();
         if (sampleRate <= 0) sampleRate = 48000;
 
-        const int64_t startSample = static_cast<int64_t>(std::llround(sourceStartSeconds * sampleRate));
-        const int64_t sampleCount = static_cast<int64_t>(std::llround(outputDurationSeconds * sampleRate));
+        int64_t startSample = 0, sampleCount = 0;
+        if (!audioSampleRange(sourceStartSeconds, outputDurationSeconds, sampleRate, &startSample, &sampleCount)) {
+            mLastError = QStringLiteral("The selected audio time range cannot be represented.");
+            if (parentWidget) QMessageBox::critical(parentWidget, "Audio Export Error", mLastError);
+            return false;
+        }
 
         QProgressDialog audioProgress(
             "Preparing processed audio...", "Cancel", 0, 100, parentWidget);
@@ -2490,11 +2506,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                 } else {
                     segmentDurationSeconds = segment.frameCount / sourceFps;
                 }
-                const int64_t segmentStartSample = static_cast<int64_t>(
-                    std::llround(segmentStartSeconds * sampleRate));
-                const int64_t segmentSampleCount = std::max<int64_t>(
-                    1, static_cast<int64_t>(
-                        std::llround(segmentDurationSeconds * sampleRate)));
+                int64_t segmentStartSample = 0, segmentSampleCount = 0;
+                if (!audioSampleRange(segmentStartSeconds, segmentDurationSeconds, sampleRate,
+                                      &segmentStartSample, &segmentSampleCount)) {
+                    mLastError = QStringLiteral("An edited audio time range cannot be represented.");
+                    audioPrepared = false;
+                    break;
+                }
                 const QString segmentPath = temporaryDirectory.filePath(
                     QString("audio_segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
                 audioPrepared = audioPlayer->exportAudioToFile(
@@ -2802,9 +2820,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             // Timestamp-less elementary streams cannot be searched by PTS.
             // Fall back to CFR index resampling instead of repeatedly choosing
             // frame zero when every timestamp query returns NaN.
-            const double sourceOffset = static_cast<double>(inputIndex)
+            const long double sourceOffset = static_cast<long double>(inputIndex)
                                       * sourceFps / sourceSelectionOutputFps;
-            f = startFrame + static_cast<int>(std::floor(sourceOffset + 1e-9));
+            f = VDQtSourceFrameAtOffset(startFrame, endFrame, sourceOffset);
         } else {
             f += inputIndex * step;
         }
@@ -2874,11 +2892,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                 const double phaseEnd = vfrFrameStart
                     + (vfrFrameEnd - vfrFrameStart)
                         * static_cast<double>(phase + 1) / filteredFrames.size();
-                const qint64 ptsUs = std::llround(
-                    (phaseStart - sourceStartSeconds) * 1000000.0);
-                const qint64 endUs = std::llround(
-                    (phaseEnd - sourceStartSeconds) * 1000000.0);
-                frameWritten = endUs > ptsUs
+                qint64 ptsUs = 0, endUs = 0;
+                const bool validTime = VDQtCheckedRoundedNonnegative(
+                    (static_cast<long double>(phaseStart) - sourceStartSeconds) * 1000000, &ptsUs)
+                    && VDQtCheckedRoundedNonnegative(
+                        (static_cast<long double>(phaseEnd) - sourceStartSeconds) * 1000000, &endUs)
+                    && endUs > ptsUs;
+                if (!validTime) mLastError = QStringLiteral("The processed frame timestamp cannot be represented in microseconds.");
+                frameWritten = validTime
                     && timestampedWriter.writeImage(filtered, ptsUs, endUs - ptsUs);
             } else {
                 frameWritten = writeFrame(
@@ -2908,12 +2929,11 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             .arg(framesToExport)
             .arg(static_cast<int>(100.0 * doneCount / framesToExport))
             .arg(currentFps, 0, 'f', 1)
-            .arg(static_cast<int>(remainingSec)));
+            .arg(remainingSec, 0, 'f', 0));
 
         QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
         if (progressCallback
-            && !progressCallback(100 + doneCount * 850
-                                      / std::max(1, framesToExport),
+            && !progressCallback(100 + VDQtScaledProgress(doneCount, framesToExport, 850),
                                  1000)) {
             cancelled = true;
             break;
@@ -2974,6 +2994,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     if (!success) {
         removePartialOutput(processOutputPath);
         QString errOutput = QString::fromUtf8(diagnostics);
+        if (writeFailed && !mLastError.isEmpty()) errOutput = mLastError;
         if (encoded)
             errOutput = "The completed output could not be committed to its destination.";
         if (writeFailed && errOutput.trimmed().isEmpty())

@@ -34,25 +34,25 @@ void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
 }
 
-// JSON numbers are doubles. Validate before converting, not after: INT64_MAX
-// rounds to 2^63 as a double, so an inclusive double(max) check admits undefined
-// behavior. Missing legacy fields retain their defaults; present wrong types,
-// fractional values and unrepresentable integers must never become defaults.
+// Qt 6 preserves integer JSON numbers at 64-bit precision. Never route those
+// through double (INT64_MAX becomes 2^63, and offsets above 2^53 lose bits).
+// Floating JSON values still need type/integrality checks before toInteger;
+// its failure sentinel must not masquerade as a legitimate destination value.
 template<class Integer>
 bool readIntegerValue(const QJsonValue& value, const QString& name,
                       Integer *destination, qint64 minimum, qint64 maximum,
                       qint64 fallback, QString *errorMessage) {
-    const double number = value.isUndefined() ? static_cast<double>(fallback)
-                                              : value.toDouble();
+    const double number = value.isUndefined() ? 0.0 : value.toDouble();
+    constexpr qint64 failure = std::numeric_limits<qint64>::min();
+    const qint64 integer = value.isUndefined() ? fallback : value.toInteger(failure);
     if ((!value.isUndefined() && !value.isDouble())
         || !std::isfinite(number) || std::trunc(number) != number
-        || number >= std::ldexp(1.0, 63)
-        || static_cast<long double>(number) < static_cast<long double>(minimum)
-        || static_cast<long double>(number) > static_cast<long double>(maximum)) {
+        || (!value.isUndefined() && integer == failure && number != -std::ldexp(1.0, 63))
+        || integer < minimum || integer > maximum) {
         setError(errorMessage, QStringLiteral("The saved integer '%1' is invalid.").arg(name));
         return false;
     }
-    *destination = static_cast<Integer>(number);
+    *destination = static_cast<Integer>(integer);
     return true;
 }
 
@@ -602,7 +602,7 @@ bool VDQtProjectFile::saveProject(
     root["rawWidth"] = state.rawWidth;
     root["rawHeight"] = state.rawHeight;
     root["rawFrameRate"] = state.rawFrameRate;
-    root["rawByteOffset"] = static_cast<double>(state.rawByteOffset);
+    root["rawByteOffset"] = state.rawByteOffset;
     if (!state.audioSourcePath.isEmpty()) {
         const QFileInfo audioInfo(state.audioSourcePath);
         root["audioSourcePath"] = audioInfo.isAbsolute()
@@ -611,26 +611,25 @@ bool VDQtProjectFile::saveProject(
     }
     root["audioStreamIndex"] = state.audioStreamIndex;
     root["audioDisabled"] = state.audioDisabled;
-    root["position"] = static_cast<double>(state.position);
+    root["position"] = state.position;
     root["hasSelection"] = state.hasSelection;
-    root["selectionStart"] = static_cast<double>(state.selectionStart);
-    root["selectionEnd"] = static_cast<double>(state.selectionEnd);
+    root["selectionStart"] = state.selectionStart;
+    root["selectionEnd"] = state.selectionEnd;
     root["zoomEnabled"] = state.zoomEnabled;
-    root["zoomStart"] = static_cast<double>(state.zoomStart);
-    root["zoomEnd"] = static_cast<double>(state.zoomEnd);
+    root["zoomStart"] = state.zoomStart;
+    root["zoomEnd"] = state.zoomEnd;
     QJsonArray markers;
     for (qint64 marker : state.markers)
-        markers.append(static_cast<double>(marker));
+        markers.append(marker);
     root["markers"] = markers;
-    root["sourceFrameCount"] = static_cast<double>(state.sourceFrameCount);
+    root["sourceFrameCount"] = state.sourceFrameCount;
     root["sourceFrameCountExact"] = state.sourceFrameCountExact;
     root["timelineExplicit"] = state.hasExplicitTimeline();
     QJsonArray timelineSegments;
     for (const VDQtTimelineSegment& segment : state.timelineSegments) {
         QJsonObject segmentObject;
-        segmentObject["sourceStartFrame"] =
-            static_cast<double>(segment.sourceStartFrame);
-        segmentObject["frameCount"] = static_cast<double>(segment.frameCount);
+        segmentObject["sourceStartFrame"] = segment.sourceStartFrame;
+        segmentObject["frameCount"] = segment.frameCount;
         segmentObject["masked"] = segment.masked;
         timelineSegments.append(segmentObject);
     }
@@ -883,7 +882,7 @@ bool VDQtProjectFile::saveJobQueue(
         object["rawWidth"] = job.rawWidth;
         object["rawHeight"] = job.rawHeight;
         object["rawFrameRate"] = job.rawFrameRate;
-        object["rawByteOffset"] = static_cast<double>(job.rawByteOffset);
+        object["rawByteOffset"] = job.rawByteOffset;
         if (!job.audioSourcePath.isEmpty()) {
             const QFileInfo audioInfo(job.audioSourcePath);
             object["audioSourcePath"] = audioInfo.isAbsolute()
@@ -919,9 +918,8 @@ bool VDQtProjectFile::saveJobQueue(
         QJsonArray timelineSegments;
         for (const VDQtTimelineSegment& segment : job.options.timelineSegments) {
             QJsonObject segmentObject;
-            segmentObject["sourceStartFrame"] =
-                static_cast<double>(segment.sourceStartFrame);
-            segmentObject["frameCount"] = static_cast<double>(segment.frameCount);
+            segmentObject["sourceStartFrame"] = segment.sourceStartFrame;
+            segmentObject["frameCount"] = segment.frameCount;
             segmentObject["masked"] = segment.masked;
             timelineSegments.append(segmentObject);
         }

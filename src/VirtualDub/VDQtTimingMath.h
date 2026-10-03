@@ -6,6 +6,37 @@
 #include <cstdint>
 #include <limits>
 
+// Output timing/counts must fail, not saturate and publish a different export.
+// A power-of-two exclusive ceiling avoids INT64_MAX rounding up as double on
+// platforms where long double has no additional mantissa precision.
+template<class Integer>
+inline bool VDQtCheckedRoundedNonnegative(long double value, Integer *result) {
+    static_assert(std::numeric_limits<Integer>::is_integer && std::numeric_limits<Integer>::is_signed);
+    const long double rounded = std::round(value);
+    if (!result || !std::isfinite(rounded) || rounded < 0
+        || rounded >= std::ldexp(1.0L, std::numeric_limits<Integer>::digits)) return false;
+    *result = static_cast<Integer>(rounded);
+    return true;
+}
+
+inline int VDQtDecimatedFrameCount(int frames, int step) {
+    return frames <= 0 ? 0 : 1 + (frames - 1) / std::max(1, step);
+}
+
+inline int VDQtSourceFrameAtOffset(int first, int last, long double offset) {
+    first = std::max(0, first);
+    last = std::max(first, last);
+    const int span = last - first;
+    if (std::isnan(offset) || offset <= 0) return first;
+    if (offset >= span) return last;
+    return first + static_cast<int>(std::floor(offset + 1e-9L));
+}
+
+inline int VDQtScaledProgress(int current, int total, int scale) {
+    total = std::max(1, total);
+    return static_cast<int>(int64_t(std::clamp(current, 0, total)) * std::max(0, scale) / total);
+}
+
 // Time/rate products can exceed integer domains even when both inputs are
 // finite. Bound in floating-point BEFORE rounding/casting. Positions past a
 // known source end clamp to that end; unknown lengths use the integer ceiling.

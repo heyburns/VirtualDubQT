@@ -1541,6 +1541,15 @@ bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
     QString error;
     if (!VDQtProjectFile::saveProject(projectPath, project, &error)) return false;
     const auto original = QJsonDocument::fromJson(readFile(projectPath)).object();
+    for (qint64 offset : {qint64{9007199254740993}, std::numeric_limits<qint64>::max()}) {
+        auto saved = project;
+        saved.rawByteOffset = offset;
+        VDQtProjectState restored;
+        if (!check(VDQtProjectFile::saveProject(projectPath, saved, &error)
+                   && VDQtProjectFile::loadProject(projectPath, &restored, &error)
+                   && restored.rawByteOffset == offset,
+                   "64-bit project offsets round-trip exactly, including above double precision")) return false;
+    }
     const QMap<QString, QStringList> processingIntegers = {
         {"", {"videoMode", "audioMode"}},
         {"frameRate", {"sourceMode", "conversionMode", "decimateN"}},
@@ -1646,6 +1655,15 @@ bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
     job.options.outputPath = fixtures.directory.filePath("numeric-output.mkv");
     if (!VDQtProjectFile::saveJobQueue(jobPath, {job}, &error)) return false;
     const auto originalQueue = QJsonDocument::fromJson(readFile(jobPath)).object();
+    for (qint64 offset : {qint64{9007199254740993}, std::numeric_limits<qint64>::max()}) {
+        auto saved = job;
+        saved.rawByteOffset = offset;
+        QList<VDQtJobState> restored;
+        if (!check(VDQtProjectFile::saveJobQueue(jobPath, {saved}, &error)
+                   && VDQtProjectFile::loadJobQueue(jobPath, &restored, &error)
+                   && restored.size() == 1 && restored.first().rawByteOffset == offset,
+                   "64-bit queue offsets round-trip exactly, including above double precision")) return false;
+    }
     for (const QString& key : {QString("progress"), QString("imageSequenceFps"),
                               QString("rawFrameRate"), QString("customFps")}) {
         auto queueRoot = originalQueue;
@@ -1737,7 +1755,7 @@ bool scriptIntegerInputs(VDQtTestFixtures& fixtures) {
             std::cerr << invalid.toStdString() << '\n'; return false;
         }
     }
-    return check(window.runAutomationText(
+    if (!check(window.runAutomationText(
         "VirtualDub.video.filters.Clear();VirtualDub.video.filters.Add(\"resize\");"
         "VirtualDub.video.filters.instance[0].Config(64,48,\"point\",80,60,0xFFFFFFFF);"
         "VirtualDub.video.filters.Add(\"fill\");"
@@ -1747,7 +1765,25 @@ bool scriptIntegerInputs(VDQtTestFixtures& fixtures) {
         "VirtualDub.audio.filters.instance[0].SetLong(2,1234567890123);"
         "VirtualDub.video.SetFrameRate2(30000,1001,1);",
         fixtures.directory.path(), &error),
-        "legitimate uint32 colors, auto conversion and unused 64-bit audio settings still execute");
+        "legitimate uint32 colors, auto conversion and unused 64-bit audio settings still execute")) return false;
+    const QString verySlowClip = fixtures.directory.filePath("very-low-rate.avs");
+    VDQtFilterSystem::instance().clearFilters();
+    if (!fixtures.writeText(verySlowClip,
+        "BlankClip(length=3,width=64,height=48,pixel_type=\"RGB32\",fps=1,fps_denominator=2147483647,audio_rate=0)\n")) return false;
+    // Fail malformed fixtures before entering the editor's source-error dialog.
+    {
+        VDQtVideoDecoder validation;
+        if (!check(validation.openFile(verySlowClip), "low-rate fixture validates before GUI open")) {
+            std::cerr << validation.getLastError().toStdString() << '\n';
+            return false;
+        }
+    }
+    if (!window.openVideoFile(verySlowClip)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!position) return false;
+    position->SetPosition(2);
+    return check(waitFor([&] { return window.statusBar()->currentMessage().contains("1193046:28:14.000"); }),
+                 "real low-rate AVS preview uses safe hour/minute/second formatting");
 }
 
 bool sourceProtection(VDQtTestFixtures& fixtures) {

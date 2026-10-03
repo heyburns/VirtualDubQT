@@ -6,6 +6,7 @@
 #include "VDQtFilterFrameContext.h"
 #include "VDQtCapturePolicy.h"
 #include "VDQtTimingMath.h"
+#include "VDQtTimeFormatting.h"
 #include "VDQtFilterValidation.h"
 #include "VDQtAudioExport.h"
 #include "VDQtSourceSafety.h"
@@ -9384,16 +9385,7 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
     if (mTimeline.isModified())
         timeSeconds = VDQtFilterContextForFrame(mVideoDecoder, mTimeline.segments(), timelineFrame).timestampSeconds;
     if (!std::isfinite(timeSeconds)) timeSeconds = (fps > 0) ? (timelineFrame / fps) : 0;
-        int hours = static_cast<int>(timeSeconds / 3600);
-        int mins = static_cast<int>((timeSeconds - hours * 3600) / 60);
-        int secs = static_cast<int>(timeSeconds) % 60;
-        int msecs = static_cast<int>((timeSeconds - static_cast<int>(timeSeconds)) * 1000);
-
-        QString timeStr = QString("%1:%2:%3.%4")
-            .arg(hours, 2, 10, QChar('0'))
-            .arg(mins, 2, 10, QChar('0'))
-            .arg(secs, 2, 10, QChar('0'))
-            .arg(msecs, 3, 10, QChar('0'));
+    const QString timeStr = VDQtFormatTimeSeconds(timeSeconds, true);
 
     QString lastFrame = frameCount > 0 ? QString::number(frameCount - 1) : QStringLiteral("?");
     if (frameCountStatus == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Estimated))

@@ -2,6 +2,7 @@
 // Dialogs edit copies of plain configuration values and commit on acceptance;
 // preview subdialogs may process the supplied still image but do not own media.
 #include "VDQtDialogs.h"
+#include "VDQtTimeFormatting.h"
 #include "VDQtFilterValidation.h"
 #include <algorithm>
 #include <cmath>
@@ -4407,26 +4408,7 @@ QString VDJumpToPositionDialog::formatFrameTime(qint64 frame,
                                                 double frameRate) {
     if (frame < 0 || !std::isfinite(frameRate) || frameRate <= 0.0)
         return QStringLiteral("0:00.000");
-    const qint64 totalMilliseconds = static_cast<qint64>(std::llround(
-        static_cast<long double>(frame) * 1000.0L / frameRate));
-    qint64 ticks = std::max<qint64>(0, totalMilliseconds);
-    const int milliseconds = static_cast<int>(ticks % 1000);
-    ticks /= 1000;
-    const int seconds = static_cast<int>(ticks % 60);
-    ticks /= 60;
-    const int minutes = static_cast<int>(ticks % 60);
-    const qint64 hours = ticks / 60;
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3.%4")
-            .arg(hours)
-            .arg(minutes, 2, 10, QLatin1Char('0'))
-            .arg(seconds, 2, 10, QLatin1Char('0'))
-            .arg(milliseconds, 3, 10, QLatin1Char('0'));
-    }
-    return QStringLiteral("%1:%2.%3")
-        .arg(minutes)
-        .arg(seconds, 2, 10, QLatin1Char('0'))
-        .arg(milliseconds, 3, 10, QLatin1Char('0'));
+    return VDQtFormatTimeSeconds(static_cast<long double>(frame) / frameRate);
 }
 
 void VDJumpToPositionDialog::accept() {

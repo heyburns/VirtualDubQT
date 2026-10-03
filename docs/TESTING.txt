@@ -1172,3 +1172,30 @@ when the test intentionally has no output device. Full Release 59/59 and
 ASan/UBSan 55/55 passed, plus the independently rebuilt regular application's
 MP4/native-AVS smoke. Remaining exporter/server timestamp arithmetic is tracked
 separately; physical sink/listening coverage is not claimed.
+
+Export counts/timestamps and exact saved offsets (M21 / C04 follow-up)
+---------------------------------------------------------------------
+
+Decimation ceiling division no longer adds two potentially maximal ints.
+Timestamp-less rate mapping bounds its offset before narrowing; requested output
+counts, PCM ranges and NUT microsecond clocks use checked (not saturated) output
+conversion. Unrepresentable output timing fails with a retained diagnostic rather
+than publishing a different result. Long-export progress multiplies in 64 bits,
+and ETA formatting avoids an int cast. Status and jump-dialog time text share
+component-wise formatting; hours do not require total seconds/milliseconds to
+fit in int first. Unsupported extreme display times have an explicit message.
+
+Tests reproduced jump time overflow and lost raw-offset precision above 2^53.
+Qt 6 integer JSON storage is now used end to end instead of passing saved integer
+offsets through double. Project and queue round trips preserve 2^53+1 and
+INT64_MAX, while rounded/out-of-domain floating JSON is still rejected. Pure
+checks cover maximal decimation, progress, source-offset bounds and 2^63 clock
+rejection. A built-in three-frame AVS clip at 1/2147483647 fps verifies the actual
+preview status at frame 2. Its BlankClip argument follows the official syntax:
+https://avisynthplus.readthedocs.io/en/latest/avisynthdoc/corefilters/blankclip.html
+
+The initial fixture used the wrong argument name and blocked in the editor's
+interactive error dialog; it was corrected and now validates before GUI open.
+After correction and the final integer-precision checks, full Release 59/59 and
+ASan/UBSan 55/55 passed, plus the independently rebuilt regular application's
+MP4/native-AVS smoke. Frame-server timing is a separate pending repair.

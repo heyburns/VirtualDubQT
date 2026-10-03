@@ -1,11 +1,20 @@
 // Real context-menu lifetime and exclusive-action checks, without a desktop.
 #include "VirtualDub/VDQtVideoDisplay.h"
+#include "VirtualDub/VDQtDialogs.h"
 #include <QApplication>
 #include <QTimer>
 #include <iostream>
+#include <limits>
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    if (VDJumpToPositionDialog::formatFrameTime(2, 1.0 / 2147483647)
+            != QStringLiteral("1193046:28:14.000")
+        || VDJumpToPositionDialog::formatFrameTime(std::numeric_limits<qint64>::max(), 1e-20)
+            != QStringLiteral("Time exceeds the supported display range")) {
+        std::cerr << "FAIL: very long frame times must not overflow or become zero\n";
+        return 1;
+    }
     VDVideoDisplayWidget display(QStringLiteral("Input"));
     display.show();
     for (int cycle = 0; cycle < 20; ++cycle) {

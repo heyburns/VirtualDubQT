@@ -80,7 +80,9 @@ Remaining execution sequence
     source/output rates reject present malformed values instead of defaulting;
     packed colors and filter size types are checked, playback/frame stepping and
     time-to-sample rounding are bounded, and temporal-history increments are safe.
-    Remaining exporter/server timestamp/count calculations are still open.
+    Export counts, audio sample ranges, microsecond timestamps and progress are
+    checked; status/jump times share overflow-safe formatting and saved 64-bit
+    offsets retain exact integer precision. Frame-server clock math remains open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
 [x] M07: timed capture stops independently of preview output (hardware verification pending).

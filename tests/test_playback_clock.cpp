@@ -12,6 +12,19 @@ bool near(double actual, double expected) {
 }
 
 int main() {
+    int frames = 0;
+    int64_t ticks = 0;
+    if (!VDQtCheckedRoundedNonnegative(24.4L, &frames) || frames != 24
+        || VDQtCheckedRoundedNonnegative(1e100L, &ticks)
+        || VDQtCheckedRoundedNonnegative(std::ldexp(1.0L, 63), &ticks)
+        || !VDQtCheckedRoundedNonnegative(1234567890123.0L, &ticks) || ticks != 1234567890123
+        || VDQtDecimatedFrameCount(std::numeric_limits<int>::max(), 1000000) != 2148
+        || VDQtSourceFrameAtOffset(10, 20, 1e100L) != 20
+        || VDQtSourceFrameAtOffset(10, 20, 4.5L) != 14
+        || VDQtScaledProgress(std::numeric_limits<int>::max(), std::numeric_limits<int>::max(), 850) != 850) {
+        std::cerr << "Checked output timing/count math failed\n";
+        return 1;
+    }
     const auto ordinary = VDQtAdvanceFrame(5, 0.1, 0.04, 3);
     const auto decimated = VDQtAdvanceFrame(10, 3.0, 0.001, 1000000);
     const auto delayed = VDQtAdvanceFrame(0, 1e100, 0.001, 1);

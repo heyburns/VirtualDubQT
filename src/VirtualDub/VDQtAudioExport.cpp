@@ -6,6 +6,7 @@
 #include "VDQtVideoDecoder.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtOutputTransaction.h"
+#include "VDQtTimingMath.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
@@ -21,11 +22,7 @@ bool fail(QString *error, const QString& message) {
     return false;
 }
 bool sampleBoundary(double seconds, int rate, qint64 *result) {
-    const long double sample = std::round(static_cast<long double>(seconds) * rate);
-    if (!std::isfinite(sample) || sample < 0
-        || sample > static_cast<long double>(std::numeric_limits<qint64>::max())) return false;
-    *result = static_cast<qint64>(sample);
-    return true;
+    return VDQtCheckedRoundedNonnegative(static_cast<long double>(seconds) * rate, result);
 }
 }
 
