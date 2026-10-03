@@ -204,6 +204,8 @@ if (BUILD_TESTING)
     # Smaller decoder-only suites cannot cover main-window integration failures.
     add_executable(application_baseline_tests
         tests/test_application_baseline.cpp
+        tests/VDQtOperationRegressions.h
+        tests/VDQtOperationRegressions.cpp
         tests/support/VDQtTestFixtures.h
         tests/support/VDQtTestFixtures.cpp
         ${VIRTUALDUB_QT_SOURCES}
@@ -222,6 +224,13 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    foreach(operation_case IN ITEMS source snapshot audio queue)
+        add_test(NAME operation_${operation_case}
+            COMMAND application_baseline_tests --operation-test ${operation_case})
+        set_tests_properties(operation_${operation_case} PROPERTIES
+            LABELS "integration;lifetime;isolation" TIMEOUT 120
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    endforeach()
 
     # Large integration suite covering workflows that cross module boundaries.
     add_executable(stabilization_tests

@@ -7,6 +7,15 @@
 
 namespace {
 
+int gLiveInstances = 0;
+int __cdecl initializeFilter(VDXFilterActivation *, const VDXFilterFunctions *) {
+    ++gLiveInstances;
+    return 0;
+}
+void __cdecl destroyFilter(VDXFilterActivation *, const VDXFilterFunctions *) {
+    --gLiveInstances;
+}
+
 long __cdecl filterParameters(VDXFilterActivation *activation,
                               const VDXFilterFunctions *) {
     if (!activation || !activation->src.mpPixmapLayout
@@ -55,6 +64,8 @@ int VirtualdubFilterModuleInit2(VDXFilterModule *module,
         "Regression filter for the Linux-native VDX compatibility host.";
     gDefinition.maker = "VirtualDubQt";
     gDefinition.runProc = runFilter;
+    gDefinition.initProc = initializeFilter;
+    gDefinition.deinitProc = destroyFilter;
     gDefinition.paramProc = filterParameters;
     return functions && functions->addFilter
         && functions->addFilter(module, &gDefinition, sizeof gDefinition)
@@ -64,3 +75,7 @@ int VirtualdubFilterModuleInit2(VDXFilterModule *module,
 extern "C" __attribute__((visibility("default")))
 void VirtualdubFilterModuleDeinit(VDXFilterModule *,
                                   const VDXFilterFunctions *) {}
+
+// Test-only observability; no production host API or third-party ABI changes.
+extern "C" __attribute__((visibility("default")))
+int VDQtTestLiveInstances() { return gLiveInstances; }

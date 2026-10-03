@@ -10,6 +10,7 @@
 #include <QIODevice>
 #include <QMutex>
 #include <QWaitCondition>
+#include "VDQtAudioFilterSystem.h"
 
 class QThread;
 
@@ -105,7 +106,7 @@ private:
 // not destroy or replace a shared AviSynth decoder until close() returns.
 class VDQtAudioPlayer {
 public:
-    VDQtAudioPlayer();
+    explicit VDQtAudioPlayer(bool playbackEnabled = true);
     ~VDQtAudioPlayer();
 
     bool openFile(const QString& filePath, int requestedStreamIndex = -1);
@@ -144,11 +145,13 @@ public:
 
     QString getAudioLayoutString() const;
     QString getAudioCompressionString() const;
-    bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr);
+    bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr,
+                           const QList<VDAudioFilterInstance> *filterChain = nullptr);
     bool exportAudioRangesToFile(
         const QString& outputPath,
         const QList<QPair<int64_t, int64_t>>& sampleRanges,
-        std::function<bool(int progress, int total)> progressCallback = nullptr);
+        std::function<bool(int progress, int total)> progressCallback = nullptr,
+        const QList<VDAudioFilterInstance> *filterChain = nullptr);
 
 #ifdef VDQT_AUDIO_TESTING
     bool lastExportUsedSeekForTesting() const { return mLastExportUsedSeek; }
@@ -156,6 +159,7 @@ public:
 #endif
 
 private:
+    bool mPlaybackEnabled = true;
     // Logical source description.
     bool mIsOpen;
     bool mHasAudio;

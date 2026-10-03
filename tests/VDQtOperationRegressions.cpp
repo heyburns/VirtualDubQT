@@ -1,0 +1,294 @@
+// Real-controller regressions for source ownership and export isolation. All
+// media/settings/queues are disposable; no physical playback device is needed.
+#include "VDQtOperationRegressions.h"
+#include "support/VDQtTestFixtures.h"
+#include "VirtualDub/VDQtMainWindow.h"
+
+#include <QApplication>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QKeyEvent>
+#include <QThread>
+#include <QtEndian>
+#include <iostream>
+
+namespace {
+bool check(bool condition, const char *message) {
+    if (!condition) std::cerr << "FAIL: " << message << '\n';
+    return condition;
+}
+template <class Predicate> bool waitFor(Predicate predicate) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!predicate() && timer.elapsed() < 5000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(1);
+    }
+    return predicate();
+}
+bool invoke(VDQtMainWindow& window, const char *method) {
+    return QMetaObject::invokeMethod(&window, method, Qt::DirectConnection);
+}
+QList<VDFilterInstance> invertChain() {
+    VDQtFilterSystem factory;
+    factory.addFilter(VDFilterType::InvertColor);
+    return factory.getActiveChain();
+}
+QByteArray readFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return file.readAll();
+}
+
+bool sourceLifetime(VDQtTestFixtures& fixtures) {
+    const QString audioAvs = fixtures.directory.filePath("source-audio.avs");
+    QByteArray script = readFile(fixtures.avs);
+    script.replace("audio_rate=0", "audio_rate=48000");
+    if (!fixtures.writeText(audioAvs, script)) return false;
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!check(panes.size() == 2 && position, "preview/controller available")) return false;
+    for (int cycle = 0; cycle < 12; ++cycle) {
+        if (!window.openVideoFile(audioAvs)
+            || !waitFor([&] { return !panes.first()->frameImage().isNull(); })) return false;
+        bool delivered = false, opened = false;
+        QTimer::singleShot(0, &window, [&] {
+            delivered = true;
+            opened = window.openVideoFile(fixtures.mp4);
+        });
+        invoke(window, "onFileClose");
+        // Before the fix Close dispatched this Open and then destroyed its new
+        // source. A closed preview now stays closed until the outer call returns.
+        if (!check(!delivered && panes.first()->frameImage().isNull(),
+                   "Close does not dispatch queued Open during teardown")
+            || !check(waitFor([&] { return delivered && opened
+                    && !panes.first()->frameImage().isNull(); }),
+                   "queued Open completes after Close")) return false;
+        for (int i = 0; i < 10; ++i) {
+            QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                                      Q_ARG(int, VDQT_PCN_PLAY));
+            QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                                      Q_ARG(int, VDQT_PCN_STOP));
+        }
+    }
+    // Open itself can dispatch events while sizing the window. Coalesce two
+    // competing requests and load the latest only after the transition ends.
+    bool attempted = false;
+    QTimer::singleShot(0, &window, [&] {
+        attempted = true;
+        window.openVideoFile(fixtures.mp4);
+        window.openVideoFile(fixtures.avs);
+    });
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    return check(waitFor([&] { return attempted
+            && window.windowTitle().contains("source.avs")
+            && !panes.first()->frameImage().isNull(); }),
+        "latest reentrant Open is applied after the transition");
+}
+
+bool exportSnapshot(VDQtTestFixtures& fixtures) {
+    const auto chain = invertChain();
+    VDQtFilterSystem::instance().replaceActiveChain(chain);
+    VDQtVideoDecoder decoder;
+    if (!decoder.openFile(fixtures.avs)) return false;
+    VDQtFilterSystem reference;
+    reference.replaceActiveChainTransient(chain);
+    const QImage expected = reference.processFrame(decoder.getFrameImage(0))
+        .convertToFormat(QImage::Format_ARGB32);
+    const QByteArray expectedFrame(reinterpret_cast<const char *>(expected.constBits()),
+                                   expected.sizeInBytes());
+    VDQtVideoExporter exporter;
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = fixtures.avs;
+    raw.outputPath = fixtures.directory.filePath("snapshot.raw");
+    raw.pixelFormat = "bgra";
+    raw.endFrame = 7;
+    raw.unattended = true;
+    bool changed = false;
+    if (!exporter.exportRawVideo(raw, &decoder, nullptr, nullptr,
+            [&](int, int) {
+                VDQtFilterSystem::instance().clearFilters();
+                // Even the caller's request is allowed to go out of date. The
+                // current operation must not consult it again after entry.
+                raw.endFrame = 0;
+                changed = true;
+                return true;
+            })) return check(false, "raw snapshot export succeeds");
+    if (!check(changed && readFile(fixtures.directory.filePath("snapshot.raw"))
+                    == expectedFrame.repeated(8), "raw output uses the captured chain/range")) return false;
+
+    VDQtFilterSystem::instance().replaceActiveChain(chain);
+    VDQtVideoExporter::ExportOptions video;
+    video.inputPath = fixtures.avs;
+    video.outputPath = fixtures.directory.filePath("snapshot.mkv");
+    video.videoCodecOverride = "ffv1";
+    video.videoPixelFormatOverride = "bgra";
+    video.includeAudio = false;
+    video.endFrame = 7;
+    video.unattended = true;
+    bool pixelsMatch = true;
+    int framesSeen = 0;
+    const bool result = exporter.exportVideo(video, &decoder, nullptr, nullptr,
+        [&](int, const QImage&, const QImage& frame) {
+            pixelsMatch &= frame.convertToFormat(QImage::Format_ARGB32) == expected;
+            ++framesSeen;
+            VDQtFilterSystem::instance().clearFilters();
+        }, [&](int, int) {
+            VDQtFilterSystem::instance().clearFilters();
+            video.endFrame = 0;
+            return true;
+        });
+    if (!check(result && framesSeen == 8 && pixelsMatch,
+               "video output uses captured settings before its first callback")) return false;
+    QWidget editor;
+    editor.show();
+    bool errorDismissed = false;
+    QTimer::singleShot(0, [&] {
+        if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(box, &enter);
+            errorDismissed = !box->isVisible();
+            // Always unblock the test process, even when the assertion fails.
+            if (!errorDismissed) box->accept();
+        }
+    });
+    return check(!exporter.exportRawVideo({}, nullptr, nullptr, &editor)
+                    && errorDismissed, "editor locking leaves export error dialogs usable");
+}
+
+bool audioSnapshot(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("tone.wav");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "sine=frequency=440:duration=0.1:sample_rate=48000",
+                          "-c:a", "pcm_s16le", source})) return false;
+    VDQtAudioPlayer audio(false);
+    if (!check(audio.openFile(source) && audio.hasAudio(), "offline audio opens without a playback sink"))
+        return false;
+    auto& editor = VDQtAudioFilterSystem::instance();
+    auto mute = editor.createFilter(VDAudioFilterType::Gain);
+    mute.params["decibels"] = -120;
+    auto loud = mute;
+    loud.params["decibels"] = 12;
+    QList<VDAudioFilterInstance> captured{mute};
+    editor.replaceActiveChain({loud});
+    const QString single = fixtures.directory.filePath("muted.wav");
+    if (!audio.exportAudioToFile(single, 0, 1024, [&](int, int) {
+            captured = {loud};
+            return true;
+        }, &captured)) return check(false, "explicit audio snapshot exports");
+    editor.replaceActiveChain({mute});
+    const QString ranges = fixtures.directory.filePath("muted-ranges.wav");
+    if (!audio.exportAudioRangesToFile(ranges, {{0, 512}, {512, 512}}, [&](int, int) {
+            editor.replaceActiveChain({loud});
+            return true;
+        })) return check(false, "range audio snapshot exports");
+    for (const QString& path : {single, ranges}) {
+        const auto wav = readFile(path);
+        const auto data = wav.indexOf("data", 12);
+        if (!check(data >= 0 && data + 8 <= wav.size(), "WAV has PCM data")) return false;
+        const quint32 bytes = qFromLittleEndian<quint32>(wav.constData() + data + 4);
+        if (!check(bytes == 2048 && data + 8 + bytes <= wav.size(), "snapshot has exactly 1024 samples")) return false;
+        for (quint32 offset = 0; offset < bytes; offset += 2) {
+            const qint16 sample = qFromLittleEndian<qint16>(wav.constData() + data + 8 + offset);
+            if (!check(std::abs(int(sample)) <= 1, "captured mute survives filter changes in callbacks")) return false;
+        }
+    }
+    return true;
+}
+
+bool queueIsolation(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!position || !queue) return false;
+    VDQtFilterSystem::instance().clearFilters();
+    VDQtFilterSystem::instance().addFilter(VDFilterType::Grayscale);
+    const auto originalChain = VDQtFilterSystem::instance().getActiveChain();
+    const QString title = window.windowTitle();
+    QDialog previousSettingsDialog(&window);
+    const qint64 range = position->GetRangeEnd();
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::RawVideoExport;
+    job.sourcePaths = {fixtures.avs};
+    job.audioDisabled = true;
+    job.options.outputPath = fixtures.directory.filePath("queued.raw");
+    job.options.endFrame = 7;
+    job.processing.filters = invertChain();
+    job.processing.rawVideo.pixelFormat = "bgra";
+    if (!queue->addJobs({job})) return false;
+    bool exercised = false, blocked = true, editorUnchanged = true;
+    QObject::connect(queue, &VDQtJobQueue::jobChanged, &window, [&](int row) {
+        const auto *running = queue->jobAt(row);
+        if (exercised || !running || running->status != VDQtJobStatus::Running) return;
+        exercised = true;
+        blocked &= previousSettingsDialog.property("vdqtExistingOperationDialog").toBool();
+        blocked &= !window.openVideoFile(fixtures.avs);
+        QString error;
+        blocked &= !window.runAutomationText("VirtualDub.Close();", fixtures.directory.path(), &error);
+        blocked &= !error.isEmpty();
+        invoke(window, "onFileClose");
+        invoke(window, "onEditDelete");
+        invoke(window, "onFileExportFilmstrip"); // Must return before any dialog.
+        invoke(window, "onVideoFilters");
+        invoke(window, "runPendingJobs");
+        QMetaObject::invokeMethod(&window, "reloadQueuedJob", Qt::DirectConnection, Q_ARG(int, 0));
+        const auto& active = VDQtFilterSystem::instance().getActiveChain();
+        editorUnchanged &= window.windowTitle() == title && position->GetRangeEnd() == range
+            && active.size() == 1 && active.first().id == originalChain.first().id;
+    });
+    invoke(window, "runPendingJobs");
+    if (!check(exercised && blocked && editorUnchanged, "jobs block reentrant editor actions")
+        || !check(queue->jobAt(0)->status == VDQtJobStatus::Complete,
+                  "job completes with its own processing chain")) return false;
+    VDQtVideoDecoder source;
+    if (!source.openFile(fixtures.avs)) return false;
+    VDQtFilterSystem reference;
+    reference.replaceActiveChainTransient(job.processing.filters);
+    const QImage expected = reference.processFrame(source.getFrameImage(0))
+        .convertToFormat(QImage::Format_ARGB32);
+    const QByteArray expectedFrame(reinterpret_cast<const char *>(expected.constBits()),
+                                   expected.sizeInBytes());
+    if (!check(readFile(job.options.outputPath) == expectedFrame.repeated(8),
+               "job pixels use job settings, not editor settings")) return false;
+    const auto& after = VDQtFilterSystem::instance().getActiveChain();
+    if (!check(after.size() == 1 && after.first().id == originalChain.first().id,
+               "job does not replace the session chain")) return false;
+
+    job.options.outputPath = fixtures.directory.filePath("aborted.raw");
+    // Existing outputs from unresolved script dependencies are deliberately
+    // conservative in queue validation. That separate source-safety contract
+    // is not what this cancellation test exercises.
+    queue->clearCompleted();
+    QString error;
+    if (!queue->addJobs({job}, &error)) {
+        std::cerr << "FAIL: add abort job: " << error.toStdString() << '\n';
+        return false;
+    }
+    QObject::connect(queue, &VDQtJobQueue::jobChanged, &window, [&](int row) {
+        const auto *running = queue->jobAt(row);
+        if (row == 0 && running && running->status == VDQtJobStatus::Running
+            && running->progress >= 0.25)
+            invoke(window, "abortCurrentJob");
+    });
+    invoke(window, "runPendingJobs");
+    return check(queue->jobAt(0)->status == VDQtJobStatus::Cancelled
+                    && !QFileInfo::exists(job.options.outputPath)
+                    && window.menuBar()->isEnabled() && position->isEnabled()
+                    && !previousSettingsDialog.property("vdqtExistingOperationDialog").toBool()
+                    && window.openVideoFile(fixtures.avs),
+                 "abort stays available and operation ownership is released");
+}
+} // namespace
+
+bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
+    if (scenario == "source") return sourceLifetime(fixtures);
+    if (scenario == "snapshot") return exportSnapshot(fixtures);
+    if (scenario == "audio") return audioSnapshot(fixtures);
+    if (scenario == "queue") return queueIsolation(fixtures);
+    return check(false, "unknown operation regression");
+}

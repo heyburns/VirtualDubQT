@@ -103,6 +103,8 @@ class VDQtFilterSystem {
 public:
     VDQtFilterSystem();
     ~VDQtFilterSystem();
+    VDQtFilterSystem(const VDQtFilterSystem&) = delete;
+    VDQtFilterSystem& operator=(const VDQtFilterSystem&) = delete;
 
     static VDQtFilterSystem& instance();
 
@@ -154,6 +156,11 @@ public:
     VDFilterTimingInfo getTimingInfo() const;
 
 private:
+    void forgetRuntimeInstances();
+    QString runtimeInstanceId(const QString& filterId) const;
+    // Serialized IDs describe configuration, not runtime ownership. Two
+    // pipelines with the same chain must never share/clear native instances.
+    QString mRuntimeNamespace;
     // Runs one temporal phase through every enabled filter in chain order.
     QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask,
                                 const VDFilterFrameContext& context);

@@ -2251,8 +2251,9 @@ qint64 AVSAudioDevice::writeData(const char *, qint64)
 // Session audio-player facade and stream selection
 // ---------------------------------------------------------------------------
 
-VDQtAudioPlayer::VDQtAudioPlayer()
-    : mIsOpen(false)
+VDQtAudioPlayer::VDQtAudioPlayer(bool playbackEnabled)
+    : mPlaybackEnabled(playbackEnabled)
+    , mIsOpen(false)
     , mHasAudio(false)
     , mIsPlaying(false)
     , mIsAvsAudio(false)
@@ -2373,7 +2374,7 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip,
     format.setChannelCount(mChannels);
     format.setSampleFormat(QAudioFormat::Int16);
 
-    const QAudioDevice defaultDevice = audioOutputEnabled()
+    const QAudioDevice defaultDevice = mPlaybackEnabled && audioOutputEnabled()
         ? QMediaDevices::defaultAudioOutput()
         : QAudioDevice();
     if (!defaultDevice.isNull() && defaultDevice.isFormatSupported(format)) {
@@ -2546,7 +2547,7 @@ bool VDQtAudioPlayer::openFile(const QString &filePath, int requestedStreamIndex
     mIsOpen = true;
     mHasAudio = true;
 
-    const QAudioDevice outputDevice = audioOutputEnabled()
+    const QAudioDevice outputDevice = mPlaybackEnabled && audioOutputEnabled()
         ? QMediaDevices::defaultAudioOutput()
         : QAudioDevice();
     if (!outputDevice.isNull()) {
@@ -2781,7 +2782,8 @@ bool VDQtAudioPlayer::exportAudioToFile(
     const QString &outputPath,
     int64_t startSample,
     int64_t sampleCount,
-    std::function<bool(int progress, int total)> progressCallback)
+    std::function<bool(int progress, int total)> progressCallback,
+    const QList<VDAudioFilterInstance> *filterChain)
 {
 #ifdef VDQT_AUDIO_TESTING
     mLastExportUsedSeek = false;
@@ -2817,8 +2819,10 @@ bool VDQtAudioPlayer::exportAudioToFile(
     }
     if (sampleCount == 0 || maximumAvailable == 0) return false;
 
-    const QString audioFilterGraph =
-        VDQtAudioFilterSystem::instance().ffmpegFilterGraph(mSampleRate);
+    VDQtAudioFilterSystem filters;
+    filters.replaceActiveChain(filterChain ? *filterChain
+        : VDQtAudioFilterSystem::instance().activeChain());
+    const QString audioFilterGraph = filters.ffmpegFilterGraph(mSampleRate);
     const bool needsTranscode = !outputPath.endsWith(".wav", Qt::CaseInsensitive)
         || !audioFilterGraph.isEmpty();
     QTemporaryFile temporaryWav(QDir::tempPath() + "/virtualdub2-audio-XXXXXX.wav");
@@ -3128,16 +3132,20 @@ bool VDQtAudioPlayer::exportAudioToFile(
 bool VDQtAudioPlayer::exportAudioRangesToFile(
     const QString& outputPath,
     const QList<QPair<int64_t, int64_t>>& sampleRanges,
-    std::function<bool(int progress, int total)> progressCallback)
+    std::function<bool(int progress, int total)> progressCallback,
+    const QList<VDAudioFilterInstance> *filterChain)
 {
     if (sampleRanges.isEmpty() || outputPath.isEmpty()) return false;
+    const QList<VDAudioFilterInstance> filters = filterChain ? *filterChain
+        : VDQtAudioFilterSystem::instance().activeChain();
+    filterChain = &filters; // One immutable snapshot for every extracted range.
     for (const auto& range : sampleRanges) {
         if (range.first < 0 || range.second <= 0) return false;
     }
     if (sampleRanges.size() == 1) {
         return exportAudioToFile(outputPath, sampleRanges.first().first,
                                  sampleRanges.first().second,
-                                 std::move(progressCallback));
+                                 std::move(progressCallback), filterChain);
     }
     QTemporaryDir directory;
     if (!directory.isValid()) return false;
@@ -3155,7 +3163,7 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
                     const int aggregate = static_cast<int>(std::llround(
                         90.0 * (index + fraction) / sampleRanges.size()));
                     return progressCallback(std::clamp(aggregate, 0, 90), 100);
-                })) {
+                }, filterChain)) {
             return false;
         }
         segmentPaths.append(segmentPath);

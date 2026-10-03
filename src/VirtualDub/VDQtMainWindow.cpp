@@ -12,6 +12,9 @@
 #include <QScreen>
 #include <QClipboard>
 #include <QActionGroup>
+#include <QSignalBlocker>
+#include <QScopeGuard>
+#include <QPointer>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
@@ -69,6 +72,11 @@ extern "C" {
 }
 
 namespace {
+
+VDQtVideoExporter::ProcessingSnapshot processingSnapshotForState(
+    const VDQtProcessingState& state) {
+    return {state.videoCodec, state.audioCodec, state.filters, state.audioFilters};
+}
 
 // Helpers in this namespace are workflow-neutral building blocks used by more
 // than one menu action: overwrite protection, transactional replacement,
@@ -299,6 +307,120 @@ bool writeImageSequenceManifest(const QString& path,
 
 } // namespace
 
+class VDQtMainWindow::OperationScope final {
+public:
+    explicit OperationScope(VDQtMainWindow& window) : mWindow(window) {
+        if (mWindow.mOperationDepth++ != 0) return;
+        mWindow.mPlaybackTimer->stop();
+        mWindow.mPlaybackPausedFrame = -1;
+        mWindow.mAudioPlayer.stop();
+        // Cancellation alone only invalidates results. The barrier also waits
+        // for an in-flight AVS/filter callback before the exporter borrows it.
+        if (mWindow.mFrameDecodeWorker && mWindow.mFrameDecodeThread->isRunning()) {
+            mWindow.mFrameDecodeWorker->cancelPending(++mWindow.mFrameRequestGeneration);
+            QMetaObject::invokeMethod(mWindow.mFrameDecodeWorker, [] {},
+                                      Qt::BlockingQueuedConnection);
+        }
+        mWindow.mFrameRequestPending = false;
+        mWindow.mQueuedPlaybackFrame = -1;
+        mMenuWasEnabled = mWindow.menuBar()->isEnabled();
+        mPositionWasEnabled = mWindow.mPositionControl->isEnabled();
+        mWindow.menuBar()->setEnabled(false);
+        mWindow.mPositionControl->setEnabled(false);
+        // A nonmodal Job Control auto-run can start from inside an existing
+        // settings dialog's event loop. Do not let that old dialog edit/reload
+        // global services mid-job; only dialogs created by this workflow are
+        // permitted. QPointer handles dialogs deleted while events are pumped.
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<QDialog *>(widget)) {
+                dialog->setProperty("vdqtExistingOperationDialog", true);
+                mExistingDialogs.append(dialog);
+            }
+        }
+    }
+    ~OperationScope() {
+        if (--mWindow.mOperationDepth != 0) return;
+        mWindow.menuBar()->setEnabled(mMenuWasEnabled);
+        mWindow.mPositionControl->setEnabled(mPositionWasEnabled);
+        for (const auto& dialog : mExistingDialogs)
+            if (dialog) dialog->setProperty("vdqtExistingOperationDialog", QVariant());
+        mWindow.scheduleDeferredSourceTransition();
+        if (mWindow.mVideoDecoder.isOpen() && !mWindow.mSourceTransitionActive)
+            mWindow.updateFrameDisplay(mWindow.mPositionControl->GetPosition());
+    }
+    OperationScope(const OperationScope&) = delete;
+    OperationScope& operator=(const OperationScope&) = delete;
+private:
+    VDQtMainWindow& mWindow;
+    bool mMenuWasEnabled = true;
+    bool mPositionWasEnabled = true;
+    QList<QPointer<QDialog>> mExistingDialogs;
+};
+
+class VDQtMainWindow::SourceTransitionScope final {
+public:
+    explicit SourceTransitionScope(VDQtMainWindow& window) : mWindow(window) {
+        Q_ASSERT(!mWindow.mSourceTransitionActive);
+        mWindow.mSourceTransitionActive = true;
+    }
+    ~SourceTransitionScope() { mWindow.finishSourceTransition(); }
+private:
+    VDQtMainWindow& mWindow;
+};
+
+bool VDQtMainWindow::editorActionsBlocked() const {
+    return mOperationDepth > 0 || mSourceTransitionActive
+        || mAutomationRunning;
+}
+
+bool VDQtMainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (!editorActionsBlocked()) return QMainWindow::eventFilter(watched, event);
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease:
+    case QEvent::MouseButtonDblClick: case QEvent::MouseMove:
+    case QEvent::Wheel: case QEvent::KeyPress: case QEvent::KeyRelease:
+    case QEvent::Shortcut: case QEvent::ShortcutOverride:
+    case QEvent::ContextMenu: case QEvent::DragEnter: case QEvent::DragMove:
+    case QEvent::DragLeave: case QEvent::Drop:
+    case QEvent::TouchBegin: case QEvent::TouchUpdate: case QEvent::TouchEnd:
+    case QEvent::TouchCancel: case QEvent::TabletPress:
+    case QEvent::TabletMove: case QEvent::TabletRelease:
+        break;
+    default:
+        return QMainWindow::eventFilter(watched, event);
+    }
+    for (QObject *object = watched; object; object = object->parent()) {
+        // Cancel/stop and the workflow's dialogs must remain interactive.
+        if (object == mJobControlWindow || qobject_cast<QProgressDialog *>(object)) return false;
+        if (auto *dialog = qobject_cast<QDialog *>(object))
+            return dialog->property("vdqtExistingOperationDialog").toBool();
+        if (object == this) return true;
+    }
+    return false;
+}
+
+void VDQtMainWindow::finishSourceTransition() {
+    mSourceTransitionActive = false;
+    scheduleDeferredSourceTransition();
+    if (!editorActionsBlocked() && mVideoDecoder.isOpen())
+        updateFrameDisplay(mPositionControl->GetPosition());
+}
+
+void VDQtMainWindow::scheduleDeferredSourceTransition() {
+    if (!mDeferredSourcePending || mDeferredSourceScheduled || editorActionsBlocked())
+        return;
+    mDeferredSourceScheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        mDeferredSourceScheduled = false;
+        if (editorActionsBlocked()) return; // The enclosing scope will reschedule.
+        if (!mDeferredSourcePending) return;
+        const QString path = mDeferredSourcePath;
+        mDeferredSourcePending = false;
+        if (path.isEmpty()) closeVideoSource();
+        else openVideoFileImpl(path);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Window construction and persistent UI-only state
 // ---------------------------------------------------------------------------
@@ -445,10 +567,12 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
         QFile::remove(mRecoveryPath);
     });
 
+    qApp->installEventFilter(this);
     VDLogWindow::instance(this)->appendLog("[Info] VirtualDub Native C++/Qt6 Linux Port initialized successfully.");
 }
 
 VDQtMainWindow::~VDQtMainWindow() {
+    qApp->removeEventFilter(this);
     if (mJobQueue) {
         QString queueSaveError;
         if (!mJobQueue->flush(&queueSaveError) && !queueSaveError.isEmpty())
@@ -470,6 +594,9 @@ VDQtMainWindow::~VDQtMainWindow() {
         mFrameDecodeThread->wait();
     }
     mFrameDecodeWorker = nullptr;
+    // Audio borrows AVS handles: release it explicitly before decoder teardown.
+    mAudioPlayer.close();
+    mVideoDecoder.close();
 }
 
 void VDQtMainWindow::applyTheme() {
@@ -654,7 +781,12 @@ void VDQtMainWindow::createMenus() {
         "Copy clean GOP-aligned ranges without re-encoding; use the selected "
         "recompression mode when an exact cut or processing requires it.");
     connect(actVideoSmartRendering, &QAction::toggled, this,
-            [this](bool enabled) { mSmartRendering = enabled; });
+            [this](bool enabled) {
+                if (editorActionsBlocked()) {
+                    const QSignalBlocker blocked(actVideoSmartRendering);
+                    actVideoSmartRendering->setChecked(mSmartRendering);
+                } else mSmartRendering = enabled;
+            });
     actVideoPreserveEmptyFrames = mVideo->addAction("Preserve empty frames");
     actVideoPreserveEmptyFrames->setCheckable(true);
     actVideoPreserveEmptyFrames->setChecked(true);
@@ -662,7 +794,12 @@ void VDQtMainWindow::createMenus() {
         "Retain null-frame/timestamp gaps as displayed dwell time during recompression. "
         "Direct stream copy always preserves the compressed timeline unchanged.");
     connect(actVideoPreserveEmptyFrames, &QAction::toggled, this,
-            [this](bool enabled) { mPreserveEmptyFrames = enabled; });
+            [this](bool enabled) {
+                if (editorActionsBlocked()) {
+                    const QSignalBlocker blocked(actVideoPreserveEmptyFrames);
+                    actVideoPreserveEmptyFrames->setChecked(mPreserveEmptyFrames);
+                } else mPreserveEmptyFrames = enabled;
+            });
 
     mVideo->addSeparator();
 
@@ -729,8 +866,23 @@ void VDQtMainWindow::createStatusBar() {
 
 bool VDQtMainWindow::openVideoFile(const QString& filePath) {
     if (filePath.isEmpty()) return false;
+    if (mOperationDepth > 0 || mAutomationRunning) return false;
+    return openVideoFileImpl(filePath);
+}
 
-    onFileClose();
+bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
+    if (filePath.isEmpty()) return false;
+    if (mSourceTransitionActive) {
+        // Keep only the latest request. Never install a graph inside a Close
+        // which still intends to release the authoritative decoder.
+        mDeferredSourcePath = filePath;
+        mDeferredSourcePending = true;
+        return false;
+    }
+    SourceTransitionScope transition(*this);
+    mDeferredSourcePending = false;
+    mDeferredSourcePath.clear();
+    releaseVideoSource();
 
     if (mVideoDecoder.openFile(filePath)) {
         QString interactiveError;
@@ -828,29 +980,33 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
 }
 
 void VDQtMainWindow::dragEnterEvent(QDragEnterEvent *event) {
+    if (editorActionsBlocked()) { event->ignore(); return; }
     if (event->mimeData()->hasUrls()) {
         event->acceptProposedAction();
     }
 }
 
 void VDQtMainWindow::dragMoveEvent(QDragMoveEvent *event) {
+    if (editorActionsBlocked()) { event->ignore(); return; }
     if (event->mimeData()->hasUrls()) {
         event->acceptProposedAction();
     }
 }
 
 void VDQtMainWindow::dropEvent(QDropEvent *event) {
+    if (editorActionsBlocked()) { event->ignore(); return; }
     const QList<QUrl> urls = event->mimeData()->urls();
     if (!urls.isEmpty()) {
         QString localPath = urls.first().toLocalFile();
         if (!localPath.isEmpty()) {
-            openVideoFile(localPath);
+            openVideoFileImpl(localPath);
             event->acceptProposedAction();
         }
     }
 }
 
 void VDQtMainWindow::onFileOpen() {
+    if (editorActionsBlocked()) return;
     QString fileName = QFileDialog::getOpenFileName(
         this,
         "Open Video / Script File",
@@ -859,11 +1015,13 @@ void VDQtMainWindow::onFileOpen() {
     );
 
     if (!fileName.isEmpty()) {
-        openVideoFile(fileName);
+        openVideoFileImpl(fileName);
     }
 }
 
 void VDQtMainWindow::onFileOpenImageSequence() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     QStringList images = QFileDialog::getOpenFileNames(
         this, QStringLiteral("Open Image Sequence"), QString(),
         QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.exr *.dpx *.tga);;All Files (*)"));
@@ -894,7 +1052,7 @@ void VDQtMainWindow::onFileOpenImageSequence() {
         QMessageBox::critical(this, "Image Sequence Error", error);
         return;
     }
-    if (!openVideoFile(manifestPath)) return;
+    if (!openVideoFileImpl(manifestPath)) return;
     mTimelineSources.clear();
     for (const QString& image : images)
         mTimelineSources.append(QFileInfo(image).absoluteFilePath());
@@ -997,6 +1155,8 @@ bool VDQtMainWindow::materializeRawVideo(
 }
 
 void VDQtMainWindow::onFileOpenRawVideo() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     const QString sourcePath = QFileDialog::getOpenFileName(
         this, QStringLiteral("Open Raw Video"), QString(),
         QStringLiteral("Raw Video and Data (*.raw *.rgb *.rgba *.yuv *.nv12 *.gray);;All Files (*)"));
@@ -1055,7 +1215,7 @@ void VDQtMainWindow::onFileOpenRawVideo() {
             QMessageBox::critical(this, "Raw Video Error", error);
         return;
     }
-    if (!openVideoFile(materializedPath)) {
+    if (!openVideoFileImpl(materializedPath)) {
         QFile::remove(materializedPath);
         return;
     }
@@ -1076,6 +1236,7 @@ void VDQtMainWindow::onFileOpenRawVideo() {
 }
 
 void VDQtMainWindow::onFileAppendSegment() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen() || mTimelineSources.isEmpty()) {
         QMessageBox::warning(
             this, "Append Segment",
@@ -1112,6 +1273,7 @@ void VDQtMainWindow::onFileAppendSegment() {
 
 bool VDQtMainWindow::appendVideoSegments(
     const QStringList& additions, QString *errorMessage) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen() || mTimelineSources.isEmpty()) {
         if (errorMessage) *errorMessage = QStringLiteral(
             "Open the first media segment before appending another segment.");
@@ -1180,11 +1342,11 @@ bool VDQtMainWindow::appendVideoSegments(
     const qint64 oldSelectionStart = mPositionControl->GetSelectionStart();
     const qint64 oldSelectionEnd = mPositionControl->GetSelectionEnd();
     const bool hadSelection = mPositionControl->hasSelection();
-    if (!openVideoFile(manifestPath)) {
+    if (!openVideoFileImpl(manifestPath)) {
         writeConcatManifest(manifestPath, oldTimeline, nullptr);
         const QString restorationSource = oldTimeline.size() > 1
             ? manifestPath : oldTimeline.value(0);
-        if (!restorationSource.isEmpty() && openVideoFile(restorationSource)) {
+        if (!restorationSource.isEmpty() && openVideoFileImpl(restorationSource)) {
             applyProcessingState(processing);
             mTimelineSources = oldTimeline;
             if (mVideoDecoder.isFrameCountExact()) {
@@ -1225,13 +1387,33 @@ bool VDQtMainWindow::appendVideoSegments(
 }
 
 void VDQtMainWindow::onFileClose() {
+    if (mOperationDepth > 0 || mAutomationRunning) return;
+    closeVideoSource();
+}
+
+void VDQtMainWindow::closeVideoSource() {
+    if (mSourceTransitionActive) {
+        mDeferredSourcePath.clear();
+        mDeferredSourcePending = true;
+        return;
+    }
+    SourceTransitionScope transition(*this);
+    mDeferredSourcePending = false;
+    mDeferredSourcePath.clear();
+    releaseVideoSource();
+}
+
+void VDQtMainWindow::releaseVideoSource() {
     mPlaybackTimer->stop();
     mPlaybackPausedFrame = -1;
     if (mFrameServer) mFrameServer->stop();
     closeInteractiveDecoder();
     mAudioPlayer.close();
-    QCoreApplication::processEvents();
+    // closeSource()/AudioPlayer::close() synchronously join their consumers.
+    // Do not dispatch unrelated Open/drop/automation events during teardown.
     mVideoDecoder.close();
+    mDecodedPreviewFrames.clear();
+    mDecodedPreviewTimelineFrame = -1;
     mInputDisplay->clearDisplay();
     mOutputDisplay->clearDisplay();
     mPositionControl->SetRange(0, 0);
@@ -1261,6 +1443,7 @@ void VDQtMainWindow::onFileClose() {
 }
 
 void VDQtMainWindow::onFileInformation() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, "File Information", "No video stream loaded.");
         return;
@@ -1281,6 +1464,7 @@ void VDQtMainWindow::onFileInformation() {
 }
 
 void VDQtMainWindow::onFileSetTextInformation() {
+    if (editorActionsBlocked()) return;
     QDialog dialog(this);
     dialog.setWindowTitle("Text Information");
     QFormLayout *form = new QFormLayout(&dialog);
@@ -1371,7 +1555,7 @@ VDQtProjectState VDQtMainWindow::captureProjectState() const {
 }
 
 void VDQtMainWindow::saveRecoverySnapshot() {
-    if (mAutomationUnattended || mIsExporting || !mVideoDecoder.isOpen()
+    if (mAutomationUnattended || !mVideoDecoder.isOpen()
         || mRecoveryPath.isEmpty()) return;
     QString error;
     if (!VDQtProjectFile::saveProject(
@@ -1518,6 +1702,7 @@ void VDQtMainWindow::rememberOutputDirectory(const QString& outputPath) {
 }
 
 void VDQtMainWindow::onFileLoadProject() {
+    if (editorActionsBlocked()) return;
     const QString path = QFileDialog::getOpenFileName(
         this, "Load Project", QString(),
         "VirtualDubQT Project (*.vdqproject);;All Files (*)");
@@ -1526,6 +1711,7 @@ void VDQtMainWindow::onFileLoadProject() {
 }
 
 bool VDQtMainWindow::loadProjectFile(const QString& path) {
+    OperationScope operation(*this);
     VDQtProjectState project;
     QString error;
     if (!VDQtProjectFile::loadProject(path, &project, &error)) {
@@ -1620,7 +1806,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
     validationDecoder.close();
 
     applyProcessingState(project.processing);
-    if (!openVideoFile(sourceToOpen)) return false;
+    if (!openVideoFileImpl(sourceToOpen)) return false;
     applyProcessingState(project.processing);
     mTimelineSources = project.sourcePaths;
     mImageSequenceFps = project.imageSequenceFps;
@@ -1725,6 +1911,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
 }
 
 void VDQtMainWindow::onFileSaveProject() {
+    if (editorActionsBlocked()) return;
     if (mCurrentProjectPath.isEmpty()) {
         onFileSaveProjectAs();
         return;
@@ -1753,6 +1940,7 @@ void VDQtMainWindow::onFileSaveProject() {
 }
 
 void VDQtMainWindow::onFileSaveProjectAs() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "Save Project", "Open a source before saving a project.");
         return;
@@ -1782,6 +1970,7 @@ void VDQtMainWindow::onFileSaveProjectAs() {
 }
 
 void VDQtMainWindow::onFileLoadProcessingSettings() {
+    if (editorActionsBlocked()) return;
     const QString path = QFileDialog::getOpenFileName(
         this, "Load Processing Settings", QString(),
         "VirtualDubQT Processing Settings (*.vdqsettings);;All Files (*)");
@@ -1798,6 +1987,7 @@ void VDQtMainWindow::onFileLoadProcessingSettings() {
 }
 
 void VDQtMainWindow::onFileSaveProcessingSettings() {
+    if (editorActionsBlocked()) return;
     QString path = QFileDialog::getSaveFileName(
         this, "Save Processing Settings", QStringLiteral("processing.vdqsettings"),
         "VirtualDubQT Processing Settings (*.vdqsettings);;All Files (*)");
@@ -1825,6 +2015,8 @@ void VDQtMainWindow::onFileSaveProcessingSettings() {
 }
 
 void VDQtMainWindow::onFileSaveAudio() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "Save audio", "No video/audio source has been loaded to save.");
         return;
@@ -2276,6 +2468,8 @@ void VDQtMainWindow::onFileSaveAudio() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onFileRunAnalysisPass() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, "Video Analysis", "No video stream loaded to analyze.");
         return;
@@ -2380,6 +2574,10 @@ void VDQtMainWindow::onFileRunAnalysisPass() {
 
 bool VDQtMainWindow::runAutomationScript(const QString& scriptPath,
                                          QString *errorMessage) {
+    if (editorActionsBlocked()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The editor is busy with another operation.");
+        return false;
+    }
     VDQtScriptProgram program;
     if (!VDQtScriptEngine::parseFile(scriptPath, &program, errorMessage))
         return false;
@@ -2389,6 +2587,10 @@ bool VDQtMainWindow::runAutomationScript(const QString& scriptPath,
 bool VDQtMainWindow::runAutomationText(const QString& scriptText,
                                        const QString& baseDirectory,
                                        QString *errorMessage) {
+    if (editorActionsBlocked()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The editor is busy with another operation.");
+        return false;
+    }
     VDQtScriptProgram program;
     if (!VDQtScriptEngine::parseText(
             scriptText, baseDirectory, &program, errorMessage))
@@ -2401,6 +2603,7 @@ bool VDQtMainWindow::exportAutomationVideo(const QString& outputPath,
                                            int animationLoopCount,
                                            bool animationAlpha,
                                            bool animationGrayscale) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         if (errorMessage) *errorMessage = QStringLiteral("No video is open.");
         return false;
@@ -2437,11 +2640,9 @@ bool VDQtMainWindow::exportAutomationVideo(const QString& outputPath,
     }
     options.unattended = mAutomationUnattended;
     VDQtVideoExporter exporter;
-    mIsExporting = true;
     const bool result = exporter.exportVideo(
         options, &mVideoDecoder, &mAudioPlayer,
         mAutomationUnattended ? nullptr : this);
-    mIsExporting = false;
     if (!result && errorMessage) {
         *errorMessage = exporter.lastError().isEmpty()
             ? QStringLiteral("Video export failed or was cancelled.")
@@ -2453,6 +2654,7 @@ bool VDQtMainWindow::exportAutomationVideo(const QString& outputPath,
 bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
                                            bool raw,
                                            QString *errorMessage) {
+    OperationScope operation(*this);
     if (!mAudioPlayer.hasAudio()) {
         if (errorMessage) *errorMessage = QStringLiteral("The current source has no decodable audio stream.");
         return false;
@@ -2585,6 +2787,7 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
 bool VDQtMainWindow::exportAutomationRawVideo(
     const QString& outputPath, const QList<QVariant>& arguments,
     QString *errorMessage) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         if (errorMessage) *errorMessage = QStringLiteral("No video is open.");
         return false;
@@ -2640,6 +2843,11 @@ bool VDQtMainWindow::exportAutomationRawVideo(
 
 bool VDQtMainWindow::executeAutomationProgram(
     const VDQtScriptProgram& program, QString *errorMessage) {
+    mAutomationRunning = true;
+    const auto automationDone = qScopeGuard([this] {
+        mAutomationRunning = false;
+        scheduleDeferredSourceTransition();
+    });
     VDQtProcessingState processing = captureProcessingState();
     QList<VDQtTimelineSegment> subsetSegments;
     bool subsetTouched = false;
@@ -3067,7 +3275,7 @@ bool VDQtMainWindow::executeAutomationProgram(
             || name == QStringLiteral("OpenSequence")) {
             if (!requireArguments(command, 1, 4)) return fail(command, QStringLiteral("Open requires a source path."));
             applyProcessingState(processing);
-            if (!openVideoFile(resolvePath(command.arguments.first())))
+            if (!openVideoFileImpl(resolvePath(command.arguments.first())))
                 return fail(command, QStringLiteral("The source could not be opened."));
         } else if (name == QStringLiteral("Append")
                    || name == QStringLiteral("AppendSequence")) {
@@ -3081,7 +3289,7 @@ bool VDQtMainWindow::executeAutomationProgram(
             processing = captureProcessingState();
         } else if (name == QStringLiteral("Close")) {
             if (!applySubset()) return false;
-            onFileClose();
+            closeVideoSource();
         } else if (name == QStringLiteral("video.SetMode")) {
             if (!requireArguments(command, 1, 1)) return fail(command, QStringLiteral("SetMode requires one integer."));
             const int mode = static_cast<int>(command.arguments.first().toLongLong());
@@ -3691,7 +3899,7 @@ bool VDQtMainWindow::executeAutomationProgram(
                 .arg(command.line).arg(name);
         } else if (name == QStringLiteral("Preview")) {
             applyProcessingState(processing);
-            onTransportAction(VDQT_PCN_PLAYPREVIEW);
+            performTransportAction(VDQT_PCN_PLAYPREVIEW);
         } else if (name == QStringLiteral("SaveAnimatedGIF")
                    || name == QStringLiteral("SaveAnimatedPNG")) {
             if (!requireArguments(command, 1,
@@ -3893,13 +4101,14 @@ bool VDQtMainWindow::executeAutomationProgram(
 }
 
 void VDQtMainWindow::onFileRunScript() {
+    if (editorActionsBlocked()) return;
     QString fileName = QFileDialog::getOpenFileName(
         this, "Run Script", QString(),
         "VirtualDub Sylia Scripts (*.vdscript *.vcf *.jobs);;Video Scripts (*.avs *.AVS *.vpy *.VPY);;VirtualDubQT Projects (*.vdqproject);;VirtualDubQT Job Scripts (*.vdqjobs);;VirtualDubQT Processing Settings (*.vdqsettings);;All Files (*)");
     if (!fileName.isEmpty()) {
         if (fileName.endsWith(".avs", Qt::CaseInsensitive)
             || fileName.endsWith(".vpy", Qt::CaseInsensitive)) {
-            openVideoFile(fileName);
+            openVideoFileImpl(fileName);
         } else if (fileName.endsWith(".vdqproject", Qt::CaseInsensitive)) {
             loadProjectFile(fileName);
         } else if (fileName.endsWith(".vdqjobs", Qt::CaseInsensitive)) {
@@ -3940,6 +4149,7 @@ void VDQtMainWindow::onFileRunScript() {
 }
 
 void VDQtMainWindow::onFileScriptEditor() {
+    if (editorActionsBlocked()) return;
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Sylia Script Editor"));
     dialog.resize(820, 620);
@@ -4024,6 +4234,7 @@ void VDQtMainWindow::onFileScriptEditor() {
 }
 
 void VDQtMainWindow::onFileBatchWizard() {
+    if (editorActionsBlocked()) return;
     VDQtBatchWizardDialog dialog(
         currentJobTemplate(), mJobQueue->jobs(), this);
     if (dialog.exec() != QDialog::Accepted) return;
@@ -4043,8 +4254,10 @@ void VDQtMainWindow::onFileBatchWizard() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onFileJobControl() {
-    if (!mJobControlWindow)
+    if (!mJobControlWindow) {
         mJobControlWindow = new VDQtJobControlWindow(mJobQueue, this);
+        mJobControlWindow->setProperty("vdqtOperationControls", true);
+    }
     mJobControlWindow->showAndRaise();
 }
 
@@ -4063,9 +4276,9 @@ void VDQtMainWindow::abortCurrentJob() {
         mJobQueue->setJobStatus(mActiveJobIndex, VDQtJobStatus::Aborting);
 
     // VideoExporter owns its progress dialogs while an export is active. The
-    // dialogs are parented to Job Control, so cancelling them also terminates
-    // the associated FFmpeg/decode loop without exposing process internals to
-    // the queue model.
+    // dialogs may be parented to the editor or unparented in unattended mode.
+    // Cancel them too, so FFmpeg/decode waits notice Abort without exposing
+    // process internals to the queue model.
     const auto cancelProgressDialogs = [](QWidget *root) {
         if (!root) return;
         const QList<QProgressDialog *> dialogs =
@@ -4084,9 +4297,11 @@ void VDQtMainWindow::abortCurrentJob() {
 }
 
 void VDQtMainWindow::runPendingJobs() {
-    if (!mJobQueue || mJobQueue->isRunning() || mIsExporting
+    if (!mJobQueue || mJobQueue->isRunning() || editorActionsBlocked()
         || mJobQueue->pendingCount() <= 0)
         return;
+
+    OperationScope operation(*this);
 
     QString validationError;
     if (!VDQtJobQueue::validateJobs(mJobQueue->jobs(), &validationError)) {
@@ -4136,15 +4351,16 @@ void VDQtMainWindow::runPendingJobs() {
 
     mPlaybackTimer->stop();
     mAudioPlayer.stop();
-    const VDQtProcessingState originalProcessing = captureProcessingState();
     mQueueStopRequested = false;
     mQueueAbortRequested = false;
-    mIsExporting = true;
     mJobQueue->setRunning(true, -1);
 
     for (int row = 0; row < mJobQueue->count(); ++row) {
-        const VDQtJobState *job = mJobQueue->jobAt(row);
-        if (!job || job->status != VDQtJobStatus::Pending) continue;
+        const VDQtJobState *candidate = mJobQueue->jobAt(row);
+        if (!candidate || candidate->status != VDQtJobStatus::Pending) continue;
+        // Status signals may append/reset the queue's backing storage. Do not
+        // retain a pointer into it across those notifications or event pumping.
+        const VDQtJobState job = *candidate;
         if (mQueueStopRequested) break;
 
         mActiveJobIndex = row;
@@ -4154,7 +4370,7 @@ void VDQtMainWindow::runPendingJobs() {
         mJobQueue->appendJobLog(
             row, QStringLiteral("[%1] Starting %2")
                      .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
-                          VDQtJobQueue::operationText(job->operation)));
+                          VDQtJobQueue::operationText(job.operation)));
         mJobQueue->setJobStatus(row, VDQtJobStatus::Running);
         QCoreApplication::processEvents();
 
@@ -4185,10 +4401,8 @@ void VDQtMainWindow::runPendingJobs() {
 
     mActiveJobIndex = -1;
     mJobQueue->setRunning(false);
-    mIsExporting = false;
     mQueueAbortRequested = false;
     mQueueStopRequested = false;
-    applyProcessingState(originalProcessing);
     mJobQueue->flush(nullptr);
     statusBar()->showMessage(QStringLiteral("Job queue run finished"));
     if (mCloseAfterQueueStops) {
@@ -4284,7 +4498,8 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         return true;
     };
 
-    applyProcessingState(job.processing);
+    // Job settings belong to this operation, not to the editor. In particular,
+    // do not reset the interactive source/plugin/audio state for each job.
     QTemporaryDir timelineDirectory;
     QString inputPath = job.sourcePaths.first();
     if (job.sourcePaths.size() > 1) {
@@ -4325,7 +4540,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         return false;
     }
 
-    VDQtAudioPlayer audioPlayer;
+    VDQtAudioPlayer audioPlayer(false); // Offline jobs need no sink/producer.
     const bool needsAudio = job.operation == VDQtJobOperation::VideoExport
                          || job.operation == VDQtJobOperation::AudioExport;
     bool audioPrepared = !needsAudio || job.audioDisabled;
@@ -4366,6 +4581,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
             return false;
         }
         VDQtVideoExporter::ExportOptions options = job.options;
+        options.processing = processingSnapshotForState(job.processing);
         options.inputPath = inputPath;
         options.protectedSourcePaths = allQueueSources;
         options.unattended = true;
@@ -4375,7 +4591,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         VDQtVideoExporter exporter;
         const bool result = exporter.exportVideo(
             options, &decoder, &audioPlayer,
-            mJobControlWindow ? static_cast<QWidget *>(mJobControlWindow) : this,
+            this,
             nullptr, progress);
         if (!result && exporter.wasCancelled()) {
             mQueueAbortRequested = true;
@@ -4391,6 +4607,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     }
     case VDQtJobOperation::RawVideoExport: {
         VDQtVideoExporter::RawExportOptions options;
+        options.processing = processingSnapshotForState(job.processing);
         options.inputPath = inputPath;
         options.protectedSourcePaths = allQueueSources;
         options.startFrame = job.options.startFrame;
@@ -4412,7 +4629,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         VDQtVideoExporter exporter;
         const bool result = exporter.exportRawVideo(
             options, &decoder, &audioPlayer,
-            mJobControlWindow ? static_cast<QWidget *>(mJobControlWindow) : this,
+            this,
             progress);
         if (!result && exporter.wasCancelled()) {
             mQueueAbortRequested = true;
@@ -4455,7 +4672,8 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         QString queuedStage;
         if (!prepareQueuedStage(&queuedStage)) return false;
         const bool result = audioPlayer.exportAudioToFile(
-            queuedStage, startSample, sampleCount, progress);
+            queuedStage, startSample, sampleCount, progress,
+            &job.processing.audioFilters);
         if (!result) {
             QFile::remove(queuedStage);
             if (mQueueAbortRequested && errorMessage)
@@ -4494,6 +4712,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
     VDQtJobState& job,
     VDQtVideoDecoder& decoder,
     QString *errorMessage) {
+    VDQtFilterSystem filters;
+    filters.replaceActiveChainTransient(job.processing.filters);
     int totalFrames = decoder.getFrameCount();
     if (!decoder.isAvsNative()) {
         const VDQtVideoDecoder::VDScanResult scan = decoder.scanVideoStream(
@@ -4544,7 +4764,7 @@ bool VDQtMainWindow::executeImageSequenceJob(
         ? std::min(job.options.endFrame, timelineFrames - 1)
         : timelineFrames - 1;
     const VDFilterTimingInfo timing =
-        VDQtFilterSystem::instance().getTimingInfo();
+        filters.getTimingInfo();
     if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0
         || last - first + 1 > std::numeric_limits<int>::max()
                               / timing.outputFramesPerInput) {
@@ -4607,7 +4827,7 @@ bool VDQtMainWindow::executeImageSequenceJob(
     QStringList staged;
     staged.reserve(outputCount);
     int rendered = 0;
-    VDQtFilterSystem::instance().resetRuntimeState();
+    filters.resetRuntimeState();
     for (int timelineFrame = first; timelineFrame <= last; ++timelineFrame) {
         if (mQueueAbortRequested) return false;
         const qint64 sourceFrame = timeline.mapOutputToSource(timelineFrame);
@@ -4623,7 +4843,7 @@ bool VDQtMainWindow::executeImageSequenceJob(
         filterContext.timestampSeconds =
             decoder.getFrameTimestampSeconds(static_cast<int>(sourceFrame));
         filterContext.frameRate = decoder.getFps();
-        if (!VDQtFilterSystem::instance().processFrameSequence(
+        if (!filters.processFrameSequence(
                 raw, filtered, filterContext)
             || filtered.size() != timing.outputFramesPerInput) {
             if (errorMessage) *errorMessage = QString(
@@ -4710,6 +4930,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
 }
 
 void VDQtMainWindow::reloadQueuedJob(int row) {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mJobQueue || mJobQueue->isRunning()) return;
     const VDQtJobState *job = mJobQueue->jobAt(row);
     if (!job || job->sourcePaths.isEmpty()) return;
@@ -4737,7 +4959,7 @@ void VDQtMainWindow::reloadQueuedJob(int row) {
             return;
         }
     }
-    if (!openVideoFile(inputPath)) return;
+    if (!openVideoFileImpl(inputPath)) return;
     applyProcessingState(job->processing);
     mTimelineSources = job->sourcePaths;
     mImageSequenceFps = job->imageSequenceFps;
@@ -4791,6 +5013,8 @@ void VDQtMainWindow::reloadQueuedJob(int row) {
 }
 
 void VDQtMainWindow::onFileStartFrameServer() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(
             this, "Frame Server", "Open a video or script before starting a frame server.");
@@ -4980,6 +5204,10 @@ void VDQtMainWindow::closeEvent(QCloseEvent *event) {
         event->ignore();
         return;
     }
+    if (editorActionsBlocked()) {
+        event->ignore();
+        return;
+    }
     if (mJobQueue) {
         QString error;
         if (!mJobQueue->flush(&error) && !error.isEmpty())
@@ -4996,6 +5224,8 @@ void VDQtMainWindow::closeEvent(QCloseEvent *event) {
 #include "VDQtVideoExporter.h"
 
 void VDQtMainWindow::onFileSaveAVI() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "No Video Loaded", "Please open a video or AviSynth script first.");
         return;
@@ -5069,7 +5299,6 @@ void VDQtMainWindow::onFileSaveAVI() {
 
         VDQtVideoExporter exporter;
 
-        mIsExporting = true;
         auto frameCallback = [this, opts](int frameIndex, const QImage &rawFrame, const QImage &filteredFrame) {
             if (opts.videoMode == VideoMode_NormalRecompress) {
                 // Normal Recompress: live preview in INPUT pane ONLY
@@ -5086,7 +5315,6 @@ void VDQtMainWindow::onFileSaveAVI() {
         };
 
         bool ok = exporter.exportVideo(opts, &mVideoDecoder, &mAudioPlayer, this, frameCallback);
-        mIsExporting = false;
 
         if (ok) {
             VDLogWindow::instance(this)->appendLog(QString("[Export] Video export successfully completed: %1").arg(savePath));
@@ -5103,6 +5331,8 @@ void VDQtMainWindow::onFileSaveAVI() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onFileSaveSegmentedAVI() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "No Video Loaded",
                              "Please open a video or script first.");
@@ -5180,6 +5410,7 @@ void VDQtMainWindow::onFileSaveSegmentedAVI() {
 bool VDQtMainWindow::exportSegmentedVideo(
     const QString& outputPath, int sizeLimitMb, int frameLimit,
     int digitCount, int segmentCount, QString *errorMessage) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         if (errorMessage) *errorMessage = QStringLiteral("No video is open.");
         return false;
@@ -5281,11 +5512,9 @@ bool VDQtMainWindow::exportSegmentedVideo(
         options.endFrame = static_cast<int>(range.second - 1);
         options.unattended = mAutomationUnattended;
         VDQtVideoExporter exporter;
-        mIsExporting = true;
         const bool rendered = exporter.exportVideo(
             options, &mVideoDecoder, &mAudioPlayer,
             mAutomationUnattended ? nullptr : this);
-        mIsExporting = false;
         if (!rendered) {
             if (errorMessage) *errorMessage = exporter.lastError().isEmpty()
                 ? QStringLiteral("A video segment failed or was cancelled.")
@@ -5368,6 +5597,8 @@ bool VDQtMainWindow::exportSegmentedVideo(
 }
 
 void VDQtMainWindow::onFileExportRawVideo() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(
             this, "No Video Loaded",
@@ -5460,11 +5691,9 @@ void VDQtMainWindow::onFileExportRawVideo() {
         QString("[Export] Rendering raw video to %1 (%2, alignment %3)...")
             .arg(outputPath, options.pixelFormat)
             .arg(options.scanlineAlignment));
-    mIsExporting = true;
     VDQtVideoExporter exporter;
     const bool success = exporter.exportRawVideo(
         options, &mVideoDecoder, &mAudioPlayer, this);
-    mIsExporting = false;
 
     if (success) {
         VDLogWindow::instance(this)->appendLog(
@@ -5486,14 +5715,18 @@ void VDQtMainWindow::onFileExportRawVideo() {
 }
 
 void VDQtMainWindow::onFileExportAnimatedGIF() {
+    if (editorActionsBlocked()) return;
     exportAnimatedImage(false);
 }
 
 void VDQtMainWindow::onFileExportAnimatedPNG() {
+    if (editorActionsBlocked()) return;
     exportAnimatedImage(true);
 }
 
 void VDQtMainWindow::onFileExportFilmstrip() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, QStringLiteral("Filmstrip Export"),
                              QStringLiteral("Open a video or script first."));
@@ -5663,6 +5896,8 @@ void VDQtMainWindow::onFileExportFilmstrip() {
 }
 
 void VDQtMainWindow::onFileExportViaEncoderSet() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, QStringLiteral("External Encoder"),
                              QStringLiteral("Open a video or script first."));
@@ -5814,6 +6049,7 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
 
 bool VDQtMainWindow::exportViaEncoderSet(
     const QString& outputPath, const QString& setName, QString *errorMessage) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         if (errorMessage) *errorMessage = QStringLiteral("No video is open.");
         return false;
@@ -5871,11 +6107,9 @@ bool VDQtMainWindow::exportViaEncoderSet(
     VDQtVideoExporter exporter;
     mPlaybackTimer->stop();
     mAudioPlayer.stop();
-    mIsExporting = true;
     const bool prepared = exporter.exportVideo(
         options, &mVideoDecoder, &mAudioPlayer,
         mAutomationUnattended ? nullptr : this);
-    mIsExporting = false;
     VDQtCodecEngine::instance().setVideoParams(savedVideo);
     VDQtCodecEngine::instance().setAudioParams(savedAudio);
     if (!prepared) {
@@ -5946,6 +6180,7 @@ bool VDQtMainWindow::exportViaEncoderSet(
 }
 
 void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(
             this, "No Video Loaded",
@@ -6065,7 +6300,6 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     options.protectedSourcePaths = mTimelineSources;
     if (mTimeline.isModified()) options.timelineSegments = mTimeline.segments();
 
-    mIsExporting = true;
     VDQtVideoExporter exporter;
     const bool success = exporter.exportVideo(
         options, &mVideoDecoder, nullptr, this,
@@ -6074,7 +6308,6 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
             mOutputDisplay->setFrameImage(filtered);
             mPositionControl->SetPositionSilent(frameIndex);
         });
-    mIsExporting = false;
     if (success) {
         statusBar()->showMessage(
             QString("%1 saved to %2").arg(formatName, QFileInfo(outputPath).fileName()));
@@ -6088,6 +6321,8 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
 }
 
 void VDQtMainWindow::onFileSaveImageSequence() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "No Video Loaded", "Please open a video or AviSynth script first.");
         return;
@@ -6394,6 +6629,7 @@ void VDQtMainWindow::onFileQuit() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onEditSetSelectionStart() {
+    if (editorActionsBlocked()) return;
     qint64 position = mPositionControl->GetPosition();
     qint64 end = mPositionControl->GetSelectionEnd();
     if (end <= position) {
@@ -6405,18 +6641,21 @@ void VDQtMainWindow::onEditSetSelectionStart() {
 }
 
 void VDQtMainWindow::onEditSetSelectionEnd() {
+    if (editorActionsBlocked()) return;
     qint64 start, end;
     mPositionControl->GetSelection(start, end);
     mPositionControl->SetSelection(start, mPositionControl->GetPosition());
 }
 
 void VDQtMainWindow::onEditSelectAll() {
+    if (editorActionsBlocked()) return;
     if (!ensureExactFrameRange(QStringLiteral("complete source range"))) return;
     mPositionControl->SetSelection(mPositionControl->GetRangeBegin(), mPositionControl->GetRangeEnd() + 1);
 }
 
 void VDQtMainWindow::onEditJumpToPosition() {
-    if (mIsExporting || !mVideoDecoder.isOpen()
+    if (editorActionsBlocked()) return;
+    if (editorActionsBlocked() || !mVideoDecoder.isOpen()
         || mTimeline.frameCount() <= 0)
         return;
 
@@ -6533,18 +6772,21 @@ bool VDQtMainWindow::selectedTimelineRange(
 }
 
 void VDQtMainWindow::onEditUndo() {
+    if (editorActionsBlocked()) return;
     if (!mTimeline.undo()) return;
     updateTimelineView(mPositionControl->GetPosition(), true);
     statusBar()->showMessage(QStringLiteral("Timeline edit undone"));
 }
 
 void VDQtMainWindow::onEditRedo() {
+    if (editorActionsBlocked()) return;
     if (!mTimeline.redo()) return;
     updateTimelineView(mPositionControl->GetPosition(), true);
     statusBar()->showMessage(QStringLiteral("Timeline edit redone"));
 }
 
 void VDQtMainWindow::onEditCopy() {
+    if (editorActionsBlocked()) return;
     qint64 start = 0;
     qint64 end = 0;
     if (!selectedTimelineRange(&start, &end, QStringLiteral("Copy frames"))) return;
@@ -6560,6 +6802,7 @@ void VDQtMainWindow::onEditCopy() {
 }
 
 void VDQtMainWindow::onEditCut() {
+    if (editorActionsBlocked()) return;
     qint64 start = 0;
     qint64 end = 0;
     if (!selectedTimelineRange(&start, &end, QStringLiteral("Cut frames"))) return;
@@ -6577,6 +6820,7 @@ void VDQtMainWindow::onEditCut() {
 }
 
 void VDQtMainWindow::onEditPaste() {
+    if (editorActionsBlocked()) return;
     if (mTimelineClipboard.isEmpty() || !mVideoDecoder.isOpen()) return;
     if (!ensureExactFrameRange(QStringLiteral("paste destination"))) return;
     qint64 insertPosition = mPositionControl->GetPosition();
@@ -6604,6 +6848,7 @@ void VDQtMainWindow::onEditPaste() {
 }
 
 void VDQtMainWindow::onEditDelete() {
+    if (editorActionsBlocked()) return;
     qint64 start = 0;
     qint64 end = 0;
     if (!selectedTimelineRange(&start, &end, QStringLiteral("Delete frames"))) return;
@@ -6618,6 +6863,7 @@ void VDQtMainWindow::onEditDelete() {
 }
 
 void VDQtMainWindow::onEditCropToSelection() {
+    if (editorActionsBlocked()) return;
     qint64 start = 0;
     qint64 end = 0;
     if (!selectedTimelineRange(&start, &end,
@@ -6633,6 +6879,7 @@ void VDQtMainWindow::onEditCropToSelection() {
 }
 
 void VDQtMainWindow::onEditResetTimeline() {
+    if (editorActionsBlocked()) return;
     if (!mTimeline.isModified()) return;
     QString error;
     if (!mTimeline.resetEdits(&error)) {
@@ -6644,14 +6891,17 @@ void VDQtMainWindow::onEditResetTimeline() {
 }
 
 void VDQtMainWindow::onEditPreviousSceneChange() {
+    if (editorActionsBlocked()) return;
     findSceneChange(false);
 }
 
 void VDQtMainWindow::onEditNextSceneChange() {
+    if (editorActionsBlocked()) return;
     findSceneChange(true);
 }
 
 void VDQtMainWindow::onEditToggleMarker() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) return;
     const qint64 position = mPositionControl->GetPosition();
     const qint64 sourcePosition = mTimeline.mapOutputToSource(position);
@@ -6669,6 +6919,7 @@ void VDQtMainWindow::onEditToggleMarker() {
 }
 
 void VDQtMainWindow::onEditPreviousMarker() {
+    if (editorActionsBlocked()) return;
     const qint64 position = mPositionControl->GetPosition();
     QList<qint64> displayed;
     for (qint64 marker : mTimelineMarkers) {
@@ -6686,6 +6937,7 @@ void VDQtMainWindow::onEditPreviousMarker() {
 }
 
 void VDQtMainWindow::onEditNextMarker() {
+    if (editorActionsBlocked()) return;
     const qint64 position = mPositionControl->GetPosition();
     QList<qint64> displayed;
     for (qint64 marker : mTimelineMarkers) {
@@ -6703,12 +6955,14 @@ void VDQtMainWindow::onEditNextMarker() {
 }
 
 void VDQtMainWindow::onEditClearMarkers() {
+    if (editorActionsBlocked()) return;
     mTimelineMarkers.clear();
     refreshTimelineMarkers();
     statusBar()->showMessage(QStringLiteral("Timeline markers cleared"));
 }
 
 void VDQtMainWindow::onEditZoomToSelection() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen() || !mPositionControl->hasSelection()) {
         QMessageBox::information(
             this, QStringLiteral("Timeline Zoom"),
@@ -6730,11 +6984,13 @@ void VDQtMainWindow::onEditZoomToSelection() {
 }
 
 void VDQtMainWindow::onEditClearTimelineZoom() {
+    if (editorActionsBlocked()) return;
     mPositionControl->ClearZoomRange();
     statusBar()->showMessage(QStringLiteral("Full timeline is visible."));
 }
 
 void VDQtMainWindow::findSceneChange(bool forward) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()
         || !ensureExactFrameRange(QStringLiteral("scene-change search"))) return;
     const int frameCount = static_cast<int>(mTimeline.frameCount());
@@ -6805,6 +7061,7 @@ void VDQtMainWindow::findSceneChange(bool forward) {
 }
 
 bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen())
         return true;
     if (mVideoDecoder.isFrameCountExact()) {
@@ -7033,6 +7290,7 @@ void VDQtMainWindow::autoFitWindowToVideo() {
 }
 
 void VDQtMainWindow::onViewDualView() {
+    if (editorActionsBlocked()) return;
     mInputDisplay->setVisible(true);
     mOutputDisplay->setVisible(true);
     autoFitWindowToVideo();
@@ -7043,12 +7301,14 @@ void VDQtMainWindow::onViewDualView() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onViewInputOnly() {
+    if (editorActionsBlocked()) return;
     mInputDisplay->setVisible(true);
     mOutputDisplay->setVisible(false);
     autoFitWindowToVideo();
 }
 
 void VDQtMainWindow::onViewOutputOnly() {
+    if (editorActionsBlocked()) return;
     mInputDisplay->setVisible(false);
     mOutputDisplay->setVisible(true);
     autoFitWindowToVideo();
@@ -7060,6 +7320,8 @@ void VDQtMainWindow::onViewLogWindow() {
 }
 
 void VDQtMainWindow::onViewAudioWaveform() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mAudioPlayer.hasAudio() || mAudioPlayer.getSampleRate() <= 0) {
         QMessageBox::information(this, QStringLiteral("Audio Waveform"),
                                  QStringLiteral("The current source has no decoded audio."));
@@ -7238,6 +7500,7 @@ void VDQtMainWindow::onViewAudioWaveform() {
 }
 
 void VDQtMainWindow::onVideoModeDirectStream() {
+    if (editorActionsBlocked()) return;
     mVideoMode = VideoMode_DirectStreamCopy;
     actVideoDirectStream->setChecked(true);
     statusBar()->showMessage("Video Mode: Direct Stream Copy (Bypasses video codecs & filters)");
@@ -7245,6 +7508,7 @@ void VDQtMainWindow::onVideoModeDirectStream() {
 }
 
 void VDQtMainWindow::onVideoModeFastRecompress() {
+    if (editorActionsBlocked()) return;
     mVideoMode = VideoMode_FastRecompress;
     actVideoFastRecompress->setChecked(true);
     statusBar()->showMessage(
@@ -7253,6 +7517,7 @@ void VDQtMainWindow::onVideoModeFastRecompress() {
 }
 
 void VDQtMainWindow::onVideoModeNormalRecompress() {
+    if (editorActionsBlocked()) return;
     mVideoMode = VideoMode_NormalRecompress;
     actVideoNormalRecompress->setChecked(true);
     statusBar()->showMessage("Video Mode: Normal Recompress (Bypasses video filters with configured RGB conversion)");
@@ -7260,6 +7525,7 @@ void VDQtMainWindow::onVideoModeNormalRecompress() {
 }
 
 void VDQtMainWindow::onVideoModeFullProcessing() {
+    if (editorActionsBlocked()) return;
     mVideoMode = VideoMode_FullProcessing;
     actVideoFullProcessing->setChecked(true);
     statusBar()->showMessage("Video Mode: Full Processing Mode (All video filters active)");
@@ -7267,6 +7533,7 @@ void VDQtMainWindow::onVideoModeFullProcessing() {
 }
 
 void VDQtMainWindow::onVideoDecodeFormat() {
+    if (editorActionsBlocked()) return;
     QString decoderName = "AVIFile/Avisynth input driver (internal)";
     QString actualFormat = "YUV420";
     if (mVideoDecoder.isOpen()) {
@@ -7304,6 +7571,7 @@ void VDQtMainWindow::onVideoDecodeFormat() {
 }
 
 void VDQtMainWindow::onVideoSelectRange() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()
         || !ensureExactFrameRange(QStringLiteral("selection range"))) return;
     const int frameCount = static_cast<int>(mTimeline.frameCount());
@@ -7362,6 +7630,7 @@ void VDQtMainWindow::onVideoSelectRange() {
 }
 
 void VDQtMainWindow::onVideoCopySourceFrame() {
+    if (editorActionsBlocked()) return;
     if (mVideoDecoder.isOpen()) {
         const int sourceFrame = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
@@ -7375,6 +7644,7 @@ void VDQtMainWindow::onVideoCopySourceFrame() {
 }
 
 void VDQtMainWindow::onVideoCopyOutputFrame() {
+    if (editorActionsBlocked()) return;
     if (mVideoDecoder.isOpen()) {
         const int sourceFrame = sourceFrameForTimelineFrame(
             mPositionControl->GetPosition());
@@ -7395,18 +7665,22 @@ void VDQtMainWindow::onVideoCopyOutputFrame() {
 }
 
 void VDQtMainWindow::onVideoCopySourceFrameNum() {
+    if (editorActionsBlocked()) return;
     int frame = sourceFrameForTimelineFrame(mPositionControl->GetPosition());
     QApplication::clipboard()->setText(QString::number(frame));
     statusBar()->showMessage(QString("Source frame number %1 copied to clipboard").arg(frame));
 }
 
 void VDQtMainWindow::onVideoCopyOutputFrameNum() {
+    if (editorActionsBlocked()) return;
     int frame = mPositionControl->GetPosition();
     QApplication::clipboard()->setText(QString::number(frame));
     statusBar()->showMessage(QString("Output frame number %1 copied to clipboard").arg(frame));
 }
 
 void VDQtMainWindow::onVideoScanErrors() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, "Scan video stream", "No video source has been loaded to scan.");
         return;
@@ -7463,6 +7737,7 @@ void VDQtMainWindow::onVideoScanErrors() {
 }
 
 void VDQtMainWindow::onVideoErrorMode() {
+    if (editorActionsBlocked()) return;
     VDDecoderErrorModeDialog dlg(mDecoderErrorModeConfig, this);
     if (dlg.exec() == QDialog::Accepted) {
         mDecoderErrorModeConfig = dlg.getConfig();
@@ -7484,6 +7759,7 @@ void VDQtMainWindow::onVideoErrorMode() {
 #include "VDQtCodecEngine.h"
 
 void VDQtMainWindow::onVideoCompression() {
+    if (editorActionsBlocked()) return;
     VDVideoCompressionDialog dlg(this);
     if (dlg.exec() == QDialog::Accepted) {
         VDVideoCodecParams params = VDQtCodecEngine::instance().getVideoParams();
@@ -7498,6 +7774,7 @@ void VDQtMainWindow::onVideoCompression() {
 }
 
 void VDQtMainWindow::onVideoFilters() {
+    if (editorActionsBlocked()) return;
     VDQtFilterSystem& filterSystem = VDQtFilterSystem::instance();
     const QList<VDFilterInstance> originalChain = filterSystem.getActiveChain();
     int w = mVideoDecoder.isOpen() ? mVideoDecoder.getWidth() : 1920;
@@ -7516,6 +7793,7 @@ void VDQtMainWindow::onVideoFilters() {
 }
 
 void VDQtMainWindow::onVideoFrameRate() {
+    if (editorActionsBlocked()) return;
     double srcFps = mVideoDecoder.isOpen() ? mVideoDecoder.getFps() : 29.970;
     if (srcFps <= 0.0) srcFps = 29.970;
     double audioFps = srcFps;
@@ -7533,6 +7811,7 @@ void VDQtMainWindow::onVideoFrameRate() {
 }
 
 void VDQtMainWindow::onAudioSource() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, "Audio Source",
                                  "Open a video before selecting its audio source.");
@@ -7667,6 +7946,7 @@ void VDQtMainWindow::onAudioSource() {
 }
 
 void VDQtMainWindow::onAudioModeDirectStream() {
+    if (editorActionsBlocked()) return;
     if (!mAudioSourcePath.isEmpty() || mAudioStreamIndex >= 0) {
         QMessageBox::information(
             this, "Audio Direct Stream Copy",
@@ -7685,6 +7965,7 @@ void VDQtMainWindow::onAudioModeDirectStream() {
 }
 
 void VDQtMainWindow::onAudioModeFullProcessing() {
+    if (editorActionsBlocked()) return;
     mAudioMode = AudioMode_FullProcessing;
     actAudioDirectStream->setChecked(false);
     actAudioFullProcessing->setChecked(true);
@@ -7693,11 +7974,13 @@ void VDQtMainWindow::onAudioModeFullProcessing() {
 }
 
 void VDQtMainWindow::onAudioCompression() {
+    if (editorActionsBlocked()) return;
     VDAudioCompressionDialog dlg(this);
     dlg.exec();
 }
 
 void VDQtMainWindow::onAudioFilters() {
+    if (editorActionsBlocked()) return;
     VDQtAudioFilterSystem& system = VDQtAudioFilterSystem::instance();
     QList<VDAudioFilterInstance> working = system.activeChain();
 
@@ -7879,6 +8162,7 @@ void VDQtMainWindow::onAudioFilters() {
 }
 
 void VDQtMainWindow::onOptionsPreferences() {
+    if (editorActionsBlocked()) return;
     VDPreferencesDialog dialog(mPreferencesConfig, this);
     if (dialog.exec() != QDialog::Accepted) return;
     mPreferencesConfig = dialog.getConfig();
@@ -7908,6 +8192,8 @@ void VDQtMainWindow::onOptionsPreferences() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onToolsHistogram() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, QStringLiteral("Video Histogram"),
                                  QStringLiteral("Open a video first."));
@@ -7984,6 +8270,8 @@ void VDQtMainWindow::onToolsHistogram() {
 }
 
 void VDQtMainWindow::onToolsPerformanceProfiler() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (!mVideoDecoder.isOpen() || mTimeline.frameCount() <= 0) {
         QMessageBox::information(this, QStringLiteral("Performance Profiler"),
                                  QStringLiteral("Open a video first."));
@@ -8060,6 +8348,7 @@ void VDQtMainWindow::onToolsPerformanceProfiler() {
 }
 
 void VDQtMainWindow::onToolsMediaInspector() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, QStringLiteral("Media Inspector"),
                                  QStringLiteral("Open a media file first."));
@@ -8133,6 +8422,7 @@ void VDQtMainWindow::onToolsMediaInspector() {
 }
 
 void VDQtMainWindow::onToolsHexViewer() {
+    if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::information(this, QStringLiteral("Hex Viewer"),
                                  QStringLiteral("Open a file first."));
@@ -8185,6 +8475,7 @@ void VDQtMainWindow::onToolsHexViewer() {
 }
 
 void VDQtMainWindow::onToolsBackendCatalog() {
+    if (editorActionsBlocked()) return;
     VDQtPluginHost::instance().reload();
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Backend and Plugin Catalog"));
@@ -8262,6 +8553,7 @@ void VDQtMainWindow::onToolsBackendCatalog() {
 }
 
 void VDQtMainWindow::onToolsSystemInformation() {
+    if (editorActionsBlocked()) return;
     QStringList videoCodecs;
     for (const VDVideoCodecInfo& codec
          : VDQtCodecEngine::instance().getAvailableVideoCodecs()) {
@@ -8329,6 +8621,8 @@ void VDQtMainWindow::onToolsSystemInformation() {
 }
 
 void VDQtMainWindow::onCaptureVideo() {
+    if (editorActionsBlocked()) return;
+    OperationScope operation(*this);
     if (QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
         QMessageBox::critical(this, "Capture Error",
                               "The ffmpeg executable is required for Linux capture.");
@@ -8857,7 +9151,7 @@ void VDQtMainWindow::onHelpAbout() {
 // ---------------------------------------------------------------------------
 
 void VDQtMainWindow::onPositionChanged(int frame) {
-    if (mIsExporting) return;
+    if (editorActionsBlocked()) return;
     if (!mPlaybackTimer->isActive() && frame != mPlaybackPausedFrame)
         mPlaybackPausedFrame = -1;
     updateFrameDisplay(frame);
@@ -8874,6 +9168,11 @@ void VDQtMainWindow::seekAudioToVideoFrame(int frameIndex) {
 }
 
 void VDQtMainWindow::onTransportAction(int actionCode) {
+    if (editorActionsBlocked()) return;
+    performTransportAction(actionCode);
+}
+
+void VDQtMainWindow::performTransportAction(int actionCode) {
     if (!mVideoDecoder.isOpen()) return;
 
     switch (actionCode) {
@@ -9199,7 +9498,8 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
                                          quint64 decodedFrameCount) {
     Q_UNUSED(seekCount);
     Q_UNUSED(decodedFrameCount);
-    if (generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
+    if (mOperationDepth > 0 || mSourceTransitionActive
+        || generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
 
     mFrameRequestPending = false;
     const int timelineFrame = mRequestedTimelineFrame;
@@ -9295,7 +9595,8 @@ void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
                                                const QString& errorMessage,
                                                int frameCount,
                                                int frameCountStatus) {
-    if (generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
+    if (mOperationDepth > 0 || mSourceTransitionActive
+        || generation != mFrameRequestGeneration || !mVideoDecoder.isOpen()) return;
 
     mFrameRequestPending = false;
 
@@ -9415,19 +9716,21 @@ void VDQtMainWindow::updateRecentFilesMenu() {
 }
 
 void VDQtMainWindow::onOpenRecentFile() {
+    if (editorActionsBlocked()) return;
     QAction *action = qobject_cast<QAction*>(sender());
     if (action) {
         QString filePath = action->data().toString();
         if (!filePath.isEmpty()) {
-            openVideoFile(filePath);
+            openVideoFileImpl(filePath);
         }
     }
 }
 
 void VDQtMainWindow::onFileReopen() {
+    if (editorActionsBlocked()) return;
     QSettings settings("VirtualDub", "VirtualDub_Port");
     QStringList files = settings.value("recentFiles").toStringList();
     if (!files.isEmpty()) {
-        openVideoFile(files.first());
+        openVideoFileImpl(files.first());
     }
 }

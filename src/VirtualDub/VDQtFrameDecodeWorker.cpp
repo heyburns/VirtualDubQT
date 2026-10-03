@@ -44,6 +44,11 @@ void VDQtFrameDecodeWorker::closeSource() {
     Q_ASSERT(QThread::currentThread() == thread());
     mSharedAvsDecoder = nullptr;
     mDecoder.close();
+    // Source-owned temporal history and cached assets can be large. Preserve
+    // the chain configuration, but release its runtime when the source closes.
+    const auto chain = mFilters.getActiveChain();
+    mFilters.clearFilters();
+    mFilters.replaceActiveChainTransient(chain);
     QMutexLocker lock(&mRequestMutex);
     mRequestedFrame = -1;
 }

@@ -55,6 +55,13 @@ and join them during teardown.
 
 ## Source-open lifecycle
 
+Source replacement is serialized by `SourceTransitionScope`. Public Open/Close
+requests arriving inside another transition are coalesced and deferred until it
+finishes. Private workflow helpers can replace their own source, but UI actions,
+drop events, and public automation entry points cannot interrupt an active
+operation. Teardown joins preview/audio consumers without pumping arbitrary
+events before releasing the authoritative decoder.
+
 `VDQtMainWindow::openVideoFile()` is the session-level entry point:
 
 1. Stop playback and synchronously close interactive/audio consumers.
@@ -118,6 +125,12 @@ frame servers, and other concurrent consumers take independent transient
 snapshots. This matters because temporal histories, asset caches, LUTs, and VDX
 plug-in instances are mutable and generally not thread-safe.
 
+Native plugin runtime keys include a pipeline-private namespace in addition to
+the serialized filter ID. Reset, replacement, and destruction release only that
+pipeline's instances; identical IDs in another preview/export pipeline remain
+independent. Destination image storage is detached before parallel row tasks
+start, and every task completes before its image owner can be released.
+
 `processFrameSequence()` is the authoritative API. Rate-changing filters such as
 bob deinterlacing may emit multiple temporal phases for one source image.
 `processFrame()` exists for older single-image callers and returns only phase
@@ -149,6 +162,18 @@ silence.
 
 `VDQtVideoExporter` is the common implementation behind interactive saves,
 automation, jobs, and several specialized front ends.
+
+Each call copies its options and captures codecs, video filters, and audio
+filters before any progress callback or event pumping. Jobs supply their saved
+processing snapshot explicitly; they do not install job settings in the editor.
+Rendering uses a pipeline owned by that call. Offline audio preparation accepts
+the captured chain, and job audio players skip live playback-device creation.
+
+`OperationScope` stops and joins interactive preview work, blocks editor actions
+for the entire workflow, and restores controls on every return path. Private
+helpers may nest scopes, but public actions cannot start a competing operation.
+Job Control and progress/cancel dialogs stay usable. Unattended error reporting
+never disables this protection.
 
 - Direct Stream Copy remuxes compressed packets when edits/ranges permit it.
 - Fast Recompress keeps video in an FFmpeg-native planar pipeline and bypasses

@@ -8,6 +8,9 @@
 #include "VDQtVideoDecoder.h"
 #include "VDQtFilterSystem.h"
 #include "VDQtTimeline.h"
+#include "VDQtCodecEngine.h"
+#include "VDQtAudioFilterSystem.h"
+#include <optional>
 
 enum VideoProcessingMode {
     VideoMode_DirectStreamCopy = 0,
@@ -36,7 +39,18 @@ public:
     bool wasCancelled() const { return mWasCancelled; }
     QString lastError() const { return mLastError; }
 
+    struct ProcessingSnapshot {
+        VDVideoCodecParams videoCodec;
+        VDAudioCodecParams audioCodec;
+        QList<VDFilterInstance> filters;
+        QList<VDAudioFilterInstance> audioFilters;
+    };
+    static ProcessingSnapshot captureProcessingSnapshot();
+
     struct ExportOptions {
+        // Missing means snapshot the editor once at entry; queued jobs supply
+        // their saved settings explicitly without changing the editor.
+        std::optional<ProcessingSnapshot> processing;
         QString inputPath;
         QString outputPath;
         // Every directly or indirectly loaded source. SourceSafety rejects an
@@ -75,6 +89,7 @@ public:
     };
 
     struct RawExportOptions {
+        std::optional<ProcessingSnapshot> processing;
         QString inputPath;
         QString outputPath;
         QStringList protectedSourcePaths;

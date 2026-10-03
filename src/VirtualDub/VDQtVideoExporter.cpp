@@ -63,6 +63,12 @@ protected:
 
         for (QObject *object = watched; object; object = object->parent()) {
             if (qobject_cast<QProgressDialog *>(object)) return false;
+            if (object->property("vdqtOperationControls").toBool()) return false;
+            // The whole-operation blocker also spans preflight/error boxes.
+            // Those new dialogs must be usable; an old settings dialog frozen
+            // by MainWindow's operation scope must remain blocked.
+            if (auto *dialog = qobject_cast<QDialog *>(object))
+                return dialog->property("vdqtExistingOperationDialog").toBool();
             if (object == mProtectedWindow) return true;
         }
 
@@ -962,12 +968,28 @@ VDQtVideoExporter::VDQtVideoExporter() {}
 
 VDQtVideoExporter::~VDQtVideoExporter() {}
 
+VDQtVideoExporter::ProcessingSnapshot VDQtVideoExporter::captureProcessingSnapshot() {
+    ProcessingSnapshot snapshot;
+    snapshot.videoCodec = VDQtCodecEngine::instance().getVideoParams();
+    snapshot.audioCodec = configuredAudioParams();
+    snapshot.filters = VDQtFilterSystem::instance().getActiveChain();
+    snapshot.audioFilters = VDQtAudioFilterSystem::instance().activeChain();
+    return snapshot;
+}
+
 bool VDQtVideoExporter::exportRawVideo(
-    const RawExportOptions& options,
+    const RawExportOptions& request,
     VDQtVideoDecoder *activeDecoder,
     VDQtAudioPlayer *audioPlayer,
     QWidget *parentWidget,
     std::function<bool(int completedFrames, int totalFrames)> progressCallback) {
+    const RawExportOptions options = request;
+    const auto processing = options.processing
+        ? *options.processing : captureProcessingSnapshot();
+    VDQtFilterSystem filters;
+    filters.replaceActiveChainTransient(processing.filters);
+    // Suppressing modal errors is not permission to unlock the editor.
+    ScopedEditorInputBlocker operationInputBlocker(parentWidget);
     mWasCancelled = false;
     mLastError.clear();
     if (options.unattended) parentWidget = nullptr;
@@ -1154,7 +1176,7 @@ bool VDQtVideoExporter::exportRawVideo(
         step = 1;
     }
 
-    const VDFilterTimingInfo timing = VDQtFilterSystem::instance().getTimingInfo();
+    const VDFilterTimingInfo timing = filters.getTimingInfo();
     if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0
         || inputFramesToProcess
                > std::numeric_limits<int>::max() / timing.outputFramesPerInput) {
@@ -1163,14 +1185,14 @@ bool VDQtVideoExporter::exportRawVideo(
     }
     const int framesToExport = inputFramesToProcess * timing.outputFramesPerInput;
 
-    VDQtFilterSystem::instance().resetRuntimeState();
+    filters.resetRuntimeState();
     QImage sampleFrame = decoder.getFrameImage(sourceFrameAt(startFrame));
     VDFilterFrameContext sampleContext;
     sampleContext.frameNumber = startFrame;
     sampleContext.timestampSeconds =
         decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
     sampleContext.frameRate = sourceFps;
-    QImage filteredSample = VDQtFilterSystem::instance().processFrame(
+    QImage filteredSample = filters.processFrame(
         sampleFrame, sampleContext);
     if (sampleFrame.isNull() || filteredSample.isNull()) {
         reportError(QStringLiteral("The first selected frame could not be decoded and filtered."));
@@ -1252,7 +1274,7 @@ bool VDQtVideoExporter::exportRawVideo(
             decoder.getFrameTimestampSeconds(sourceFrame);
         filterContext.frameRate = sourceFps;
         if (rawFrame.isNull()
-            || !VDQtFilterSystem::instance().processFrameSequence(
+            || !filters.processFrameSequence(
                 rawFrame, filteredFrames, filterContext)
             || filteredFrames.size() != timing.outputFramesPerInput) {
             writeError = QString("Frame %1 could not be decoded and filtered.")
@@ -1322,12 +1344,20 @@ bool VDQtVideoExporter::exportRawVideo(
 // Container/video export mode selection and pipeline execution
 // ---------------------------------------------------------------------------
 
-bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
+bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                                     VDQtVideoDecoder *activeDecoder,
                                     VDQtAudioPlayer *audioPlayer,
                                     QWidget *parentWidget,
                                     std::function<void(int frameIndex, const QImage &rawFrame, const QImage &filteredFrame)> frameCallback,
                                     std::function<bool(int completedFrames, int totalFrames)> progressCallback) {
+    const ExportOptions options = request;
+    const auto processing = options.processing
+        ? *options.processing : captureProcessingSnapshot();
+    VDQtFilterSystem filters;
+    filters.replaceActiveChainTransient(processing.filters);
+    VDQtAudioFilterSystem audioFilters;
+    audioFilters.replaceActiveChain(processing.audioFilters);
+    ScopedEditorInputBlocker operationInputBlocker(parentWidget);
     mWasCancelled = false;
     mLastError.clear();
     if (options.unattended) parentWidget = nullptr;
@@ -1371,7 +1401,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     }
 
     VDVideoCodecParams selectedVideoParams =
-        VDQtCodecEngine::instance().getVideoParams();
+        processing.videoCodec;
     if (!options.videoCodecOverride.trimmed().isEmpty()) {
         selectedVideoParams = VDQtCodecEngine::getDefaultVideoParamsForCodec(
             options.videoCodecOverride.trimmed());
@@ -1492,10 +1522,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
     // Pre-flight check: Audio encoder availability
     if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
-        VDAudioCodecParams aParams = VDQtCodecEngine::instance().getAudioParams();
-        QString audioCodec = aParams.codecId.isEmpty()
-            ? VDQtCodecSettings::instance().getAudioConfig().codecId
-            : aParams.codecId;
+        const QString audioCodec = processing.audioCodec.codecId;
         QString err;
         if (!VDQtCodecEngine::instance().checkAudioEncoderAvailable(audioCodec, &err)) {
             mLastError = err;
@@ -1624,8 +1651,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (options.smartRendering
         && (videoMode != VideoMode_DirectStreamCopy || editedTimeline)) {
         const bool hasEnabledFilters = std::any_of(
-            VDQtFilterSystem::instance().getActiveChain().cbegin(),
-            VDQtFilterSystem::instance().getActiveChain().cend(),
+            filters.getActiveChain().cbegin(),
+            filters.getActiveChain().cend(),
             [](const VDFilterInstance& filter) { return filter.enabled; });
         const bool cleanTiming = options.customFps <= 0.0
             && !options.convertFpsPreserveDuration
@@ -1702,7 +1729,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
         QString error;
         if (!VDQtCodecEngine::instance().checkAudioEncoderAvailable(
-                configuredAudioParams().codecId, &error)) {
+                processing.audioCodec.codecId, &error)) {
             mLastError = error;
             if (parentWidget)
                 QMessageBox::critical(parentWidget,
@@ -1956,7 +1983,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                     QApplication::processEvents(
                         QEventLoop::AllEvents, kProcessPollMs);
                     return !audioProgress.wasCanceled();
-                });
+                }, &processing.audioFilters);
             audioProgress.close();
             if (!prepared) {
                 if (audioProgress.wasCanceled()) mWasCancelled = true;
@@ -2049,7 +2076,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                 encoderArgs << "-c:a" << "copy";
             else
                 encoderArgs << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
-                    configuredAudioParams());
+                    processing.audioCodec);
         }
 
         encoderArgs << "-t" << QString::number(outputDurationSeconds, 'f', 9);
@@ -2232,12 +2259,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             if (audioMode == AudioMode_DirectStreamCopy) {
                 args << "-c:a" << "copy";
             } else {
-                const QString audioGraph = VDQtAudioFilterSystem::instance()
+                const QString audioGraph = audioFilters
                     .ffmpegFilterGraph(audioPlayer
                         ? audioPlayer->getSampleRate() : 48000);
                 if (!audioGraph.isEmpty()) args << "-af" << audioGraph;
                 args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(
-                    configuredAudioParams());
+                    processing.audioCodec);
             }
         }
 
@@ -2313,13 +2340,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
     double sourceSelectionOutputFps = fps;
     int filterFramesPerInput = 1;
     if (applyFilters) {
-        VDQtFilterSystem::instance().resetRuntimeState();
+        filters.resetRuntimeState();
         VDFilterFrameContext sampleContext;
         sampleContext.frameNumber = startFrame;
         sampleContext.timestampSeconds =
             decoder.getFrameTimestampSeconds(sourceFrameAt(startFrame));
         sampleContext.frameRate = sourceFps;
-        QImage filteredSample = VDQtFilterSystem::instance().processFrame(
+        QImage filteredSample = filters.processFrame(
             sampleFrame, sampleContext);
         if (filteredSample.isNull()) {
             if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", "The filter chain rejected the first frame.");
@@ -2328,7 +2355,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
         outW = filteredSample.width();
         outH = filteredSample.height();
 
-        const VDFilterTimingInfo timing = VDQtFilterSystem::instance().getTimingInfo();
+        const VDFilterTimingInfo timing = filters.getTimingInfo();
         if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0) {
             if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", "The configured temporal filter chain is not supported.");
             return false;
@@ -2345,7 +2372,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
 
     // Fetch user-configured codec settings
     const VDVideoCodecParams& vParams = selectedVideoParams;
-    const VDAudioCodecParams aParams = configuredAudioParams();
+    const VDAudioCodecParams aParams = processing.audioCodec;
     const QString twoPassCodec = vParams.codecId == QStringLiteral("libx264_10bit")
         ? QStringLiteral("libx264") : vParams.codecId;
     const bool twoPassRequested = vParams.twoPass;
@@ -2445,7 +2472,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                         QApplication::processEvents(
                             QEventLoop::AllEvents, kProcessPollMs);
                         return !audioProgress.wasCanceled();
-                    });
+                    }, &processing.audioFilters);
                 if (audioPrepared) segmentFiles.append(segmentPath);
             }
             if (audioPrepared && segmentFiles.size() == 1) {
@@ -2504,7 +2531,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
                     QApplication::processEvents(
                         QEventLoop::AllEvents, kProcessPollMs);
                     return !audioProgress.wasCanceled();
-                });
+                }, &processing.audioFilters);
         }
         const bool audioCancelled = audioProgress.wasCanceled();
         audioProgress.close();
@@ -2761,7 +2788,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& options,
             filterContext.timestampSeconds =
                 decoder.getFrameTimestampSeconds(f);
             filterContext.frameRate = sourceFps;
-            if (!VDQtFilterSystem::instance().processFrameSequence(
+            if (!filters.processFrameSequence(
                     rawFrame, filteredFrames, filterContext)
                 || filteredFrames.size() != filterFramesPerInput) {
                 appendBounded(diagnostics, QString("The temporal filter chain failed at source frame %1.\n").arg(f).toUtf8());

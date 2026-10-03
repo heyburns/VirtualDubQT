@@ -1,6 +1,7 @@
 // Offscreen integration coverage and an opt-in session benchmark. Performance
 // numbers are observations, not brittle speed assertions tied to this machine.
 #include "support/VDQtTestFixtures.h"
+#include "VDQtOperationRegressions.h"
 #include "VirtualDub/VDQtMainWindow.h"
 
 #include <QApplication>
@@ -160,6 +161,11 @@ int main(int argc, char** argv) {
     VDQtTestFixtures fixtures;
     if (!require(fixtures.createBasic(measuring ? 1920 : 320, measuring ? 1080 : 180, frames),
                  fixtures.error)) return 1;
+    const int operationIndex = arguments.indexOf("--operation-test");
+    if (operationIndex >= 0) {
+        if (operationIndex + 1 >= arguments.size()) return 2;
+        return VDQtRunOperationRegression(arguments.at(operationIndex + 1), fixtures) ? 0 : 1;
+    }
     if (!measuring) {
         if (!require(fixtures.createEdgeCases(), fixtures.error) || !guiSmokeTest(fixtures)) return 1;
         // Just smoke-decode here. Edge-case contracts are asserted in their own

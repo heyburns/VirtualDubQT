@@ -60,6 +60,7 @@ public:
     int automationExitCode() const { return mAutomationExitCode; }
 
 protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -185,6 +186,17 @@ private Q_SLOTS:
     void reloadQueuedJob(int row);
 
 private:
+    // Public actions may be delivered by timers/scripts as well as mouse input.
+    // The RAII scopes protect the complete workflow, including event pumping.
+    class OperationScope;
+    class SourceTransitionScope;
+    bool editorActionsBlocked() const;
+    bool openVideoFileImpl(const QString& filePath);
+    void closeVideoSource();
+    void releaseVideoSource();
+    void finishSourceTransition();
+    void scheduleDeferredSourceTransition();
+    void performTransportAction(int actionCode);
     // UI construction and display scheduling.
     void createMenus();
     void createStatusBar();
@@ -369,7 +381,12 @@ private:
     QString mAudioSourcePath;
     int mAudioStreamIndex = -1;
     bool mAudioDisabled = false;
-    bool mIsExporting = false;
+    int mOperationDepth = 0;
+    bool mSourceTransitionActive = false;
+    bool mAutomationRunning = false;
+    bool mDeferredSourcePending = false;
+    bool mDeferredSourceScheduled = false;
+    QString mDeferredSourcePath; // Empty represents a deferred Close.
     bool mAutomationUnattended = false;
     bool mAutomationExitRequested = false;
     int mAutomationExitCode = 0;

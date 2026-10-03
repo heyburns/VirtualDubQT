@@ -101,3 +101,53 @@ Repair validation, 2026-10-02:
   - The four real allocation-failure/recovery tests pass in Release.
   - Full selected suites: Release 16/16 passed; sanitizer 12/12 passed. Physical
     audio-device checks are excluded, and allocator-limit checks run only in Release.
+
+Source lifetime and operation isolation (H06/H07)
+------------------------------------------------
+
+  ctest --preset release-checks -R 'operation_|plugin_host_tests'
+  ctest --preset sanitizer-checks -R 'operation_|plugin_host_tests'
+
+operation_source repeatedly switches built-in AVS clips with audio and silent
+MP4s, queues Open during Close, coalesces competing Opens during window sizing,
+and rapidly starts/stops playback. Close must not dispatch a new Open midway
+through releasing its consumers. The physical audio sink remains disabled.
+
+operation_snapshot changes both the caller's request and the editable filter
+chain inside export callbacks. Raw and lossless video output must retain the
+captured range and pixels throughout the operation.
+
+operation_audio verifies an explicit offline audio-filter snapshot and the
+default snapshot across multiple extracted ranges. Changing the editor/caller
+chain inside progress callbacks must not change the captured mute or sample
+count. Synthetic WAVs are used, with playback-device creation disabled.
+
+operation_queue invokes Open, Close, script execution, edit/filter controls,
+queue reload, and nested export entry points while a real queued render runs.
+The editor must remain unchanged while job-specific settings determine output.
+Abort must remain callable, leave no completed output, and restore usable menus,
+transport controls, and source opening. The native plugin test additionally
+counts live test-module instances to verify private pipeline ownership, scoped
+reset, and destruction without changing the serialized filter IDs.
+
+Long operations now stop/join preview work before borrowing an interactive
+source, use scoped editor ownership, and retain Job Control/progress controls.
+Queued video/raw/image rendering owns its filter pipeline; offline audio uses
+an explicit filter snapshot and does not create a playback sink. Closing a
+source releases preview/worker runtime caches while preserving session options.
+
+These checks do not establish the cause of the user's progressive ProRes export
+slowdown or validate arbitrary third-party AVS/VDX plugins. Source-overwrite
+auditing and output-transaction recovery (H08/H09/S02/S12) remain the next batch.
+
+Validation of this checkpoint, 2026-10-02:
+  - Release: 20/20 selected checks passed; sanitizer: 16/16 passed.
+  - Export error dialogs remain keyboard-accessible while editor input is locked.
+  - Physical audio-device checks are excluded; the codec troubleshooting suite
+    is not included. Leak detection remains disabled as described above.
+  - Eight alternating 1080p MP4/AVS/ProRes cycles: 87.1-92.2 fps, 29 threads.
+    RSS rose from approximately 182 MiB to 334 MiB; unchanged test disk usage
+    was approximately 4.34 MB. This is not proof of a leak or its absence.
+    The observed progressive 30% throughput loss still was not reproduced.
+  - Raw measurements: build-release-checks/isolation-after.json (ignored).
+  - The regular build/VirtualDubQt is rebuilt and passes the VCF smoke check.

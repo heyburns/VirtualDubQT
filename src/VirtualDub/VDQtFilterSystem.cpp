@@ -131,15 +131,29 @@ void setRgba64Channel(QRgba64& pixel, int channel, quint16 value) {
 // Catalog and active-chain configuration
 // ---------------------------------------------------------------------------
 
-VDQtFilterSystem::VDQtFilterSystem() = default;
+VDQtFilterSystem::VDQtFilterSystem()
+    : mRuntimeNamespace(QUuid::createUuid().toString(QUuid::WithoutBraces)) {
+    // Establish singleton destruction order: the host must outlive pipelines.
+    VDQtPluginHost::instance();
+}
 
-VDQtFilterSystem::~VDQtFilterSystem() = default;
+VDQtFilterSystem::~VDQtFilterSystem() { forgetRuntimeInstances(); }
+
+QString VDQtFilterSystem::runtimeInstanceId(const QString& filterId) const {
+    return mRuntimeNamespace + QLatin1Char('/') + filterId;
+}
+
+void VDQtFilterSystem::forgetRuntimeInstances() {
+    for (const VDFilterInstance& filter : std::as_const(mActiveChain)) {
+        if (filter.type == VDFilterType::Plugin)
+            VDQtPluginHost::instance().forgetInstance(runtimeInstanceId(filter.id));
+    }
+}
 
 void VDQtFilterSystem::clearFilters() {
     // A persistent-chain change invalidates plugin instances and every cache;
     // those objects may contain state tied to an entry that no longer exists.
-    for (const VDFilterInstance& filter : std::as_const(mActiveChain))
-        VDQtPluginHost::instance().forgetInstance(filter.id);
+    forgetRuntimeInstances();
     mActiveChain.clear();
     mSixAxisLutCache.clear();
     mAssetCache.clear();
@@ -147,7 +161,7 @@ void VDQtFilterSystem::clearFilters() {
 }
 
 void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) {
-    VDQtPluginHost::instance().forgetAllInstances();
+    forgetRuntimeInstances();
     mActiveChain = chain;
     mSixAxisLutCache.clear();
     mAssetCache.clear();
@@ -159,6 +173,7 @@ void VDQtFilterSystem::replaceActiveChainTransient(
     // Worker/export copies use the same filter descriptions but independent
     // runtime state. Asset cache entries are retained here because changing a
     // numeric preview parameter should not reload unchanged logo files.
+    forgetRuntimeInstances();
     mActiveChain = chain;
     mSixAxisLutCache.clear();
     mTemporalStates.clear();
@@ -510,7 +525,7 @@ void VDQtFilterSystem::addFilter(VDFilterType type) {
 
 void VDQtFilterSystem::removeFilter(int index) {
     if (index >= 0 && index < mActiveChain.size()) {
-        VDQtPluginHost::instance().forgetInstance(mActiveChain.at(index).id);
+        VDQtPluginHost::instance().forgetInstance(runtimeInstanceId(mActiveChain.at(index).id));
         mActiveChain.removeAt(index);
     }
 }
@@ -553,7 +568,7 @@ void VDQtFilterSystem::updateFilterStringParams(
 
 void VDQtFilterSystem::resetRuntimeState() {
     mTemporalStates.clear();
-    VDQtPluginHost::instance().forgetAllInstances();
+    forgetRuntimeInstances();
 }
 
 // ---------------------------------------------------------------------------
@@ -695,7 +710,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
             QImage pluginResult;
             QString errorMessage;
             if (!VDQtPluginHost::instance().processVideoFilter(
-                    filter.pluginId, filter.id, filter.pluginConfiguration,
+                    filter.pluginId, runtimeInstanceId(filter.id), filter.pluginConfiguration,
                     result, &pluginResult, &errorMessage)) {
                 qWarning().noquote() << QStringLiteral("Plugin filter '%1' failed: %2")
                     .arg(filter.name, errorMessage);
