@@ -61,6 +61,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtSourceDependencies.cpp
     src/VirtualDub/VDQtAudioPlayer.h
     src/VirtualDub/VDQtAudioPlayer.cpp
+    src/VirtualDub/VDQtAudioExport.h
+    src/VirtualDub/VDQtAudioExport.cpp
     src/VirtualDub/VDQtAudioFilterSystem.h
     src/VirtualDub/VDQtAudioFilterSystem.cpp
     src/VirtualDub/VDQtFilterSystem.h
@@ -282,7 +284,7 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion queue outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES

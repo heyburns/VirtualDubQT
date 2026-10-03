@@ -270,6 +270,15 @@ Offline audio export uses the same conversion rules but writes transactionally
 through a staged file. Small timestamp jitter is smoothed; genuine gaps remain
 silence.
 
+`VDQtAudioExportRequest` captures codec/conversion settings, filters and ordered
+source-sample ranges for manual Save Audio, scripts and jobs. Range resolution
+indexes bounded edits and rounds source timestamp boundaries, not each duration
+independently. Full identity export retains a soundtrack longer than its video.
+The shared renderer extracts source-precision PCM without effects, concatenates
+edits, then filters/encodes once. Cuts do not restart effect history or append a
+tail per segment. A transaction checks destination identity before installation;
+the outer caller still owns source-graph safety and user overwrite approval.
+
 ## Export modes
 
 `VDQtVideoExporter` is the common implementation behind interactive saves,

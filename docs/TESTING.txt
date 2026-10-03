@@ -864,6 +864,28 @@ Validation: focused Release 7/7 and ASan/UBSan 7/7 passed (controller, source,
 audio inclusion, queue, stabilization and actual-app media smoke). The regular
 binary rebuilt and independently passed MP4/native-AVS export smoke.
 
+Unified audio save requests (S08)
+--------------------------------
+
+The new real-job regression reproduced requested 24-bit/48 kHz/stereo WAV being
+saved as 16-bit/44.1 kHz/mono. Manual/script/job saves now share an immutable
+codec/conversion/filter/source-range request, including edited and masked ranges.
+The helper extracts source-precision PCM, joins edits, then filters and encodes
+once. Selected MP3 no longer tries to packet-copy PCM into the MP3 muxer.
+Native LAME remains a fallback when FFmpeg lacks its MP3 encoder.
+
+Tests inspect converted stream formats, successful MP3, exact edited PCM
+agreement across real Save Audio dialogs/scripts/jobs, continuous low-pass
+history after a cut, mutation of original requests during callbacks,
+cancellation preserving existing files and unapproved replacement rejection.
+The shared path replaces the manual workflow's duplicated extraction/codec loops;
+preview/export effect algorithm matching remains the separate M14 repair.
+
+Validation: focused Release 8/8 and ASan/UBSan 8/8 passed, including the new
+audio-export contracts, inclusion, snapshot, safety, queue, controller and
+stabilization cases. The rebuilt regular app independently passed real
+MP4/native-AVS decode/export smoke. Physical listening is not claimed.
+
 Masked playback picture/audio separation
 ---------------------------------------
 

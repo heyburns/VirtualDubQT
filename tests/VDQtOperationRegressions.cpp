@@ -5,6 +5,7 @@
 #include "VirtualDub/VDQtMainWindow.h"
 #include "VirtualDub/VDQtFrameServer.h"
 #include "VirtualDub/VDQtFrameDecodeWorker.h"
+#include "VirtualDub/VDQtAudioExport.h"
 #include "VirtualDub/VDQtFilterFrameContext.h"
 
 #include <QApplication>
@@ -13,10 +14,12 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPointer>
+#include <QProcess>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QThread>
@@ -754,6 +757,158 @@ bool audioInclusion(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool audioExportContracts(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("audio-export-source.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=32x24:rate=10:duration=2",
+                          "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
+                          "-c:v", "ffv1", "-c:a", "pcm_s16le", source})) return false;
+    const auto probe = [](const QString& path) {
+        QProcess process;
+        process.start("ffprobe", {"-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,sample_rate,channels,bits_per_sample,duration",
+            "-of", "json", path});
+        if (!process.waitForStarted(3000) || !process.waitForFinished(10000)) {
+            process.kill(); process.waitForFinished(); return QJsonObject();
+        }
+        const auto streams = QJsonDocument::fromJson(process.readAllStandardOutput())
+            .object().value("streams").toArray();
+        return streams.isEmpty() ? QJsonObject() : streams.first().toObject();
+    };
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!queue) return false;
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::AudioExport;
+    job.sourcePaths = {source};
+    job.options.outputPath = fixtures.directory.filePath("converted.wav");
+    job.processing.audioCodec.codecId = "pcm_s24le";
+    job.processing.audioCodec.bitDepth = 24;
+    job.processing.audioCodec.sampleRate = 48000;
+    job.processing.audioCodec.channels = 2;
+    QString error;
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    auto info = probe(job.options.outputPath);
+    if (!check(queue->jobAt(0)->status == VDQtJobStatus::Complete
+               && info.value("codec_name") == "pcm_s24le"
+               && info.value("sample_rate") == "48000"
+               && info.value("channels").toInt() == 2,
+               "queued audio honors requested 24-bit, rate and channel conversion")) return false;
+    job.options.outputPath = fixtures.directory.filePath("encoded.mp3");
+    job.processing.audioCodec.codecId = "libmp3lame";
+    job.processing.audioCodec.bitrateKbps = 192;
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    if (!check(queue->jobAt(1)->status == VDQtJobStatus::Complete
+               && probe(job.options.outputPath).value("codec_name") == "mp3",
+               "queued selected MP3 encodes rather than copying PCM into MP3")) return false;
+    job.options.outputPath = fixtures.directory.filePath("edited.wav");
+    job.processing.audioCodec = VDAudioCodecParams{};
+    job.processing.audioCodec.codecId = "pcm_s16le";
+    job.options.timelineExplicit = true;
+    job.options.timelineSegments = {{12, 3, false}, {2, 4, true}};
+    if (!queue->addJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    info = probe(job.options.outputPath);
+    if (!check(queue->jobAt(2)->status == VDQtJobStatus::Complete
+               && std::abs(info.value("duration").toString().toDouble() - 0.7) < 1e-5,
+               "queued edited audio concatenates actual source intervals, including masks")) return false;
+    if (!window.openVideoFile(source)) return false;
+    const QString scriptPath = fixtures.directory.filePath("script-edited.wav");
+    if (!window.runAutomationText(
+            QString("VirtualDub.audio.SetCompression(); VirtualDub.subset.Clear(); "
+                    "VirtualDub.subset.AddRange(12,3); VirtualDub.subset.AddMaskedRange(2,4); "
+                    "VirtualDub.SaveWAV(\"%1\");").arg(scriptPath),
+            fixtures.directory.path(), &error)) {
+        std::cerr << error.toStdString() << '\n'; return false;
+    }
+    const QString queuedRaw = fixtures.directory.filePath("queued-audio.raw");
+    const QString scriptRaw = fixtures.directory.filePath("script-audio.raw");
+    if (!fixtures.ffmpeg({"-i", job.options.outputPath, "-f", "s16le", queuedRaw})
+        || !fixtures.ffmpeg({"-i", scriptPath, "-f", "s16le", scriptRaw})) return false;
+    if (!check(readFile(queuedRaw).size() == 30870 * 2
+                 && readFile(queuedRaw) == readFile(scriptRaw),
+                 "script and queue produce identical edited PCM samples")) return false;
+
+    // Exercise the actual Save Audio dialog, not just its shared helper.
+    const QString manualPath = fixtures.directory.filePath("manual-edited.wav");
+    VDSaveAudioSessionConfig session;
+    session.codecId = "pcm_s16le";
+    VDQtCodecSettings::instance().setSaveAudioSessionConfig(session);
+    bool chosen = false, saved = false, failed = false;
+    QElapsedTimer deadline;
+    deadline.start();
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<VDSaveAudioDialog*>(widget); dialog && dialog->isVisible()) {
+                if (!dialog->property("testChosen").toBool()) {
+                    dialog->setProperty("testChosen", true);
+                    const auto lines = dialog->findChildren<QLineEdit*>();
+                    if (lines.size() != 1) { failed = true; dialog->reject(); continue; }
+                    lines.first()->setText(manualPath);
+                    chosen = true;
+                    QMetaObject::invokeMethod(dialog, "onSaveClicked", Qt::DirectConnection);
+                }
+            } else if (auto *box = qobject_cast<QMessageBox*>(widget); box && box->isVisible()) {
+                saved = box->windowTitle() == "Save Audio" && box->text().contains("saved successfully");
+                failed |= !saved;
+                box->accept();
+            } else if (deadline.elapsed() > 5000) {
+                if (auto *dialog = qobject_cast<QDialog*>(widget); dialog && dialog->isVisible()) {
+                    failed = true; dialog->reject();
+                }
+            }
+        }
+    });
+    responder.start();
+    invoke(window, "onFileSaveAudio");
+    responder.stop();
+    const QString manualRaw = fixtures.directory.filePath("manual-audio.raw");
+    if (!check(chosen && saved && !failed, "manual Save Audio completes through the shared pipeline")
+        || !fixtures.ffmpeg({"-i", manualPath, "-f", "s16le", manualRaw})
+        || !check(readFile(manualRaw) == readFile(queuedRaw),
+                  "manual, script and queue use identical edited samples")) return false;
+
+    VDQtAudioPlayer offline(false);
+    if (!offline.openFile(source)) return false;
+    VDQtAudioExportRequest request;
+    request.codec.codecId = "pcm_s16le";
+    request.outputPath = fixtures.directory.filePath("continuous-filter.wav");
+    request.sampleRanges = {{52920, 13230}, {8820, 17640}};
+    auto lowpass = VDQtAudioFilterSystem::instance().createFilter(VDAudioFilterType::LowPass);
+    lowpass.params["cutoffHz"] = 1200;
+    request.filters = {lowpass};
+    const QString filteredPath = request.outputPath;
+    if (!VDQtExportAudio(offline, request, [&](int, int) {
+            request.filters.clear(); request.sampleRanges = {{0, 1}};
+            request.codec.codecId = "aac";
+            return true;
+        }, &error)) return false;
+    const QString expectedFiltered = fixtures.directory.filePath("expected-filter.raw");
+    const QString actualFiltered = fixtures.directory.filePath("actual-filter.raw");
+    if (!fixtures.ffmpeg({"-i", job.options.outputPath, "-af", "lowpass=f=1200", "-f", "s16le", expectedFiltered})
+        || !fixtures.ffmpeg({"-i", filteredPath, "-f", "s16le", actualFiltered})
+        || !check(readFile(actualFiltered) == readFile(expectedFiltered),
+                  "effects run continuously after cuts and requests stay immutable during callbacks")) return false;
+    const QString sentinel = fixtures.directory.filePath("cancelled.wav");
+    if (!fixtures.writeText(sentinel, "original audio destination")) return false;
+    request.outputPath = sentinel;
+    request.codec.codecId = "pcm_s16le";
+    request.sampleRanges = {{0, 4410}};
+    request.replaceExisting = true;
+    if (!check(!VDQtExportAudio(offline, request, [](int, int) { return false; }, &error)
+               && readFile(sentinel) == "original audio destination",
+               "cancelled audio leaves an approved existing destination intact")) return false;
+    request.replaceExisting = false;
+    return check(!VDQtExportAudio(offline, request, {}, &error)
+                 && error.contains("not approved") && readFile(sentinel) == "original audio destination",
+                 "shared audio export rejects unapproved replacement before encoding");
+}
+
 bool outputFamilies(VDQtTestFixtures& fixtures) {
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
@@ -1487,6 +1642,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);
     if (scenario == "audio_inclusion") return audioInclusion(fixtures);
+    if (scenario == "audio_export") return audioExportContracts(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);
     if (scenario == "outputs") return outputFamilies(fixtures);
     if (scenario == "safety") return sourceProtection(fixtures);

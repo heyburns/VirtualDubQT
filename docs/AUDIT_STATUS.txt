@@ -59,7 +59,8 @@ Remaining execution sequence
 [x] M04: continuous fallback from ended/failed/nonadvancing audio clocks.
     Physical sink/short-track playback verification remains a hardware gate.
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
-[ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
+[x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
+    Effects run once after edit assembly; source precision is retained until encoding.
 [ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
 [x] Audio follow-up: separate held-picture and advancing audio mappings, including
     masked VFR playback intervals. Physical continuous-sound verification is pending.

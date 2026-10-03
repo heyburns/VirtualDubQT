@@ -5,6 +5,7 @@
 #include "VDQtMainWindow.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtFilterValidation.h"
+#include "VDQtAudioExport.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtOutputTransaction.h"
 #include "VDQtBatchWizard.h"
@@ -2319,330 +2320,29 @@ void VDQtMainWindow::onFileSaveAudio() {
         progress.setMinimumDuration(0);
         progress.setValue(0);
 
-        double fps = mVideoDecoder.getFps();
-        if (fps <= 0) fps = 29.97;
-        int sampleRate = exportAudio.getSampleRate();
-        if (sampleRate <= 0) sampleRate = 48000;
-
-        int64_t startSample = 0;
-        int64_t sampleCount = -1;
-        QList<VDQtTimelineSegment> audioEditSegments;
-        if (mPositionControl->hasSelection()) {
-            const qint64 requestedStart = mPositionControl->GetSelectionStart();
-            const qint64 requestedEndExclusive = mPositionControl->GetSelectionEnd();
-            const int exactFrameCount = static_cast<int>(mTimeline.frameCount());
-            if (requestedStart < 0 || requestedStart >= exactFrameCount
-                || requestedEndExclusive <= requestedStart) {
-                QMessageBox::critical(
-                    this, "Audio Export Range Error",
-                    QString("The requested selection starts at frame %1, but the source contains only %2 frame(s).")
-                        .arg(requestedStart)
-                        .arg(exactFrameCount));
-                return;
-            }
-            const int startFrame = static_cast<int>(requestedStart);
-            const int endFrame = static_cast<int>(std::min<qint64>(
-                requestedEndExclusive - 1, exactFrameCount - 1));
-
-            QString timelineError;
-            if (mTimeline.isModified()) {
-                audioEditSegments = mTimeline.copyRange(
-                    startFrame, endFrame + 1, &timelineError);
-                if (audioEditSegments.isEmpty()) {
-                    QMessageBox::critical(
-                        this, "Audio Export Range Error", timelineError);
-                    return;
-                }
-            }
-
-            const int firstSourceFrame = sourceFrameForTimelineFrame(startFrame);
-            const int lastSourceFrame = sourceFrameForTimelineFrame(endFrame);
-            double startSeconds =
-                mVideoDecoder.getFrameTimestampSeconds(firstSourceFrame);
-            if (!std::isfinite(startSeconds)) startSeconds = firstSourceFrame / fps;
-            double durationSeconds = (endFrame - startFrame + 1) / fps;
-            const double lastTimestamp =
-                mVideoDecoder.getFrameTimestampSeconds(lastSourceFrame);
-            const double lastDuration =
-                mVideoDecoder.getFrameDurationSeconds(lastSourceFrame);
-            if (std::isfinite(lastTimestamp) && std::isfinite(lastDuration)
-                && lastTimestamp + lastDuration > startSeconds) {
-                durationSeconds = lastTimestamp + lastDuration - startSeconds;
-            }
-
-            startSample = static_cast<int64_t>(std::llround(startSeconds * sampleRate));
-            sampleCount = static_cast<int64_t>(std::llround(durationSeconds * sampleRate));
-        } else if (mTimeline.isModified()) {
-            audioEditSegments = mTimeline.segments();
-        }
-
-        const auto exportSelectedAudioToWav =
-            [&](const QString& destination,
-                std::function<bool(int, int)> progressCallback) -> bool {
-            if (audioEditSegments.isEmpty()) {
-                return exportAudio.exportAudioToFile(
-                    destination, startSample, sampleCount, progressCallback);
-            }
-
-            QTemporaryDir segmentDirectory;
-            if (!segmentDirectory.isValid()) return false;
-            QStringList segmentFiles;
-            for (int index = 0; index < audioEditSegments.size(); ++index) {
-                const VDQtTimelineSegment& segment = audioEditSegments.at(index);
-                const int firstSource = static_cast<int>(segment.sourceStartFrame);
-                const int lastSource = static_cast<int>(
-                    segment.sourceStartFrame + segment.frameCount - 1);
-                double startSeconds =
-                    mVideoDecoder.getFrameTimestampSeconds(firstSource);
-                if (!std::isfinite(startSeconds)) startSeconds = firstSource / fps;
-                double durationSeconds = segment.frameCount / fps;
-                const double lastTimestamp =
-                    mVideoDecoder.getFrameTimestampSeconds(lastSource);
-                const double lastDuration =
-                    mVideoDecoder.getFrameDurationSeconds(lastSource);
-                if (std::isfinite(lastTimestamp) && std::isfinite(lastDuration)
-                    && lastTimestamp + lastDuration > startSeconds) {
-                    durationSeconds = lastTimestamp + lastDuration - startSeconds;
-                }
-                const int64_t segmentStart = static_cast<int64_t>(
-                    std::llround(startSeconds * sampleRate));
-                const int64_t segmentSamples = std::max<int64_t>(
-                    1, static_cast<int64_t>(
-                        std::llround(durationSeconds * sampleRate)));
-                const QString segmentPath = segmentDirectory.filePath(
-                    QString("segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
-                const bool extracted = exportAudio.exportAudioToFile(
-                    segmentPath, segmentStart, segmentSamples,
-                    [&, index](int current, int total) {
-                        const double fraction = total > 0
-                            ? static_cast<double>(current) / total : 0.0;
-                        const int combinedCurrent = static_cast<int>(std::llround(
-                            1000.0 * (index + fraction)
-                            / audioEditSegments.size()));
-                        return progressCallback
-                            ? progressCallback(combinedCurrent, 1000) : true;
-                    });
-                if (!extracted) return false;
-                segmentFiles.append(segmentPath);
-            }
-            if (segmentFiles.size() == 1) {
-                QFile::remove(destination);
-                return QFile::rename(segmentFiles.first(), destination);
-            }
-
-            const QString manifestPath =
-                segmentDirectory.filePath(QStringLiteral("audio.ffconcat"));
-            QSaveFile manifest(manifestPath);
-            QByteArray contents("ffconcat version 1.0\n");
-            for (const QString& segmentPath : segmentFiles) {
-                contents += "file ";
-                contents += QFileInfo(segmentPath).fileName().toUtf8();
-                contents += '\n';
-            }
-            if (!manifest.open(QIODevice::WriteOnly)
-                || manifest.write(contents) != contents.size()
-                || !manifest.commit())
-                return false;
-
-            QProcess concat;
-            concat.setWorkingDirectory(segmentDirectory.path());
-            concat.start(
-                QStringLiteral("ffmpeg"),
-                {QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
-                 QStringLiteral("-loglevel"), QStringLiteral("error"),
-                 QStringLiteral("-f"), QStringLiteral("concat"),
-                 QStringLiteral("-safe"), QStringLiteral("1"),
-                 QStringLiteral("-i"), QFileInfo(manifestPath).fileName(),
-                 QStringLiteral("-c:a"), QStringLiteral("copy"),
-                 QStringLiteral("-y"), destination});
-            if (!concat.waitForStarted(3000)) return false;
-            while (!concat.waitForFinished(30)) {
-                QCoreApplication::processEvents();
-                if (progress.wasCanceled()) {
-                    concat.kill();
-                    concat.waitForFinished();
-                    return false;
-                }
-            }
-            return concat.exitStatus() == QProcess::NormalExit
-                && concat.exitCode() == 0
-                && QFileInfo(destination).size() > 0;
-        };
-
-        bool ok = false;
         QString errorMsg;
-
-        QString audioCodec = audioCfg.codecId.toLower();
-
-        // 1. Direct Uncompressed PCM Export if no resampling/channel change requested and saving as WAV
-        if ((audioCodec == "pcm_s16le" || audioCodec == "(uncompressed)" || audioCodec.isEmpty()) &&
-            audioCfg.sampleRate == 0 && audioCfg.channels == 0 && outPath.endsWith(".wav", Qt::CaseInsensitive)) {
-            ok = exportSelectedAudioToWav(workingOutputPath, [&progress](int cur, int total) -> bool {
-                const int pct = total > 0 ? std::clamp(cur * 100 / total, 0, 100) : 0;
-                progress.setValue(pct);
-                progress.setLabelText(QString("Exporting uncompressed PCM audio...\n%1% complete").arg(pct));
-                QCoreApplication::processEvents();
-                return !progress.wasCanceled();
-            });
-        } else {
-            // 2. Full Processing Encoding with selected codec, bitrate, sample rate, and channels
-            QTemporaryDir tempDir;
-            if (!tempDir.isValid()) {
-                QMessageBox::critical(this, "Save Audio Error", "Unable to create a secure temporary directory.");
-                return;
-            }
-            QString tempWav = tempDir.filePath("audio.wav");
-            bool extractOk = exportSelectedAudioToWav(tempWav, [&progress](int cur, int total) -> bool {
-                int pct = total > 0 ? std::clamp(cur * 50 / total, 0, 50) : 0;
-                progress.setValue(pct);
-                progress.setLabelText(QString("Extracting audio stream...\n%1% complete").arg(pct * 2));
-                QCoreApplication::processEvents();
-                return !progress.wasCanceled();
-            });
-
-            if (extractOk) {
-                QProcess ffmpeg;
-                QStringList args;
-                bool isVbr = (audioCfg.rateControlMode.toLower() == "vbr");
-                const QString lameExecutable = QStandardPaths::findExecutable("lame");
-
-                if ((audioCodec == "libmp3lame" || audioCodec == "mp3")
-                    && !lameExecutable.isEmpty()) {
-                    // Use native LAME MP3 encoder
-                    QProcess lameProc;
-                    QStringList lameArgs;
-                    if (isVbr) {
-                        int vQuality = std::clamp(audioCfg.vbrQuality, 0, 9);
-                        lameArgs << "-V" << QString::number(vQuality);
-                    } else {
-                        int br = (audioCfg.bitrateKbps > 0) ? audioCfg.bitrateKbps : 192;
-                        lameArgs << "-b" << QString::number(br);
-                    }
-                    if (audioCfg.sampleRate > 0) {
-                        lameArgs << "--resample" << QString::number(audioCfg.sampleRate / 1000.0, 'f', 1);
-                    }
-                    if (audioCfg.channels == 1) {
-                        lameArgs << "-m" << "m";
-                    } else if (audioCfg.channels == 2) {
-                        lameArgs << "-m" << "j";
-                    }
-                    lameArgs << tempWav << workingOutputPath;
-
-                    // LAME may prompt instead of replacing an existing file.
-                    // The randomized path remains safely scoped to the target directory.
-                    QFile::remove(workingOutputPath);
-                    lameProc.start(lameExecutable, lameArgs);
-                    if (lameProc.waitForStarted(3000)) {
-                        static const QRegularExpression re("\\(\\s*(\\d+)%\\)");
-                        QByteArray errBuf;
-                        bool cancelled = false;
-                        while (!lameProc.waitForFinished(30)) {
-                            if (progress.wasCanceled()) {
-                                cancelled = true;
-                                lameProc.terminate();
-                                if (!lameProc.waitForFinished(1000)) {
-                                    lameProc.kill();
-                                    lameProc.waitForFinished(3000);
-                                }
-                                break;
-                            }
-                            errBuf += lameProc.readAllStandardError();
-                            lameProc.readAllStandardOutput();
-                            auto match = re.match(QString::fromUtf8(errBuf));
-                            if (match.hasMatch()) {
-                                int rawPct = match.captured(1).toInt();
-                                int overallPct = 50 + std::clamp((rawPct * 50) / 100, 0, 49);
-                                progress.setValue(overallPct);
-                                progress.setLabelText(QString("Encoding MP3 audio stream...\n%1% complete").arg(rawPct));
-                            }
-                            if (errBuf.size() > 4096) errBuf = errBuf.right(1024);
-                            QCoreApplication::processEvents();
-                        }
-                        errBuf += lameProc.readAllStandardError();
-                        lameProc.readAllStandardOutput();
-                        if (!cancelled && lameProc.exitStatus() == QProcess::NormalExit
-                            && lameProc.exitCode() == 0 && QFileInfo(workingOutputPath).size() > 0) {
-                            ok = true;
-                            progress.setValue(100);
-                            progress.setLabelText("Encoding MP3 audio stream...\n100% complete");
-                        } else {
-                            QFile::remove(workingOutputPath);
-                            errorMsg = cancelled ? "Audio export was cancelled."
-                                                 : QString("LAME MP3 encoding failed:\n%1").arg(QString::fromUtf8(errBuf));
-                        }
-                        QCoreApplication::processEvents();
-                    } else {
-                        errorMsg = "Failed to launch LAME MP3 encoder.";
-                    }
-                } else {
-                    args << "-y" << "-i" << tempWav;
-                    const VDAudioCodecParams encodeParams =
-                        VDQtCodecEngine::audioParamsFromConfig(
-                            audioCfg, sampleRate, exportAudio.getChannels());
-                    args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(encodeParams);
-
-                    const int64_t progressSamples = sampleCount > 0
-                        ? sampleCount
-                        : std::max<int64_t>(1, exportAudio.getTotalSamples() - startSample);
-                    const int64_t totalDurationUs = sampleRate > 0
-                        ? std::max<int64_t>(1, static_cast<int64_t>(
-                              static_cast<long double>(progressSamples) * 1000000.0L / sampleRate))
-                        : 1000000LL;
-                    args << "-progress" << "pipe:1";
-                    args << workingOutputPath;
-
-                    ffmpeg.start("ffmpeg", args);
-                    if (ffmpeg.waitForStarted(3000)) {
-                        QByteArray outBuf;
-                        QByteArray errBuf;
-                        bool cancelled = false;
-                        while (!ffmpeg.waitForFinished(30)) {
-                            if (progress.wasCanceled()) {
-                                cancelled = true;
-                                ffmpeg.terminate();
-                                if (!ffmpeg.waitForFinished(1000)) {
-                                    ffmpeg.kill();
-                                    ffmpeg.waitForFinished(3000);
-                                }
-                                break;
-                            }
-                            outBuf += ffmpeg.readAllStandardOutput();
-                            errBuf += ffmpeg.readAllStandardError();
-                            if (errBuf.size() > 1024 * 1024)
-                                errBuf = errBuf.right(1024 * 1024);
-                            int lastNl;
-                            while ((lastNl = outBuf.indexOf('\n')) >= 0) {
-                                QByteArray line = outBuf.left(lastNl).trimmed();
-                                outBuf.remove(0, lastNl + 1);
-                                if (line.startsWith("out_time_us=")) {
-                                    qint64 outUs = line.mid(12).trimmed().toLongLong();
-                                    int encPct = (int)((outUs * 100LL) / totalDurationUs);
-                                    int overallPct = 50 + std::clamp((encPct * 50) / 100, 0, 49);
-                                    progress.setValue(overallPct);
-                                    progress.setLabelText(QString("Encoding %1 audio stream...\n%2% complete").arg(audioCfg.codecName).arg(std::clamp(encPct, 0, 100)));
-                                }
-                            }
-                            QCoreApplication::processEvents();
-                        }
-                        progress.setValue(100);
-                        progress.setLabelText(QString("Encoding %1 audio stream...\n100% complete").arg(audioCfg.codecName));
-                        QCoreApplication::processEvents();
-                        errBuf += ffmpeg.readAllStandardError();
-                        if (!cancelled && ffmpeg.exitStatus() == QProcess::NormalExit && ffmpeg.exitCode() == 0 && QFileInfo(workingOutputPath).size() > 0) {
-                            ok = true;
-                        } else {
-                            QFile::remove(workingOutputPath);
-                            errorMsg = cancelled ? "Audio export was cancelled."
-                                                 : QString("FFmpeg audio encoding failed:\n%1").arg(QString::fromUtf8(errBuf));
-                        }
-                    } else {
-                        errorMsg = "Failed to launch FFmpeg audio encoder.";
-                    }
-                }
-            } else {
-                errorMsg = "Failed to extract uncompressed PCM audio from source.";
-            }
-        }
+        VDQtAudioExportRequest request;
+        request.outputPath = workingOutputPath;
+        request.replaceExisting = true; // The outer stage is our own reservation.
+        request.codec = VDQtCodecEngine::audioParamsFromConfig(
+            audioCfg, exportAudio.getSampleRate(), exportAudio.getChannels());
+        request.filters = VDQtAudioFilterSystem::instance().activeChain();
+        const auto report = [&](int value, int maximum) {
+            const int percent = maximum > 0 ? static_cast<int>(
+                std::clamp(100.0 * value / maximum, 0.0, 100.0)) : 0;
+            progress.setValue(percent);
+            progress.setLabelText(QString("Exporting %1 audio...\n%2% complete")
+                .arg(audioCfg.codecName).arg(percent));
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        };
+        const bool rangeReady = VDQtAudioRangesForTimeline(
+            mVideoDecoder, mTimeline.isModified() ? mTimeline.segments()
+                : QList<VDQtTimelineSegment>(),
+            mPositionControl->hasSelection() ? mPositionControl->GetSelectionStart() : 0,
+            mPositionControl->hasSelection() ? mPositionControl->GetSelectionEnd() - 1 : -1,
+            exportAudio.getSampleRate(), &request.sampleRanges, &errorMsg, report);
+        bool ok = rangeReady && VDQtExportAudio(exportAudio, request, report, &errorMsg);
 
         progress.reset();
         progress.close();
@@ -2973,26 +2673,15 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
         return true;
     }
 
-    int64_t startSample = 0;
-    int64_t sampleCount = -1;
-    if (mPositionControl->hasSelection() && mVideoDecoder.isOpen()) {
-        const int startFrame = static_cast<int>(mPositionControl->GetSelectionStart());
-        const int finalFrame = std::max(
-            startFrame, static_cast<int>(mPositionControl->GetSelectionEnd() - 1));
-        const double fps = std::max(1.0, mVideoDecoder.getFps());
-        double start = mVideoDecoder.getFrameTimestampSeconds(startFrame);
-        double end = mVideoDecoder.getFrameTimestampSeconds(finalFrame);
-        double duration = mVideoDecoder.getFrameDurationSeconds(finalFrame);
-        if (!std::isfinite(start)) start = startFrame / fps;
-        if (!std::isfinite(end)) end = finalFrame / fps;
-        if (!std::isfinite(duration) || duration <= 0.0) duration = 1.0 / fps;
-        startSample = std::max<int64_t>(
-            0, static_cast<int64_t>(std::llround(
-                   start * mAudioPlayer.getSampleRate())));
-        sampleCount = std::max<int64_t>(
-            1, static_cast<int64_t>(std::llround(
-                   (end + duration - start) * mAudioPlayer.getSampleRate())));
-    }
+    VDQtAudioExportRequest request;
+    request.codec = VDQtCodecEngine::instance().getAudioParams();
+    request.filters = VDQtAudioFilterSystem::instance().activeChain();
+    if (!VDQtAudioRangesForTimeline(
+            mVideoDecoder, mTimeline.isModified() ? mTimeline.segments()
+                : QList<VDQtTimelineSegment>(),
+            mPositionControl->hasSelection() ? mPositionControl->GetSelectionStart() : 0,
+            mPositionControl->hasSelection() ? mPositionControl->GetSelectionEnd() - 1 : -1,
+            mAudioPlayer.getSampleRate(), &request.sampleRanges, errorMessage)) return false;
     // The borrowed AVS audio clip cannot identify its source graph by itself.
     // Keep script-level dependency protection outside the audio helper and
     // render to a private path before considering the real destination.
@@ -3003,10 +2692,9 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
     }
     const QString stagedPath = staged.fileName();
     staged.close();
-    if (!mAudioPlayer.exportAudioToFile(stagedPath, startSample, sampleCount)) {
-        if (errorMessage) *errorMessage = QStringLiteral("Audio export failed or was cancelled.");
-        return false;
-    }
+    request.outputPath = stagedPath;
+    request.replaceExisting = true; // Only our reservation, not the user's destination.
+    if (!VDQtExportAudio(mAudioPlayer, request, {}, errorMessage)) return false;
     sourceSafety.refresh();
     if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()
         || !replaceWithStagedFile(stagedPath, outputPath)) {
@@ -4866,31 +4554,18 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
                 "The queued source has no decodable audio stream.");
             return false;
         }
-        int64_t startSample = 0;
-        int64_t sampleCount = -1;
-        if (job.options.endFrame >= job.options.startFrame
-            && job.options.endFrame >= 0) {
-            const double fps = std::max(1.0, decoder.getFps());
-            double start = decoder.getFrameTimestampSeconds(job.options.startFrame);
-            double end = decoder.getFrameTimestampSeconds(job.options.endFrame);
-            const double duration =
-                decoder.getFrameDurationSeconds(job.options.endFrame);
-            if (!std::isfinite(start)) start = job.options.startFrame / fps;
-            if (!std::isfinite(end)) end = job.options.endFrame / fps;
-            end += std::isfinite(duration) && duration > 0.0
-                ? duration : 1.0 / fps;
-            startSample = std::max<int64_t>(
-                0, static_cast<int64_t>(std::llround(
-                       start * audioPlayer.getSampleRate())));
-            sampleCount = std::max<int64_t>(
-                1, static_cast<int64_t>(std::llround(
-                       (end - start) * audioPlayer.getSampleRate())));
-        }
+        VDQtAudioExportRequest request;
+        request.codec = job.processing.audioCodec;
+        request.filters = job.processing.audioFilters;
+        if (!VDQtAudioRangesForTimeline(
+                decoder, job.options.timelineExplicit ? job.options.timelineSegments
+                    : QList<VDQtTimelineSegment>(),
+                job.options.startFrame, job.options.endFrame, audioPlayer.getSampleRate(),
+                &request.sampleRanges, errorMessage, progress)) return false;
         QString queuedStage;
         if (!prepareQueuedStage(&queuedStage)) return false;
-        const bool result = audioPlayer.exportAudioToFile(
-            queuedStage, startSample, sampleCount, progress,
-            &job.processing.audioFilters);
+        request.outputPath = queuedStage;
+        const bool result = VDQtExportAudio(audioPlayer, request, progress, errorMessage);
         if (!result) {
             QFile::remove(queuedStage);
             if (mQueueAbortRequested && errorMessage)
