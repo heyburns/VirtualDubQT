@@ -4,6 +4,7 @@
 #include "VDQtFrameServer.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtTimingMath.h"
+#include "VDQtVideoAspect.h"
 
 #include "VDQtVideoDecoder.h"
 
@@ -215,6 +216,8 @@ void VDQtFrameServer::run(Config config) {
     // real muxer supplies timestamps and stream metadata that raw FIFO bytes do
     // not carry, while keeping video processing inside this application.
     QProcess ffmpeg;
+    const AVRational sampleAspect = firstImages.isEmpty() ? AVRational{1, 1}
+        : VDQtImageSampleAspectRatio(firstImages.first());
     QImage::Format imageFormat = QImage::Format_RGB888;
     QString pixelFormat = QStringLiteral("rgb24");
     if (!firstImages.isEmpty() && firstImages.first().depth() > 32) {
@@ -246,6 +249,8 @@ void VDQtFrameServer::run(Config config) {
         if (hasAudio)
             arguments << QStringLiteral("-map") << QStringLiteral("1:a:0");
         arguments << QStringLiteral("-c:v") << QStringLiteral("rawvideo")
+                  << QStringLiteral("-vf") << QStringLiteral("setsar=%1/%2:max=2147483647")
+                      .arg(sampleAspect.num).arg(sampleAspect.den)
                   << QStringLiteral("-pix_fmt") << pixelFormat
                   << QStringLiteral("-threads:v") << QStringLiteral("1");
         if (hasAudio) {
@@ -303,9 +308,10 @@ void VDQtFrameServer::run(Config config) {
         }
         for (const QImage& image : images) {
             if (image.isNull() || image.size() != outputSize
-                || image.depth() != outputDepth || image.hasAlphaChannel() != outputAlpha) {
+                || image.depth() != outputDepth || image.hasAlphaChannel() != outputAlpha
+                || av_cmp_q(VDQtImageSampleAspectRatio(image), sampleAspect) != 0) {
                 error = QStringLiteral(
-                    "The filter chain changed dimensions or pixel precision while frame serving.");
+                    "The filter chain changed dimensions, pixel precision or sample aspect ratio while frame serving.");
                 break;
             }
         }

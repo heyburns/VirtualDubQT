@@ -1267,3 +1267,61 @@ runtime/plugin incompatibility remains unassigned; installed plugins were not
 modified. See AVISYNTH_AUTOLOAD_CHECK.txt for a no-application reproduction.
 The maintained startup regression instead uses huge exact clip metadata and
 does not suppress sanitizer errors or avoid process teardown.
+
+Raw leases, sample aspect, resizing and bounded work
+--------------------------------------------------
+
+  ctest --preset release-checks -R 'temporary_media|path_identity|settings_string|queue_durability|aspect_contract|timestamped_pixels|filter_geometry|filter_resampling|filter_channel_lut|process_diagnostic|operation_raw_lifetime|operation_vfr_jump|operation_resize_script|operation_external_encoder_logs'
+
+Run the same selection in the sanitizer preset. Temporary-media tests exercise
+active/reopen/rollback/job ownership, failed partial copies, checked payload/count
+arithmetic and insufficient storage. The real controller repeatedly reloads raw
+files, restores raw projects, forces late audio-open failure, closes the source
+and runs an offline raw job. Old materializations must disappear immediately,
+the active/rollback copy must remain usable, and original bytes stay unchanged.
+Raw Reopen retains original source descriptors; recent files exclude owned copies.
+
+Aspect tests independently probe container and AVS per-frame ratios, display
+overrides/extreme metadata, inherited crop/resize/pad metadata, reciprocal quarter
+turns and Full/Normal/Fast/two-pass outputs. Unsupported changing stream ratios
+fail without partial output. timestamped_pixels_tests compares every decoded
+VFR color/alpha sample at RGB24/RGBA8/RGBA16 with the actual rendered callback
+images and checks the original timestamps. The explicit raw-video FourCC repair
+prevents the previous NUT RGB24-to-RGB15 interpretation.
+
+Geometry tests cover relative aspect/alignment/framing, reserved clips, disabled
+and conditional stages and the real filter table at three integer layouts. Long
+script sizing uses preceding-stage geometry; short explicit sizes remain exact.
+Independent scalar resize references cover each existing mode, reduction support,
+alpha, low 16-bit values, parity-separated interlaced resizing and bounded scratch.
+Exhaustive channel-table checks compare all 256/65536 levels with the previous
+Gamma/sRGB/Curves/Levels formulas, parameters, alpha and transient restart reuse.
+Subnormal normalized level spans fail before division rather than becoming NaN.
+
+Controlled filter-only measurements (1080p, fixed Qt pool of eight, eight warmup
+and twelve measured frames) for Gamma + sRGB + Curves + Levels:
+  - 8-bit: 62.25 ms/frame before, 3.79 ms/frame after.
+  - 16-bit: 62.89 ms/frame before, 3.25 ms/frame after.
+These are not end-to-end playback results or proof about the user's ProRes case.
+
+Typed codec tests reproduced 73 baseline invalid-input acceptances. The proposed
+autosave-directory test reproduced two admission/ownership failures. Identity
+tests include hard links, dangling symlinks and symlink-plus-parent traversal;
+1000 unique destinations require 1000 native identity queries rather than pairwise
+queries. Baseline queue validation for 1000 existing-output jobs was 1172.88 ms;
+after unrelated builds finished, the rebuilt comparison was 6.60 ms.
+
+Real subprocess tests emit six MiB across stdout/stderr while retaining at most
+64 KiB, checking success/failure/cancel/early helper teardown and final markers.
+The controller's real external-encoder workflow also verifies noisy success and
+failure diagnostics plus transactional output. No physical encoder or user file
+is touched. VFR jump tests use actual and reordered edit boundaries and exercise
+the real modal dialog's source-replacement exclusion.
+
+Validation of this checkpoint, 2026-10-03: focused checks passed, then full
+Release 78/78 and ASan/UBSan 74/74. The independently rebuilt regular executable
+passed MP4/native-AVS raw smoke plus FFV1/native-AVS raw/encoded runtime smoke.
+The final isolated LUT benchmark measured 2.78 ms/frame at 8-bit and 2.72 ms/frame
+at 16-bit; timing varies, and the original controlled comparison above remains
+the directly paired result. Physical devices, arbitrary plug-ins, leak detection,
+the user-specific slowdown and clean package installation remain unverified.

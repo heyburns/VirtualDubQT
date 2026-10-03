@@ -19,6 +19,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QPointer>
+#include <functional>
 
 #include "VDQtFilterSystem.h"
 
@@ -564,12 +565,16 @@ private:
 class VDJumpToPositionDialog : public QDialog {
     Q_OBJECT
 public:
+    // Optional edited-timeline boundary clock. It accepts maximumFrame+1 for
+    // the exclusive end, without allocating one entry per frame in the dialog.
+    using FrameTimeMapping = std::function<double(qint64)>;
     explicit VDJumpToPositionDialog(
         qint64 currentFrame,
         qint64 minimumFrame,
         qint64 maximumFrame,
         double frameRate,
-        QWidget *parent = nullptr);
+        QWidget *parent = nullptr,
+        FrameTimeMapping frameTimeMapping = {});
 
     qint64 selectedFrame() const { return mSelectedFrame; }
 
@@ -586,7 +591,8 @@ public:
         qint64 minimumFrame,
         qint64 maximumFrame,
         double frameRate,
-        qint64 *result);
+        qint64 *result,
+        const FrameTimeMapping& frameTimeMapping = {});
     static QString formatFrameTime(qint64 frame, double frameRate);
 
 public Q_SLOTS:
@@ -598,6 +604,7 @@ private:
     qint64 mMaximumFrame = 0;
     qint64 mSelectedFrame = 0;
     double mFrameRate = 0.0;
+    FrameTimeMapping mFrameTimeMapping;
     QRadioButton *mJumpToFrame = nullptr;
     QRadioButton *mJumpToTime = nullptr;
     QLineEdit *mFrameNumber = nullptr;

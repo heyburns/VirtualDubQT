@@ -16,6 +16,7 @@
 #include <QProcess>
 #include <QSpinBox>
 #include <QTimer>
+#include <cmath>
 #include <iostream>
 
 namespace {
@@ -83,6 +84,12 @@ bool policyContracts() {
     passed &= check(!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(params, false, &arguments, &error)
         && arguments == QStringList{"unchanged"} && error.contains("Lossless x264"),
         "incompatible lossless profile fails without altering the destination arguments");
+    params.rateMode = "crf";
+    params.crf = 0;
+    passed &= check(!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(params, false, &arguments, &error),
+        "CRF zero is lossless too and requires a compatible x264 profile");
+    passed &= check(VDQtCodecEngine::getDefaultVideoParamsForCodec("  LIBX264_10BIT  ").codecId
+        == "libx264_10bit", "encoder defaults normalize aliases consistently with command generation");
 
     params = VDQtCodecEngine::getDefaultVideoParamsForCodec("libx265_lossless");
     params.tune = "grain";
@@ -295,6 +302,62 @@ bool exportContracts(VDQtTestFixtures& fixtures) {
         && bytes(options.outputPath) == "existing output", "invalid saved encoder mode fails before output replacement");
     return passed;
 }
+
+bool legacyVfrClocks(VDQtTestFixtures& fixtures) {
+    bool passed = true;
+    const auto mpeg4Clock = VDQtCodecEngine::getVideoEncoderClock("mpeg4", 24);
+    passed &= check(mpeg4Clock.numerator == 1 && mpeg4Clock.denominator == 60000,
+        "MPEG-4 uses a representable 16-bit time-base denominator");
+    for (const QString& id : {QString("mpeg1video"), QString("mpeg2video")}) {
+        const auto clock = VDQtCodecEngine::getVideoEncoderClock(id, 24000.0 / 1001);
+        passed &= check(clock.numerator == 1001 && clock.denominator == 24000,
+            "MPEG-1/2 retain supported NTSC nominal clocks without forcing CFR output");
+    }
+    const QString source = fixtures.directory.filePath("legacy-vfr.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=64x48:rate=24", "-frames:v", "8",
+        "-vf", "select='lt(n,4)+gte(n,4)*not(mod(n,3))'", "-fps_mode", "vfr", "-c:v", "ffv1", "-an", source})) return false;
+    const auto times = [](const QString& path) {
+        QList<double> result;
+        QProcess process;
+        process.start("ffprobe", {"-v", "error", "-select_streams", "v:0", "-show_frames",
+            "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path});
+        if (!process.waitForStarted(5000) || !process.waitForFinished(15000)) {
+            process.kill(); process.waitForFinished(5000); return result;
+        }
+        for (const auto& frame : QJsonDocument::fromJson(process.readAllStandardOutput())
+                .object().value("frames").toArray())
+            result.append(frame.toObject().value("best_effort_timestamp_time").toString().toDouble());
+        return result;
+    };
+    const QList<double> sourceTimes = times(source);
+    VDQtVideoExporter exporter;
+    VDQtVideoExporter::ExportOptions request;
+    request.inputPath = source;
+    request.endFrame = 7;
+    request.includeAudio = false;
+    request.unattended = true;
+    request.containerType = "mkv";
+    request.processing = VDQtVideoExporter::ProcessingSnapshot{};
+    for (const QString& id : {QString("mpeg4"), QString("mpeg1video"), QString("mpeg2video")}) {
+        if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(id)) continue;
+        request.processing->videoCodec = VDQtCodecEngine::getDefaultVideoParamsForCodec(id);
+        for (int mode : {VideoMode_FullProcessing, VideoMode_FastRecompress}) {
+            request.videoMode = mode;
+            request.outputPath = fixtures.directory.filePath(QString("%1-vfr-%2.mkv").arg(id).arg(mode));
+            const bool encoded = exporter.exportVideo(request);
+            if (!encoded) std::cerr << exporter.lastError().toStdString() << '\n';
+            const auto outputTimes = encoded ? times(request.outputPath) : QList<double>{};
+            bool retained = outputTimes.size() == sourceTimes.size() && sourceTimes.size() == 8;
+            const auto clock = VDQtCodecEngine::getVideoEncoderClock(id, 24);
+            const double tolerance = double(clock.numerator) / clock.denominator + 0.001;
+            for (int index = 0; retained && index < sourceTimes.size(); ++index)
+                retained = std::abs(outputTimes[index] - sourceTimes[index]) <= tolerance;
+            passed &= check(encoded && retained,
+                "legacy MPEG Full/Fast VFR export retains each picture and representable presentation timing");
+        }
+    }
+    return passed;
+}
 }
 
 int main(int argc, char **argv) {
@@ -308,6 +371,7 @@ int main(int argc, char **argv) {
     passed &= dialogContracts();
     passed &= actualEncoding(fixtures);
     passed &= exportContracts(fixtures);
+    passed &= legacyVfrClocks(fixtures);
     if (!passed && !fixtures.error.isEmpty()) std::cerr << fixtures.error.toStdString() << '\n';
     return passed ? 0 : 1;
 }

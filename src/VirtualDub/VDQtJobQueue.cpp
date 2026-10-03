@@ -4,6 +4,7 @@
 #include "VDQtJobQueue.h"
 
 #include "VDQtSourceSafety.h"
+#include "VDQtPathIdentitySet.h"
 
 #include <QDebug>
 #include <QDir>
@@ -135,14 +136,15 @@ void VDQtJobQueue::boundDiagnostics(QList<VDQtJobState> *jobs) {
 }
 
 bool VDQtJobQueue::validateAdmission(const QList<VDQtJobState>& jobs,
-                                    QString *errorMessage) const {
+                                    QString *errorMessage,
+                                    const QString& proposedPath) const {
     QList<VDQtJobState> structural = jobs;
     for (VDQtJobState& job : structural) {
         job.error.clear();
         job.logEntries.clear();
     }
     QByteArray serialized;
-    const QString path = mAutosavePath.isEmpty()
+    const QString path = !proposedPath.isEmpty() ? proposedPath : mAutosavePath.isEmpty()
         ? QDir::temp().filePath(QStringLiteral("VirtualDub.vdqjobs")) : mAutosavePath;
     if (!VDQtProjectFile::serializeJobQueue(path, structural, &serialized, errorMessage))
         return false;
@@ -422,6 +424,10 @@ void VDQtJobQueue::setAutoRunEnabled(bool enabled) {
 bool VDQtJobQueue::setAutosavePath(const QString& path, QString *errorMessage) {
     const QString requested = path.isEmpty() ? QString() : ownedPath(path);
     if (requested == mAutosavePath && mAutosaveLock) return true;
+    // Relative paths can be substantially longer in a new document directory.
+    // Reject before releasing the old lock or changing any durable destination.
+    if (!requested.isEmpty() && !validateAdmission(mJobs, errorMessage, requested))
+        return false;
     if (!mAutosavePath.isEmpty() && mAutosaveLock && !flush(errorMessage)) return false;
     mAutosaveTimer.stop();
     mAutosaveLock.reset();
@@ -558,8 +564,8 @@ bool VDQtJobQueue::validateJobs(const QList<VDQtJobState>& jobs,
     }
     const auto sourceSafety = VDQtSourceSafety::captureSources(allSources);
 
-    for (int i = 0; i < outputs.size(); ++i) {
-        const QString& output = outputs.at(i);
+    VDQtPathIdentitySet destinations;
+    for (const QString& output : std::as_const(outputs)) {
         const VDQtOutputSafetyReport safety =
             sourceSafety.evaluateOutputPath(output);
         if (!safety.isSafe()) {
@@ -573,13 +579,12 @@ bool VDQtJobQueue::validateJobs(const QList<VDQtJobState>& jobs,
             }
             return false;
         }
-        for (int other = 0; other < i; ++other) {
-            if (VDQtSourceSafety::pathsReferToSameFile(output, outputs.at(other))) {
-                if (errorMessage)
-                    *errorMessage = QString("Two queued jobs have the same destination:\n%1")
-                        .arg(output);
-                return false;
-            }
+        QString alias;
+        if (!destinations.insert(output, &alias)) {
+            if (errorMessage)
+                *errorMessage = QString("Two queued jobs have the same destination:\n%1\n\n%2")
+                    .arg(output, alias);
+            return false;
         }
     }
     return true;

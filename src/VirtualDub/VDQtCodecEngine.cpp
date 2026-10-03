@@ -4,6 +4,7 @@
 #include "VDQtCodecEngine.h"
 #include "VDQtCodecSettings.h"
 #include <algorithm>
+#include <cmath>
 #include <QSet>
 
 extern "C" {
@@ -64,6 +65,38 @@ VDVideoCodecCapabilities VDQtCodecEngine::getVideoCapabilities(const QString& co
         result.qualityMaximum = 31;
     }
     return result;
+}
+
+VDVideoEncoderClock VDQtCodecEngine::getVideoEncoderClock(const QString& codecId, double nominalFrameRate) {
+    const QString id = codecId.trimmed().toLower();
+    if (id == "mpeg4") return {1, 60000}; // MPEG-4's denominator is limited to 16 bits.
+    if (id != "mpeg1video" && id != "mpeg2video") return {};
+    AVRational rate{60, 1};
+    const AVCodec *codec = avcodec_find_encoder_by_name(id.toUtf8().constData());
+    const AVRational *supportedRates = nullptr;
+#if LIBAVCODEC_VERSION_MAJOR >= 62
+    const void *configuration = nullptr;
+    if (codec && avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_FRAME_RATE,
+            0, &configuration, nullptr) >= 0)
+        supportedRates = static_cast<const AVRational*>(configuration);
+#else
+    if (codec) supportedRates = codec->supported_framerates;
+#endif
+    // Retain an encodable source rate. Otherwise use the encoder's finest valid
+    // clock; precise NUT input timestamps still determine the VFR presentation.
+    double fastest = 0;
+    if (supportedRates) {
+        for (const AVRational *candidate = supportedRates; candidate->num > 0 && candidate->den > 0; ++candidate) {
+            const double fps = static_cast<double>(candidate->num) / candidate->den;
+            if (std::isfinite(nominalFrameRate) && nominalFrameRate > 0
+                && std::abs(fps - nominalFrameRate) <= nominalFrameRate * 1e-7) {
+                rate = *candidate;
+                break;
+            }
+            if (fps > fastest) { fastest = fps; rate = *candidate; }
+        }
+    }
+    return {rate.den, rate.num};
 }
 
 // -----------------------------------------------------------------------------
@@ -202,7 +235,8 @@ QList<VDAudioCodecInfo> VDQtCodecEngine::getAvailableAudioCodecs() const {
 // Session parameters and codec-specific defaults
 // -----------------------------------------------------------------------------
 
-VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &codecId) {
+VDVideoCodecParams VDQtCodecEngine::getDefaultVideoParamsForCodec(const QString &requestedCodecId) {
+    const QString codecId = requestedCodecId.trimmed().toLower();
     VDVideoCodecParams p;
     p.codecId = codecId;
     // Fields from other codec families are retained in the saved schema for
@@ -422,7 +456,7 @@ bool VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
     const bool x264 = id == "libx264" || id == "libx264_10bit";
     const bool x265 = id == "libx265" || id == "libx265_lossless";
     if (x264 && (params.rateMode == "lossless"
-        || (params.rateMode == "cqp" && params.crf == 0))
+        || ((params.rateMode == "cqp" || params.rateMode == "crf") && params.crf == 0))
         && !params.profile.isEmpty() && params.profile != "high444")
         return fail(QStringLiteral("Lossless x264 requires the encoder-default or high444 profile."));
 

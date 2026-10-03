@@ -80,6 +80,9 @@ public:
     double getFps() const { return mFps; }
     int getWidth() const { return mWidth; }
     int getHeight() const { return mHeight; }
+    // Stream-level fallback. Native AVS may declare SAR only on individual
+    // frames; getFrameImage() carries that exact frame's ratio in its metadata.
+    AVRational getSampleAspectRatio() const { return mSampleAspectRatio; }
     int getSourceBitDepth() const { return mSourceBitDepth; }
     bool sourceHasAlpha() const { return mSourceHasAlpha; }
     bool isAvsNative() const { return mIsAvsNative; }
@@ -184,6 +187,7 @@ private:
     int mFrameCount;
     FrameCountStatus mFrameCountStatus;
     double mFps;
+    AVRational mSampleAspectRatio{1, 1};
     int mVideoStreamIndex;
 
     // FFmpeg ownership. Frames/packets belong exclusively to this decoder.

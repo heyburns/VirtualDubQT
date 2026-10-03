@@ -344,6 +344,51 @@ if (BUILD_TESTING)
     set_tests_properties(queue_durability_tests PROPERTIES
         LABELS "queue;contracts;durability" TIMEOUT 60)
 
+    add_executable(settings_string_type_tests tests/test_settings_string_types.cpp)
+    target_link_libraries(settings_string_type_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(settings_string_type_tests)
+    add_test(NAME settings_string_type_tests COMMAND settings_string_type_tests)
+    set_tests_properties(settings_string_type_tests PROPERTIES
+        LABELS "settings;contracts;validation" TIMEOUT 30)
+
+    foreach(storage_contract IN ITEMS path_identity_set temporary_media process_diagnostic_tail)
+        add_executable(${storage_contract}_tests tests/test_${storage_contract}.cpp)
+        target_include_directories(${storage_contract}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(${storage_contract}_tests PRIVATE Qt6::Core)
+        vdqt_enable_diagnostics(${storage_contract}_tests)
+        add_test(NAME ${storage_contract}_tests COMMAND ${storage_contract}_tests)
+        set_tests_properties(${storage_contract}_tests PROPERTIES
+            LABELS "filesystem;contracts;lifetime" TIMEOUT 30)
+    endforeach()
+
+    add_executable(aspect_contract_tests tests/test_aspect_contracts.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(aspect_contract_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(aspect_contract_tests)
+    add_test(NAME aspect_contract_tests COMMAND aspect_contract_tests)
+    set_tests_properties(aspect_contract_tests PROPERTIES
+        LABELS "decoder;display;filters;export;aspect;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    add_executable(timestamped_pixels_tests tests/test_timestamped_pixels.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(timestamped_pixels_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(timestamped_pixels_tests)
+    add_test(NAME timestamped_pixels_tests COMMAND timestamped_pixels_tests)
+    set_tests_properties(timestamped_pixels_tests PROPERTIES
+        LABELS "export;vfr;pixels;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    foreach(geometry_contract IN ITEMS filter_geometry filter_geometry_table filter_resampling filter_channel_lut)
+        add_executable(${geometry_contract}_tests tests/test_${geometry_contract}.cpp)
+        target_link_libraries(${geometry_contract}_tests PRIVATE vdqt_core)
+        vdqt_enable_diagnostics(${geometry_contract}_tests)
+        add_test(NAME ${geometry_contract}_tests COMMAND ${geometry_contract}_tests)
+        set_tests_properties(${geometry_contract}_tests PROPERTIES
+            LABELS "filters;geometry;contracts" TIMEOUT 60
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    endforeach()
+
     add_executable(codec_controls_tests tests/test_codec_controls.cpp
         tests/support/VDQtTestFixtures.cpp)
     target_link_libraries(codec_controls_tests PRIVATE vdqt_core)
@@ -362,7 +407,7 @@ if (BUILD_TESTING)
             LABELS "packaging;runtime;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES

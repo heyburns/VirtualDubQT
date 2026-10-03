@@ -1,7 +1,7 @@
 #include "VDQtFilterValidation.h"
+#include "VDQtFilterGeometry.h"
 
 #include <cmath>
-#include <QTransform>
 
 namespace {
 bool isOneOf(const QString& key, std::initializer_list<const char *> keys) {
@@ -89,13 +89,13 @@ bool VDQtValidateFilter(const VDFilterInstance& filter, QString *error,
                              QString::number(spec.minimum, 'g', 16), QString::number(spec.maximum, 'g', 16)));
     }
     if (filter.type == VDFilterType::Levels) {
-        if (filter.params.value("inputWhite", 255) <= filter.params.value("inputBlack", 0))
+        if (filter.params.value("inputWhite", 255) / 255.0 <= filter.params.value("inputBlack", 0) / 255.0)
             return fail(QStringLiteral("Input white must be greater than input black."));
         if (filter.params.value("outputWhite", 255) < filter.params.value("outputBlack", 0))
             return fail(QStringLiteral("Output white must not be below output black."));
     }
     if (filter.type == VDFilterType::Curves
-        && filter.params.value("white", 255) <= filter.params.value("black", 0))
+        && filter.params.value("white", 255) / 255.0 <= filter.params.value("black", 0) / 255.0)
         return fail(QStringLiteral("White must be greater than black."));
     if (filter.params.value("_sylia.range.end", -1) >= 0
         && filter.params.value("_sylia.range.end") < filter.params.value("_sylia.range.start", 0))
@@ -103,55 +103,14 @@ bool VDQtValidateFilter(const VDFilterInstance& filter, QString *error,
     const double adjust = filter.params.value("codecAdjust", 0);
     if (filter.type == VDFilterType::Resize && adjust != 0 && adjust != 2 && adjust != 4 && adjust != 8 && adjust != 16)
         return fail(QStringLiteral("Codec size alignment must be 0, 2, 4, 8 or 16."));
-    // Bound frame allocations before converting calculated dimensions to int.
-    // Caller passes actual stage geometry and precision, not original source size.
+    // Typed parameter checks precede a shared, checked geometry plan. Runtime
+    // and the filter table use this same plan, including reserved input clips,
+    // relative aspect/alignment, framing and rotation intermediates.
     if (!inputSize.isEmpty()) {
-        if (filter.type == VDFilterType::ConvertFormat && filter.params.value("format", 0) == 2)
-            bytesPerPixel = 8;
-        const auto bounded = [bytesPerPixel](double width, double height) {
-            return std::isfinite(width) && std::isfinite(height) && width > 0 && height > 0
-                && width <= 32768 && height <= 32768
-                && static_cast<long double>(std::ceil(width)) * std::ceil(height)
-                    * bytesPerPixel <= 512.0L * 1024 * 1024;
-        };
-        double width = inputSize.width(), height = inputSize.height();
-        if (filter.type == VDFilterType::Resize) {
-            if (filter.params.value("sizeMode", 0) == 1) {
-                width *= filter.params.value("relW", 100) / 100;
-                height *= filter.params.value("relH", 100) / 100;
-            } else {
-                width = filter.params.value("width", width);
-                height = filter.params.value("height", height);
-            }
-            if (!bounded(width, height))
-                return fail(QStringLiteral("Resized intermediate exceeds the frame dimension/memory budget."));
-            const int framing = filter.params.value("framingMode", 0);
-            if (framing == 1) {
-                width = filter.params.value("frameW", width);
-                height = filter.params.value("frameH", height);
-            } else if (framing == 2 || framing == 3) {
-                const double ratio = filter.params.value("frameAspectW", 4) / filter.params.value("frameAspectH", 3);
-                if ((width / height < ratio) == (framing == 3)) width = height * ratio;
-                else height = width / ratio;
-            }
-        } else if (filter.type == VDFilterType::Canvas || filter.type == VDFilterType::WarpResize) {
-            width = filter.params.value("width", width);
-            height = filter.params.value("height", height);
-            if (width == 0) width = inputSize.width();
-            if (height == 0) height = inputSize.height();
-        } else if (filter.type == VDFilterType::Crop) {
-            width -= filter.params.value("left", 0) + filter.params.value("right", 0);
-            height -= filter.params.value("top", 0) + filter.params.value("bottom", 0);
-        } else if (filter.type == VDFilterType::Rotate2) {
-            QTransform rotation;
-            rotation.rotate(filter.params.value("angle", 0));
-            const QRect extent = QImage::trueMatrix(rotation, inputSize.width(), inputSize.height())
-                .mapRect(QRect(QPoint(), inputSize));
-            width = extent.width();
-            height = extent.height();
-        }
-        if (!bounded(width, height))
-            return fail(QStringLiteral("Filter dimensions are empty or exceed the 512 MiB frame budget."));
+        VDQtFilterGeometry geometry;
+        QString geometryError;
+        if (!VDQtComputeFilterGeometry(filter, inputSize, bytesPerPixel, &geometry, &geometryError))
+            return fail(geometryError);
     }
     return true;
 }

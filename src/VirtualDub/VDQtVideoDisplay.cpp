@@ -2,12 +2,27 @@
 // aspect, alpha visualization, interpolation, and pan without performing decode
 // or filter work on the GUI thread.
 #include "VDQtVideoDisplay.h"
+#include "VDQtVideoAspect.h"
 #include <QStyleOption>
 #include <QFontMetrics>
 #include <QActionGroup>
 #include <QApplication>
 #include <algorithm>
 #include <cmath>
+
+namespace {
+QSize boundedDisplaySize(long double width, long double height) {
+    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0 || height <= 0) return {};
+    // Source SAR is untrusted metadata and fixed zoom can exceed widget size.
+    // Bound both casts and allocation, retaining shape even for extreme ratios.
+    constexpr long double dimensionLimit = 32768;
+    constexpr long double pixelLimit = (512.L * 1024 * 1024) / 8;
+    const long double scale = std::min({1.L, dimensionLimit / width, dimensionLimit / height,
+                                      std::sqrt(pixelLimit / width / height)});
+    return QSize(std::max(1, static_cast<int>(width * scale)),
+                 std::max(1, static_cast<int>(height * scale)));
+}
+}
 
 VDVideoDisplayWidget::VDVideoDisplayWidget(const QString& title, QWidget *parent)
     : QWidget(parent),
@@ -44,7 +59,7 @@ void VDVideoDisplayWidget::clearDisplay() {
 }
 
 void VDVideoDisplayWidget::setZoomLevel(double zoom) {
-    mZoomLevel = zoom;
+    mZoomLevel = std::isfinite(zoom) ? zoom : -1.0;
     if (mZoomLevel <= 0) {
         mPanOffset = QPoint(0, 0);
     }
@@ -65,8 +80,12 @@ QSize VDVideoDisplayWidget::calculateScaledSize() const {
 
     switch (mAspectRatioMode) {
     case AspectRatioMode::FreeAdjust:
-        return size();
-    case AspectRatioMode::PixelSource:
+        return boundedDisplaySize(width(), height());
+    case AspectRatioMode::PixelSource: {
+        const AVRational sourceAspect = VDQtImageSampleAspectRatio(mFrameImage);
+        par = static_cast<double>(sourceAspect.num) / sourceAspect.den;
+        break;
+    }
     case AspectRatioMode::PixelSquare:
         par = 1.0;
         break;
@@ -111,22 +130,18 @@ QSize VDVideoDisplayWidget::calculateScaledSize() const {
     double displayH = srcH;
 
     if (mZoomLevel <= 0) { // Auto size: fit inside widget
+        if (width() <= 0 || height() <= 0) return {};
         double widgetRatio = (double)width() / height();
         double displayRatio = displayW / displayH;
 
         if (widgetRatio > displayRatio) {
-            int h = height();
-            int w = static_cast<int>(h * displayRatio);
-            return QSize(w, h);
+            return boundedDisplaySize(height() * displayRatio, height());
         } else {
-            int w = width();
-            int h = static_cast<int>(w / displayRatio);
-            return QSize(w, h);
+            return boundedDisplaySize(width(), width() / displayRatio);
         }
     } else { // Fixed zoom percentage
-        int w = static_cast<int>(displayW * mZoomLevel);
-        int h = static_cast<int>(displayH * mZoomLevel);
-        return QSize(w, h);
+        return boundedDisplaySize(static_cast<long double>(displayW) * mZoomLevel,
+                                  static_cast<long double>(displayH) * mZoomLevel);
     }
 }
 
@@ -255,7 +270,7 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
     struct AROption { QString label; AspectRatioMode mode; };
     AROption arOpts[] = {
         {"Free adjust", AspectRatioMode::FreeAdjust},
-        {"1:1 pixel (Source)", AspectRatioMode::PixelSource},
+        {"Source pixel aspect", AspectRatioMode::PixelSource},
         {"10:11 pixel (DV-NTSC)", AspectRatioMode::PixelDV_NTSC},
         {"1:1 pixel (Square)", AspectRatioMode::PixelSquare},
         {"59:54 pixel (DV-PAL)", AspectRatioMode::PixelDV_PAL},

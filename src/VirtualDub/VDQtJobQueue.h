@@ -88,7 +88,8 @@ private:
     static void normalizeNewJob(VDQtJobState *job);
     static void boundDiagnostics(QList<VDQtJobState> *jobs);
     bool validateAdmission(const QList<VDQtJobState>& jobs,
-                           QString *errorMessage) const;
+                           QString *errorMessage,
+                           const QString& proposedPath = QString()) const;
     void reportPersistence(const QString& error);
     void scheduleAutosave();
 

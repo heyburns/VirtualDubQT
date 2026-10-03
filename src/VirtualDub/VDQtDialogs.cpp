@@ -3,7 +3,9 @@
 // preview subdialogs may process the supplied still image but do not own media.
 #include "VDQtDialogs.h"
 #include "VDQtTimeFormatting.h"
+#include "VDQtTimingMath.h"
 #include "VDQtFilterValidation.h"
+#include "VDQtFilterGeometry.h"
 #include <algorithm>
 #include <cmath>
 #include <QDialogButtonBox>
@@ -160,6 +162,8 @@ void VDVideoFiltersDialog::refreshFilterTable() {
 
     int curW = mSourceWidth > 0 ? mSourceWidth : 1920;
     int curH = mSourceHeight > 0 ? mSourceHeight : 1080;
+    int bytesPerPixel = 4;
+    bool currentSizeKnown = true;
 
     for (int i = 0; i < chain.size(); i++) {
         const auto& filter = chain[i];
@@ -170,12 +174,25 @@ void VDVideoFiltersDialog::refreshFilterTable() {
         int inH = curH;
         int outW = inW;
         int outH = inH;
+        const bool inputSizeKnown = currentSizeKnown;
+        bool outputSizeKnown = inputSizeKnown;
+        VDQtFilterGeometry geometry;
+        QString geometryError;
+        const bool configurationValid = VDQtValidateFilter(filter, &geometryError,
+            inputSizeKnown ? QSize(inW, inH) : QSize(), bytesPerPixel)
+            && (!inputSizeKnown || VDQtComputeFilterGeometry(filter, QSize(inW, inH),
+                bytesPerPixel, &geometry, &geometryError));
+        if (configurationValid && inputSizeKnown) {
+            outW = geometry.outputSize.width();
+            outH = geometry.outputSize.height();
+            outputSizeKnown = geometry.outputKnown;
+        }
 
         QString filterText = filter.name;
 
-        if (filter.type == VDFilterType::Resize) {
-            outW = filter.params.value("width", inW);
-            outH = filter.params.value("height", inH);
+        if (!configurationValid) {
+            filterText += QStringLiteral(" (invalid settings)");
+        } else if (filter.type == VDFilterType::Resize) {
             int filterMode = filter.params.value("filterMode", 4);
             QString modeStr = "Precise bicubic (A=-0.75)";
             switch (filterMode) {
@@ -192,16 +209,10 @@ void VDVideoFiltersDialog::refreshFilterTable() {
         } else if (filter.type == VDFilterType::Rotate) {
             int mode = static_cast<int>(filter.params.value("mode", 0));
             if (mode == 0) {
-                outW = inH;
-                outH = inW;
                 filterText = "rotate (left 90°)";
             } else if (mode == 1) {
-                outW = inH;
-                outH = inW;
                 filterText = "rotate (right 90°)";
             } else {
-                outW = inW;
-                outH = inH;
                 filterText = "rotate (180°)";
             }
         } else if (filter.type == VDFilterType::BrightnessContrast) {
@@ -234,8 +245,6 @@ void VDVideoFiltersDialog::refreshFilterTable() {
             const int top = static_cast<int>(filter.params.value("top", 0));
             const int right = static_cast<int>(filter.params.value("right", 0));
             const int bottom = static_cast<int>(filter.params.value("bottom", 0));
-            outW = std::max(1, inW - left - right);
-            outH = std::max(1, inH - top - bottom);
             filterText = QString("crop (%1,%2,%3,%4)")
                 .arg(left).arg(top).arg(right).arg(bottom);
         } else if (!filter.params.isEmpty()) {
@@ -252,10 +261,14 @@ void VDVideoFiltersDialog::refreshFilterTable() {
         mFilterTable->setItem(row, 0, checkItem);
 
         // Col 1: Input Resolution
-        mFilterTable->setItem(row, 1, new QTableWidgetItem(QString("%1x%2").arg(inW).arg(inH)));
+        mFilterTable->setItem(row, 1, new QTableWidgetItem(inputSizeKnown
+            ? QString("%1x%2").arg(inW).arg(inH) : QStringLiteral("Depends on frame")));
 
         // Col 2: Output Resolution
-        mFilterTable->setItem(row, 2, new QTableWidgetItem(QString("%1x%2").arg(outW).arg(outH)));
+        auto *outputItem = new QTableWidgetItem(!configurationValid ? QStringLiteral("Invalid")
+            : outputSizeKnown ? QString("%1x%2").arg(outW).arg(outH) : QStringLiteral("Depends on frame"));
+        outputItem->setToolTip(geometryError);
+        mFilterTable->setItem(row, 2, outputItem);
 
         // Col 3: Filter summary
         mFilterTable->setItem(row, 3, new QTableWidgetItem(filterText));
@@ -263,6 +276,9 @@ void VDVideoFiltersDialog::refreshFilterTable() {
         if (filter.enabled) {
             curW = outW;
             curH = outH;
+            currentSizeKnown = configurationValid && outputSizeKnown;
+            if (filter.type == VDFilterType::ConvertFormat)
+                bytesPerPixel = filter.params.value("format", 0) == 2 ? 8 : 4;
         }
     }
     mFilterTable->blockSignals(false);
@@ -4275,13 +4291,15 @@ VDJumpToPositionDialog::VDJumpToPositionDialog(
     qint64 minimumFrame,
     qint64 maximumFrame,
     double frameRate,
-    QWidget *parent)
+    QWidget *parent,
+    FrameTimeMapping frameTimeMapping)
     : QDialog(parent)
     , mCurrentFrame(currentFrame)
     , mMinimumFrame(minimumFrame)
     , mMaximumFrame(maximumFrame)
     , mSelectedFrame(currentFrame)
-    , mFrameRate(frameRate) {
+    , mFrameRate(frameRate)
+    , mFrameTimeMapping(std::move(frameTimeMapping)) {
     setWindowTitle(QStringLiteral("Jump to frame"));
     setStyleSheet(kDialogStyle);
     setModal(true);
@@ -4292,7 +4310,9 @@ VDJumpToPositionDialog::VDJumpToPositionDialog(
     mJumpToFrame = new QRadioButton(QStringLiteral("Jump to frame number:"), this);
     mJumpToTime = new QRadioButton(QStringLiteral("Jump to frame at time:"), this);
     mFrameNumber = new QLineEdit(QString::number(currentFrame), this);
-    mFrameTime = new QLineEdit(formatFrameTime(currentFrame, frameRate), this);
+    mFrameTime = new QLineEdit(mFrameTimeMapping
+        ? VDQtFormatTimeSeconds(mFrameTimeMapping(currentFrame))
+        : formatFrameTime(currentFrame, frameRate), this);
     mFrameNumber->setObjectName(QStringLiteral("jumpFrameNumber"));
     mFrameTime->setObjectName(QStringLiteral("jumpFrameTime"));
     mFrameNumber->setMaxLength(30);
@@ -4355,20 +4375,46 @@ bool VDJumpToPositionDialog::parseTimePosition(
     qint64 minimumFrame,
     qint64 maximumFrame,
     double frameRate,
-    qint64 *result) {
-    if (!std::isfinite(frameRate) || frameRate <= 0.0) return false;
+    qint64 *result,
+    const FrameTimeMapping& frameTimeMapping) {
+    if (!result || minimumFrame < 0 || maximumFrame < minimumFrame
+        || !std::isfinite(frameRate) || frameRate <= 0.0) return false;
     int direction = 0;
     QString magnitudeText;
     if (!splitRelativeText(text, &direction, &magnitudeText)) return false;
     double seconds = 0.0;
     if (!parseUnsignedTime(magnitudeText, &seconds)) return false;
+    if (frameTimeMapping) {
+        if (maximumFrame == std::numeric_limits<qint64>::max()
+            || currentFrame < minimumFrame || currentFrame > maximumFrame) return false;
+        long double target = seconds;
+        if (direction) {
+            const double currentSeconds = frameTimeMapping(currentFrame);
+            if (!std::isfinite(currentSeconds)) return false;
+            target = static_cast<long double>(currentSeconds) + direction * target;
+        }
+        const double begin = frameTimeMapping(minimumFrame);
+        const double end = frameTimeMapping(maximumFrame + 1);
+        if (!std::isfinite(target) || !std::isfinite(begin) || !std::isfinite(end)
+            || begin < 0 || end <= begin || target < begin || target >= end) return false;
+        // Locate the picture actually displayed at this time, not a nominal
+        // average-FPS guess. Reordered/cut source ranges use cumulative edit
+        // boundaries supplied by the controller. Bound search arithmetic too.
+        qint64 low = minimumFrame, high = maximumFrame;
+        while (low < high) {
+            const qint64 middle = low + (high - low) / 2 + 1;
+            const double boundary = frameTimeMapping(middle);
+            if (!std::isfinite(boundary) || boundary < begin || boundary >= end) return false;
+            if (boundary <= target + 1e-9L) low = middle;
+            else high = middle - 1;
+        }
+        *result = low;
+        return true;
+    }
     const long double scaled = static_cast<long double>(seconds)
         * static_cast<long double>(frameRate);
-    if (scaled < 0.0L
-        || scaled > static_cast<long double>(
-            std::numeric_limits<qint64>::max()))
-        return false;
-    const qint64 magnitude = static_cast<qint64>(std::llround(scaled));
+    qint64 magnitude = 0;
+    if (!VDQtCheckedRoundedNonnegative(scaled, &magnitude)) return false;
     return resolveJumpPosition(magnitude, direction, currentFrame,
                                minimumFrame, maximumFrame, result);
 }
@@ -4387,7 +4433,7 @@ void VDJumpToPositionDialog::accept() {
                              mMinimumFrame, mMaximumFrame, &targetFrame)
         : parseTimePosition(mFrameTime->text(), mCurrentFrame,
                             mMinimumFrame, mMaximumFrame, mFrameRate,
-                            &targetFrame);
+                            &targetFrame, mFrameTimeMapping);
     if (!valid) {
         QLineEdit *edit = mJumpToFrame->isChecked()
             ? mFrameNumber : mFrameTime;

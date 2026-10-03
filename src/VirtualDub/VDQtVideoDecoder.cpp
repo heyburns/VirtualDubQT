@@ -2,6 +2,7 @@
 // codec, seek/index state, swscale conversion storage, and the bounded frame
 // cache. Static dependency inspection lives in VDQtSourceDependencies.
 #include "VDQtVideoDecoder.h"
+#include "VDQtVideoAspect.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
@@ -122,6 +123,16 @@ int nativeFrameProperty(AVS_ScriptEnvironment *environment, const AVS_VideoFrame
     const int64_t value = avs_prop_get_int(environment, properties, key, 0, &error);
     return !error && value >= std::numeric_limits<int>::min()
         && value <= std::numeric_limits<int>::max() ? static_cast<int>(value) : fallback;
+}
+
+AVRational nativeFrameAspect(AVS_ScriptEnvironment *environment, const AVS_VideoFrame *frame) {
+    const AVS_Map *properties = avs_get_frame_props_ro(environment, frame);
+    if (!properties) return {1, 1};
+    int numeratorError = 0, denominatorError = 0;
+    const int64_t numerator = avs_prop_get_int(environment, properties, "_SARNum", 0, &numeratorError);
+    const int64_t denominator = avs_prop_get_int(environment, properties, "_SARDen", 0, &denominatorError);
+    return !numeratorError && !denominatorError
+        ? VDQtNormalizedSampleAspectRatio(numerator, denominator) : AVRational{1, 1};
 }
 
 struct NativePixelLayout {
@@ -579,6 +590,7 @@ QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
                         }
                     }
                 }
+                VDQtSetImageSampleAspectRatio(img, nativeFrameAspect(mAvsEnv, frame));
                 avs_release_video_frame(frame);
                 return img;
             }
@@ -991,6 +1003,8 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     mWidth = width;
     mHeight = height;
     mFps = isUsableFrameRate(frameRate) ? av_q2d(frameRate) : 0.0;
+    const AVRational declaredAspect = av_guess_sample_aspect_ratio(mFormatCtx, videoStream, nullptr);
+    mSampleAspectRatio = VDQtNormalizedSampleAspectRatio(declaredAspect.num, declaredAspect.den);
     mFrameCount = frameCount;
     mFrameCountStatus = frameCountStatus;
     mStreamStartTimestamp = streamStartTimestamp;
@@ -1129,6 +1143,7 @@ void VDQtVideoDecoder::close() {
     mFrameCount = 0;
     mFrameCountStatus = FrameCountStatus::Unknown;
     mFps = 0.0;
+    mSampleAspectRatio = {1, 1};
     mVideoStreamIndex = -1;
     mSourceBitDepth = 8;
     mSourceHasAlpha = false;
@@ -1600,7 +1615,11 @@ QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
 
     const QImage frameView(
         mFrameRGB->data[0], mWidth, mHeight, mFrameRGB->linesize[0], mOutputImageFormat);
-    return frameView.copy();
+    QImage image = frameView.copy();
+    const AVRational aspect = av_guess_sample_aspect_ratio(
+        mFormatCtx, mFormatCtx->streams[mVideoStreamIndex], mFrame);
+    VDQtSetImageSampleAspectRatio(image, VDQtNormalizedSampleAspectRatio(aspect.num, aspect.den));
+    return image;
 }
 
 void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {

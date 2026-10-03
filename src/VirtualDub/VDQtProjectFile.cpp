@@ -78,6 +78,23 @@ bool readIntegerMembers(const QJsonObject& object, Config *destination,
     return true;
 }
 
+template<class Config>
+bool readStringMembers(const QJsonObject& object, Config *destination,
+                       std::initializer_list<std::pair<const char *, QString Config::*>> fields,
+                       QString *errorMessage) {
+    for (const auto& field : fields) {
+        const QJsonValue value = object.value(QLatin1String(field.first));
+        if (value.isUndefined()) continue; // Established defaults for old files.
+        if (!value.isString() || value.toString().size() > 128) {
+            setError(errorMessage, QStringLiteral("The saved codec string '%1' is invalid.")
+                .arg(QLatin1String(field.first)));
+            return false;
+        }
+        destination->*(field.second) = value.toString();
+    }
+    return true;
+}
+
 bool readReal(const QJsonObject& object, const char *key, double *destination,
               double minimum, double maximum, double fallback, QString *errorMessage) {
     const auto value = object.value(QLatin1String(key));
@@ -148,8 +165,15 @@ QJsonObject videoCodecToJson(const VDVideoCodecParams& value) {
 bool videoCodecFromJson(const QJsonObject& object, VDVideoCodecParams *destination,
                         QString *errorMessage) {
     VDVideoCodecParams value;
-    value.codecId = object.value("codecId").toString(value.codecId);
-    value.rateMode = object.value("rateMode").toString(value.rateMode);
+    if (!readStringMembers<VDVideoCodecParams>(object, &value, {
+            {"codecId", &VDVideoCodecParams::codecId},
+            {"rateMode", &VDVideoCodecParams::rateMode},
+            {"preset", &VDVideoCodecParams::preset},
+            {"tune", &VDVideoCodecParams::tune},
+            {"profile", &VDVideoCodecParams::profile},
+            {"pixelFormat", &VDVideoCodecParams::pixFmt},
+            {"colorMatrix", &VDVideoCodecParams::colorMatrix},
+            {"proresVendor", &VDVideoCodecParams::proresVendor}}, errorMessage)) return false;
     if (!readIntegerMembers<VDVideoCodecParams>(object, &value, {
             {"crf", &VDVideoCodecParams::crf},
             {"targetBitrateKbps", &VDVideoCodecParams::targetBitrateKbps},
@@ -162,13 +186,12 @@ bool videoCodecFromJson(const QJsonObject& object, VDVideoCodecParams *destinati
             {"ffv1Slices", &VDVideoCodecParams::ffv1Slices},
             {"huffyuvPredictor", &VDVideoCodecParams::huffyuvPredictor},
             {"cineformQuality", &VDVideoCodecParams::cineformQuality}}, errorMessage)) return false;
-    value.twoPass = object.value("twoPass").toBool(value.twoPass);
-    value.preset = object.value("preset").toString(value.preset);
-    value.tune = object.value("tune").toString(value.tune);
-    value.profile = object.value("profile").toString(value.profile);
-    value.pixFmt = object.value("pixelFormat").toString(value.pixFmt);
-    value.colorMatrix = object.value("colorMatrix").toString(value.colorMatrix);
-    value.proresVendor = object.value("proresVendor").toString(value.proresVendor);
+    const QJsonValue twoPass = object.value("twoPass");
+    if (!twoPass.isUndefined() && !twoPass.isBool()) {
+        setError(errorMessage, QStringLiteral("The saved codec boolean 'twoPass' is invalid."));
+        return false;
+    }
+    value.twoPass = twoPass.toBool(value.twoPass);
     *destination = value;
     return true;
 }
@@ -188,8 +211,9 @@ QJsonObject audioCodecToJson(const VDAudioCodecParams& value) {
 bool audioCodecFromJson(const QJsonObject& object, VDAudioCodecParams *destination,
                         QString *errorMessage) {
     VDAudioCodecParams value;
-    value.codecId = object.value("codecId").toString(value.codecId);
-    value.rateMode = object.value("rateMode").toString(value.rateMode);
+    if (!readStringMembers<VDAudioCodecParams>(object, &value, {
+            {"codecId", &VDAudioCodecParams::codecId},
+            {"rateMode", &VDAudioCodecParams::rateMode}}, errorMessage)) return false;
     if (!readIntegerMembers<VDAudioCodecParams>(object, &value, {
             {"vbrQuality", &VDAudioCodecParams::vbrQuality},
             {"bitrateKbps", &VDAudioCodecParams::bitrateKbps},
@@ -337,6 +361,14 @@ bool parseProcessing(const QJsonObject& object,
         return false;
     }
 
+    for (const char *key : {"videoCodec", "audioCodec"}) {
+        const QJsonValue value = object.value(QLatin1String(key));
+        if (!value.isUndefined() && !value.isObject()) {
+            setError(errorMessage, QStringLiteral("The saved codec configuration '%1' is not an object.")
+                .arg(QLatin1String(key)));
+            return false;
+        }
+    }
     if (!videoCodecFromJson(object.value("videoCodec").toObject(), &result.videoCodec, errorMessage)
         || !audioCodecFromJson(object.value("audioCodec").toObject(), &result.audioCodec, errorMessage)) return false;
     if (result.videoCodec.codecId.isEmpty() || result.videoCodec.codecId.size() > 128

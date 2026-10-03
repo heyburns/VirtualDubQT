@@ -1,28 +1,11 @@
 // Operation-scoped output alias protection. Dependency parsing and source stat
 // work happen once at capture/refresh; every destination uses hash lookups.
 #include "VDQtSourceSafety.h"
-#include <QFile>
+#include "VDQtPathIdentitySet.h"
 #include <QHash>
 #include <QSet>
-#include <sys/stat.h>
 
 namespace {
-struct Identity {
-    quint64 device = 0, inode = 0;
-    friend bool operator==(const Identity& a, const Identity& b) {
-        return a.device == b.device && a.inode == b.inode;
-    }
-    friend size_t qHash(const Identity& value, size_t seed = 0) {
-        return qHashMulti(seed, value.device, value.inode);
-    }
-};
-bool fileIdentity(const QString& path, Identity *identity) {
-    struct stat status {};
-    const QByteArray name = QFile::encodeName(path);
-    if (::stat(name.constData(), &status) != 0) return false;
-    *identity = {quint64(status.st_dev), quint64(status.st_ino)};
-    return true;
-}
 void appendUnique(QStringList& destination, const QStringList& values) {
     QSet<QString> seen(destination.cbegin(), destination.cend());
     for (const QString& value : values) if (!seen.contains(value)) {
@@ -36,15 +19,15 @@ struct VDQtSourceSafetySnapshot::Data {
     QStringList knownConcatSources;
     VDQtScriptDependencyReport dependencies;
     QHash<QString, QString> paths;
-    QHash<Identity, QString> identities;
+    QHash<VDQtFileIdentity, QString> identities;
 };
 
 bool VDQtSourceSafety::pathsReferToSameFile(const QString& a, const QString& b) {
     if (a.isEmpty() || b.isEmpty()) return false;
     const QString first = VDQtSourceDependencies::absoluteLocalPath(a), second = VDQtSourceDependencies::absoluteLocalPath(b);
     if (first == second) return true;
-    Identity x, y;
-    return fileIdentity(first, &x) && fileIdentity(second, &y) && x == y;
+    VDQtFileIdentity x, y;
+    return VDQtReadFileIdentity(first, &x) && VDQtReadFileIdentity(second, &y) && x == y;
 }
 
 bool VDQtSourceSafety::isScriptPath(const QString& path) {
@@ -86,8 +69,8 @@ VDQtSourceSafetySnapshot VDQtSourceSafety::captureSources(
         const QString absolute = VDQtSourceDependencies::absoluteLocalPath(source);
         if (data->paths.contains(absolute)) return;
         data->paths.insert(absolute, absolute);
-        Identity identity;
-        if (fileIdentity(absolute, &identity)) data->identities.insert(identity, absolute);
+        VDQtFileIdentity identity;
+        if (VDQtReadFileIdentity(absolute, &identity)) data->identities.insert(identity, absolute);
         else data->dependencies.complete = false;
     };
     for (const QString& source : data->roots) protect(source);
@@ -106,8 +89,8 @@ VDQtOutputSafetyReport VDQtSourceSafetySnapshot::evaluateOutputPath(const QStrin
     const QString absolute = VDQtSourceDependencies::absoluteLocalPath(outputPath);
     result.aliasedPath = mData->paths.value(absolute);
     if (result.aliasedPath.isEmpty()) {
-        Identity identity;
-        if (fileIdentity(absolute, &identity)) result.aliasedPath = mData->identities.value(identity);
+        VDQtFileIdentity identity;
+        if (VDQtReadFileIdentity(absolute, &identity)) result.aliasedPath = mData->identities.value(identity);
     }
     if (!result.aliasedPath.isEmpty()) {
         result.issue = VDQtOutputSafetyIssue::AliasesLoadedSource;

@@ -25,6 +25,7 @@
 #include "VDQtJobQueue.h"
 #include "VDQtFrameServer.h"
 #include "VDQtTimeline.h"
+#include "VDQtTemporaryMediaFile.h"
 #include "VDQtScriptEngine.h"
 #include <QTimer>
 #include <QThread>
@@ -236,6 +237,7 @@ private:
                              double frameRate,
                              qint64 byteOffset,
                              QString *outputPath,
+                             VDQtTemporaryMediaFile::Owner *outputOwner,
                              QString *errorMessage);
     VDQtProcessingState captureProcessingState() const;
     VDQtProjectState captureProjectState() const;
@@ -359,10 +361,12 @@ private:
     // A save destination belongs to this application run, not to a source
     // session or persistent preferences. Keep it across Open/Close cycles.
     QString mLastOutputDirectory;
-    // Loaded-source/edit-session state. Temporary concat/raw manifests live in
-    // mTimelineTempDirectory for exactly as long as this main-window session.
+    // Small concat manifests are session-owned; large raw copies are leases
+    // held only by active decoders, queued operations and rollback scopes.
     QString mCurrentProjectPath;
     QTemporaryDir mTimelineTempDirectory;
+    VDQtTemporaryMediaRegistry mTemporaryMediaRegistry;
+    VDQtTemporaryMediaFile::Owner mActiveTemporaryMedia;
     QStringList mTimelineSources;
     double mImageSequenceFps = 0.0;
     QString mRawInputPixelFormat;
@@ -399,6 +403,7 @@ private:
     bool mDeferredSourcePending = false;
     bool mDeferredSourceScheduled = false;
     QString mDeferredSourcePath; // Empty represents a deferred Close.
+    VDQtTemporaryMediaFile::Owner mDeferredTemporaryMedia;
     bool mAutomationUnattended = false;
     bool mAutomationExitRequested = false;
     int mAutomationExitCode = 0;

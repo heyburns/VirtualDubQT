@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -176,10 +177,56 @@ bool owners(const QString& executable) {
     passed &= check(contents(path) == primaryBytes, "independent queue activity never rewrites the primary file");
     return passed;
 }
+bool movedDirectoryAdmission() {
+    QTemporaryDir directory;
+    VDQtJobQueue queue;
+    QString error;
+    const QString original = directory.filePath("original.vdqjobs");
+    if (!directory.isValid() || !queue.setAutosavePath(original, &error)) return false;
+    QList<VDQtJobState> records;
+    for (int index = 0; index < 100; ++index) {
+        auto record = job(directory, index);
+        record.processing.textMetadata["description"] = QString(25000, 'x');
+        records.append(record);
+    }
+    if (!queue.addJobs(records, &error) || !queue.flush(&error)) {
+        std::cerr << error.toStdString() << '\n';
+        return false;
+    }
+    const QByteArray before = contents(original);
+    // The new directory does not need to exist: admission must fail before
+    // lock creation, using the much longer ../../ paths it would serialize.
+    const QString proposed = directory.path() + QString("/d").repeated(1000) + "/moved.vdqjobs";
+    bool passed = check(!queue.setAutosavePath(proposed, &error)
+        && (error.contains("admission") || error.contains("safety limit")),
+        "moving the durable document revalidates expanded relative-path storage");
+    passed &= check(queue.autosavePath() == original && contents(original) == before
+        && queue.flush(&error), "rejected destination changes retain the old ownership and durable queue");
+    return passed;
+}
+int benchmarkValidation() {
+    QTemporaryDir directory;
+    if (!directory.isValid() || !write(directory.filePath("source.avi"), "source fixture")) return 2;
+    QList<VDQtJobState> records;
+    for (int index = 0; index < 1000; ++index) {
+        const auto record = job(directory, index);
+        if (!write(record.options.outputPath, "existing destination")) return 2;
+        records.append(record);
+    }
+    QElapsedTimer timer;
+    timer.start();
+    QString error;
+    const bool valid = VDQtJobQueue::validateJobs(records, &error);
+    std::cout << "1000-job existing-output validation: "
+              << timer.nsecsElapsed() / 1000000.0 << " ms\n";
+    if (!valid) std::cerr << error.toStdString() << '\n';
+    return valid ? 0 : 1;
+}
 }
 
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
+    if (application.arguments().contains("--benchmark-validation")) return benchmarkValidation();
     if (application.arguments().value(1) == QStringLiteral("--hold-owned")) {
         VDQtJobQueue queue;
         QString error;
@@ -193,5 +240,6 @@ int main(int argc, char **argv) {
     passed &= faults();
     passed &= malformedPreserved();
     passed &= owners(application.applicationFilePath());
+    passed &= movedDirectoryAdmission();
     return passed ? 0 : 1;
 }

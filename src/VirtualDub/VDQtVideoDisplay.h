@@ -20,7 +20,7 @@ class VDVideoDisplayWidget : public QWidget {
 public:
     enum class AspectRatioMode {
         FreeAdjust,
-        PixelSource,        // 1:1 pixel (Source)
+        PixelSource,        // Source-declared pixel (sample) aspect ratio.
         PixelDV_NTSC,       // 10:11
         PixelSquare,        // 1:1 pixel (Square)
         PixelDV_PAL,        // 59:54

@@ -3,7 +3,10 @@
 // timeline editing, view/processing controls, tools/capture, then asynchronous
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
+#include "VDQtTemporaryStorage.h"
+#include "VDQtProcessDiagnosticTail.h"
 #include "VDQtFilterFrameContext.h"
+#include "VDQtFilterGeometry.h"
 #include "VDQtCapturePolicy.h"
 #include "VDQtTimingMath.h"
 #include "VDQtTimeFormatting.h"
@@ -76,6 +79,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 }
 
 namespace {
@@ -424,6 +429,7 @@ public:
         : mWindow(window), mState(window.captureProjectState()),
           mTimeline(window.mTimeline), mClipboard(window.mTimelineClipboard),
           mDecoderPath(window.mVideoDecoder.getFilePath()),
+          mTemporaryMedia(window.mActiveTemporaryMedia),
           mProjectPath(window.mCurrentProjectPath), mHadSource(window.mVideoDecoder.isOpen()),
           mRecoveryWasProtected(window.mRecoverySnapshotProtected) {
         if (QFileInfo::exists(window.mRecoveryPath)) window.mRecoverySnapshotProtected = true;
@@ -526,7 +532,9 @@ private:
     VDQtProjectState mState;
     VDQtTimeline mTimeline;
     QList<VDQtTimelineSegment> mClipboard;
-    QString mDecoderPath, mProjectPath;
+    QString mDecoderPath;
+    VDQtTemporaryMediaFile::Owner mTemporaryMedia;
+    QString mProjectPath;
     bool mHadSource, mRecoveryWasProtected;
     bool mCommitted = false;
 };
@@ -578,6 +586,9 @@ void VDQtMainWindow::scheduleDeferredSourceTransition() {
         if (editorActionsBlocked()) return; // The enclosing scope will reschedule.
         if (!mDeferredSourcePending) return;
         const QString path = mDeferredSourcePath;
+        // Retain a deferred materialization until Open has acquired its own
+        // candidate lease; clearing the pending state must not delete the file.
+        const auto temporaryMedia = mDeferredTemporaryMedia;
         mDeferredSourcePending = false;
         if (path.isEmpty()) closeVideoSource();
         else openVideoFileImpl(path);
@@ -1078,22 +1089,27 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
 
 bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
     if (filePath.isEmpty()) return false;
+    const auto candidateMedia = mTemporaryMediaRegistry.pin(filePath);
     if (mSourceTransitionActive) {
         // Keep only the latest request. Never install a graph inside a Close
         // which still intends to release the authoritative decoder.
         mDeferredSourcePath = filePath;
+        mDeferredTemporaryMedia = candidateMedia;
         mDeferredSourcePending = true;
         return false;
     }
     SourceTransitionScope transition(*this);
     mDeferredSourcePending = false;
     mDeferredSourcePath.clear();
+    mDeferredTemporaryMedia.reset();
     releaseVideoSource();
 
     if (mVideoDecoder.openFile(filePath)) {
+        mActiveTemporaryMedia = candidateMedia;
         QString interactiveError;
         if (!openInteractiveDecoder(filePath, &interactiveError)) {
             mVideoDecoder.close();
+            mActiveTemporaryMedia.reset();
             QMessageBox::critical(
                 this, "VirtualDub Error",
                 QString("Could not initialize interactive video decoding:\n%1")
@@ -1157,7 +1173,9 @@ bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
             .arg(mVideoDecoder.getFps(), 0, 'f', 2)
             .arg(mVideoDecoder.getFrameCount()));
 
-        if (!concatenated) addRecentFile(filePath);
+        // A raw lease is deleted on Close and has no usable meaning after
+        // restarting. Do not persist generated paths as ordinary recent files.
+        if (!concatenated && !candidateMedia) addRecentFile(filePath);
         return true;
     } else {
         bool isScript = filePath.endsWith(".avs", Qt::CaseInsensitive) || filePath.endsWith(".vpy", Qt::CaseInsensitive);
@@ -1280,18 +1298,38 @@ bool VDQtMainWindow::materializeRawVideo(
     double frameRate,
     qint64 byteOffset,
     QString *outputPath,
+    VDQtTemporaryMediaFile::Owner *outputOwner,
     QString *errorMessage) {
-    if (!QFileInfo::exists(sourcePath) || pixelFormat.isEmpty()
+    if (!outputPath || !outputOwner || !QFileInfo(sourcePath).isFile() || pixelFormat.isEmpty()
         || width <= 0 || height <= 0 || !std::isfinite(frameRate)
+        || width > 32768 || height > 32768
         || frameRate <= 0.0 || byteOffset < 0
         || !mTimelineTempDirectory.isValid()) {
         if (errorMessage) *errorMessage = QStringLiteral(
             "The raw-video source parameters are invalid.");
         return false;
     }
-    const QString materializedPath = mTimelineTempDirectory.filePath(
-        QString("raw_%1.nut").arg(
-            QUuid::createUuid().toString(QUuid::Id128)));
+    const AVPixelFormat format = av_get_pix_fmt(pixelFormat.toUtf8().constData());
+    const int frameBytes = format == AV_PIX_FMT_NONE ? -1
+        : av_image_get_buffer_size(format, width, height, 1);
+    const qint64 sourceBytes = QFileInfo(sourcePath).size();
+    qint64 requiredBytes = 0;
+    if (frameBytes <= 0 || sourceBytes <= byteOffset) {
+        if (errorMessage) *errorMessage = QStringLiteral("The raw source format/size or header offset is invalid.");
+        return false;
+    }
+    const qint64 payload = sourceBytes - byteOffset;
+    const qint64 packets = payload / frameBytes + (payload % frameBytes != 0);
+    if (!VDQtEstimateTemporaryStorage(payload, packets, 128, &requiredBytes)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("The raw intermediate storage estimate exceeds the supported size.");
+        return false;
+    }
+    if (!VDQtRequireTemporaryStorage(mTimelineTempDirectory.path(), requiredBytes, errorMessage))
+        return false;
+    auto owner = mTemporaryMediaRegistry.create(mTimelineTempDirectory.path(), errorMessage);
+    if (!owner) return false;
+    const QString materializedPath = owner->path();
     QStringList arguments{
         QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("error")
@@ -1324,7 +1362,7 @@ bool VDQtMainWindow::materializeRawVideo(
     progress.setMinimumDuration(0);
     QByteArray diagnostics;
     bool cancelled = false;
-    while (!process.waitForFinished(50)) {
+    while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
         diagnostics += process.readAll();
         if (diagnostics.size() > 64 * 1024)
             diagnostics.remove(0, diagnostics.size() - 64 * 1024);
@@ -1346,7 +1384,6 @@ bool VDQtMainWindow::materializeRawVideo(
         && process.exitCode() == 0
         && QFileInfo(materializedPath).size() > 0;
     if (!success) {
-        QFile::remove(materializedPath);
         if (errorMessage && !cancelled) {
             *errorMessage = QString::fromLocal8Bit(diagnostics.right(8192));
             if (errorMessage->isEmpty())
@@ -1354,7 +1391,8 @@ bool VDQtMainWindow::materializeRawVideo(
         }
         return false;
     }
-    if (outputPath) *outputPath = materializedPath;
+    *outputPath = materializedPath;
+    *outputOwner = std::move(owner);
     if (errorMessage) errorMessage->clear();
     return true;
 }
@@ -1411,19 +1449,17 @@ void VDQtMainWindow::onFileOpenRawVideo() {
         return;
     }
     QString materializedPath;
+    VDQtTemporaryMediaFile::Owner materializedOwner;
     QString error;
     if (!materializeRawVideo(
             sourcePath, format->currentData().toString(), width->value(),
             height->value(), frameRate->value(), byteOffset,
-            &materializedPath, &error)) {
+            &materializedPath, &materializedOwner, &error)) {
         if (!error.isEmpty())
             QMessageBox::critical(this, "Raw Video Error", error);
         return;
     }
-    if (!openVideoFileImpl(materializedPath)) {
-        QFile::remove(materializedPath);
-        return;
-    }
+    if (!openVideoFileImpl(materializedPath)) return;
     mTimelineSources = {QFileInfo(sourcePath).absoluteFilePath()};
     mRawInputPixelFormat = format->currentData().toString();
     mRawInputWidth = width->value();
@@ -1594,12 +1630,14 @@ void VDQtMainWindow::onFileClose() {
 void VDQtMainWindow::closeVideoSource() {
     if (mSourceTransitionActive) {
         mDeferredSourcePath.clear();
+        mDeferredTemporaryMedia.reset();
         mDeferredSourcePending = true;
         return;
     }
     SourceTransitionScope transition(*this);
     mDeferredSourcePending = false;
     mDeferredSourcePath.clear();
+    mDeferredTemporaryMedia.reset();
     releaseVideoSource();
 }
 
@@ -1612,6 +1650,10 @@ void VDQtMainWindow::releaseVideoSource() {
     // closeSource()/AudioPlayer::close() synchronously join their consumers.
     // Do not dispatch unrelated Open/drop/automation events during teardown.
     mVideoDecoder.close();
+    // All consumers have joined before the final source pin is released. A
+    // rollback/deferred request may still hold its own pin intentionally.
+    mActiveTemporaryMedia.reset();
+    mTemporaryMediaRegistry.prune();
     mDecodedPreviewFrames.clear();
     mDecodedPreviewTimelineFrame = -1;
     mInputDisplay->clearDisplay();
@@ -1925,6 +1967,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
     }
 
     QString sourceToOpen = project.sourcePath;
+    VDQtTemporaryMediaFile::Owner candidateMedia;
     if (project.sourcePaths.size() > 1) {
         SegmentSignature reference;
         if (!probeSegmentSignature(project.sourcePaths.first(), &reference, &error)) {
@@ -1966,7 +2009,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
             || !materializeRawVideo(
                 project.sourcePath, project.rawPixelFormat,
                 project.rawWidth, project.rawHeight, project.rawFrameRate,
-                project.rawByteOffset, &sourceToOpen, &error)) {
+                project.rawByteOffset, &sourceToOpen, &candidateMedia, &error)) {
             QMessageBox::critical(
                 this, "Load Project Error",
                 error.isEmpty()
@@ -2966,6 +3009,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                 filter.params[QStringLiteral("interlaced")] =
                     (mode & 128) != 0;
                 filter.params[QStringLiteral("filterMode")] = mode & 127;
+                const int alignment = integer(12);
+                filter.params[QStringLiteral("codecAdjust")] = alignment == 1 ? 0 : alignment;
                 const quint32 color = packedColor(13);
                 filter.params[QStringLiteral("fillColorR")] = color & 0xffU;
                 filter.params[QStringLiteral("fillColorG")] = (color >> 8) & 0xffU;
@@ -2975,6 +3020,8 @@ bool VDQtMainWindow::executeAutomationProgram(
                 const double width = std::max(1.0, number(0));
                 const double height = std::max(1.0, number(1));
                 filter.params[QStringLiteral("sizeMode")] = 0;
+                filter.params[QStringLiteral("aspectMode")] = 0;
+                filter.params[QStringLiteral("codecAdjust")] = 0;
                 filter.params[QStringLiteral("absW")] = width;
                 filter.params[QStringLiteral("absH")] = height;
                 filter.params[QStringLiteral("width")] = std::llround(width);
@@ -3142,7 +3189,43 @@ bool VDQtMainWindow::executeAutomationProgram(
             if (filterError) *filterError = QStringLiteral("A filter numeric argument has an invalid type or range.");
             return false;
         }
-        return configured;
+        if (!configured) return false;
+        if (filter.type == VDFilterType::Resize && values.size() >= 14
+            && filter.params.value(QStringLiteral("sizeMode")) == 0) {
+            if (!VDQtValidateFilter(filter, filterError)) return false;
+            // Saved absolute sizes are already resolved. Windows' long script
+            // signature instead supplies aspect/alignment controls: resolve
+            // them once here against the actual incoming stage, not source size.
+            QSize incoming(mVideoDecoder.getWidth(), mVideoDecoder.getHeight());
+            if (incoming.isEmpty()) {
+                if (filter.params.value(QStringLiteral("aspectMode")) == 1) {
+                    if (filterError) *filterError = QStringLiteral(
+                        "Source-aspect resizing requires an opened source.");
+                    return false;
+                }
+                incoming = QSize(static_cast<int>(filter.params.value(QStringLiteral("width"))),
+                                 static_cast<int>(filter.params.value(QStringLiteral("height"))));
+            }
+            for (int prior = 0; prior < index; ++prior) {
+                VDQtFilterGeometry stage;
+                if (!VDQtValidateFilter(processing.filters.at(prior), filterError)
+                    || !VDQtComputeFilterGeometry(processing.filters.at(prior), incoming, 8,
+                                                   &stage, filterError)) return false;
+                if (!stage.outputKnown) {
+                    if (filterError) *filterError = QStringLiteral(
+                        "The preceding filter has frame-dependent or plug-in-defined dimensions; "
+                        "use explicit resize dimensions instead of source-aspect controls.");
+                    return false;
+                }
+                incoming = stage.outputSize;
+            }
+            VDQtFilterGeometry resolved;
+            if (!VDQtComputeFilterGeometry(filter, incoming, 8, &resolved, filterError, true))
+                return false;
+            filter.params[QStringLiteral("width")] = resolved.intermediateSize.width();
+            filter.params[QStringLiteral("height")] = resolved.intermediateSize.height();
+        }
+        return true;
     };
     const auto addAudioFilter = [&](const QString& requested,
                                     QString *filterError) -> bool {
@@ -4487,6 +4570,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     // Job settings belong to this operation, not to the editor. In particular,
     // do not reset the interactive source/plugin/audio state for each job.
     QTemporaryDir timelineDirectory;
+    VDQtTemporaryMediaFile::Owner rawMedia;
     QString inputPath = job.sourcePaths.first();
     if (job.sourcePaths.size() > 1) {
         if (!timelineDirectory.isValid()) {
@@ -4506,7 +4590,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         if (!materializeRawVideo(
                 job.sourcePaths.first(), job.rawPixelFormat, job.rawWidth,
                 job.rawHeight, job.rawFrameRate, job.rawByteOffset,
-                &materialized, errorMessage))
+                &materialized, &rawMedia, errorMessage))
             return false;
         inputPath = materialized;
     }
@@ -4854,10 +4938,15 @@ void VDQtMainWindow::reloadQueuedJob(int row) {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
     if (!mJobQueue || mJobQueue->isRunning()) return;
-    const VDQtJobState *job = mJobQueue->jobAt(row);
-    if (!job || job->sourcePaths.isEmpty()) return;
+    const VDQtJobState *queued = mJobQueue->jobAt(row);
+    if (!queued || queued->sourcePaths.isEmpty()) return;
+    // Raw materialization and source opening pump Qt events. A queue dialog
+    // may remove/reorder jobs during that time; never retain its storage pointer.
+    const VDQtJobState capturedJob = *queued;
+    const VDQtJobState *job = &capturedJob;
 
     QString inputPath = job->sourcePaths.first();
+    VDQtTemporaryMediaFile::Owner rawMedia;
     QString error;
     if (job->sourcePaths.size() > 1) {
         inputPath = mTimelineTempDirectory.filePath(
@@ -4875,7 +4964,7 @@ void VDQtMainWindow::reloadQueuedJob(int row) {
         if (!materializeRawVideo(
                 job->sourcePaths.first(), job->rawPixelFormat,
                 job->rawWidth, job->rawHeight, job->rawFrameRate,
-                job->rawByteOffset, &inputPath, &error)) {
+                job->rawByteOffset, &inputPath, &rawMedia, &error)) {
             QMessageBox::critical(this, QStringLiteral("Reload Job Error"), error);
             return;
         }
@@ -6042,6 +6131,9 @@ bool VDQtMainWindow::exportViaEncoderSet(
     }
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
+    // An external encoder can emit megabytes of progress/diagnostics. Drain
+    // both channels while it runs, retaining only a bounded useful error tail.
+    VDQtProcessDiagnosticTail diagnostics(process);
     process.start(program, arguments);
     if (!process.waitForStarted(5000)) {
         if (errorMessage) *errorMessage = QString(
@@ -6053,7 +6145,7 @@ bool VDQtMainWindow::exportViaEncoderSet(
                              mAutomationUnattended ? nullptr : this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(mAutomationUnattended ? std::numeric_limits<int>::max() : 0);
-    while (!process.waitForFinished(50)) {
+    while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
         QApplication::processEvents(QEventLoop::AllEvents, 50);
         if (progress.wasCanceled()) {
             process.terminate();
@@ -6062,11 +6154,13 @@ bool VDQtMainWindow::exportViaEncoderSet(
                 process.waitForFinished(3000);
             }
             QFile::remove(stagedPath);
+            diagnostics.drain();
             if (errorMessage) *errorMessage = QStringLiteral(
                 "External encoding was cancelled.");
             return false;
         }
     }
+    diagnostics.drain();
     progress.close();
     const bool encoded = process.exitStatus() == QProcess::NormalExit
         && process.exitCode() == 0 && QFileInfo(stagedPath).size() > 0;
@@ -6074,12 +6168,12 @@ bool VDQtMainWindow::exportViaEncoderSet(
     if (!encoded
         || !sourceSafety.evaluateOutputPath(outputPath).isSafe()
         || !replaceWithStagedFile(stagedPath, outputPath)) {
-        const QString diagnostics = QString::fromLocal8Bit(
-            process.readAll()).right(16384).trimmed();
+        const QString message = QString::fromLocal8Bit(
+            diagnostics.bytes().right(16384)).trimmed();
         QFile::remove(stagedPath);
-        if (errorMessage) *errorMessage = diagnostics.isEmpty()
+        if (errorMessage) *errorMessage = message.isEmpty()
             ? QStringLiteral("The external encoder failed or its output could not be committed.")
-            : diagnostics;
+            : message;
         return false;
     }
     if (errorMessage) errorMessage->clear();
@@ -6500,27 +6594,28 @@ void VDQtMainWindow::onEditSelectAll() {
 }
 
 void VDQtMainWindow::onEditJumpToPosition() {
-    if (editorActionsBlocked()) return;
     if (editorActionsBlocked() || !mVideoDecoder.isOpen()
         || mTimeline.frameCount() <= 0)
         return;
-
-    // A modal dialog continues processing Qt timers. Pause first so playback
-    // cannot move the current-frame value underneath the user's edit or race
-    // the accepted seek.
-    if (mPlaybackTimer->isActive()) {
-        mPlaybackTimer->stop();
-        mAudioPlayer.pause();
-        mPlaybackPausedFrame = static_cast<int>(
-            mPositionControl->GetPosition());
-    }
+    // The modal clock callback borrows the decoder/index. Freeze source/edit
+    // actions and join preview work for its lifetime, not just playback timers.
+    OperationScope operation(*this);
+    if (!ensureExactFrameRange(QStringLiteral("jump-to-time mapping"))) return;
+    const double sourceRate = mFrameRateConfig.sourceMode == 1
+        && std::isfinite(mFrameRateConfig.customSourceFps) && mFrameRateConfig.customSourceFps > 0
+        ? mFrameRateConfig.customSourceFps : mVideoDecoder.getFps();
+    const QList<VDQtTimelineSegment> segments = mTimeline.isIdentity()
+        ? QList<VDQtTimelineSegment>() : mTimeline.segments();
 
     VDJumpToPositionDialog dialog(
         mPositionControl->GetPosition(),
         0,
         mTimeline.frameCount() - 1,
-        mVideoDecoder.getFps(),
-        this);
+        sourceRate,
+        this,
+        [this, segments, sourceRate](qint64 frame) {
+            return VDQtFilterContextForFrame(mVideoDecoder, segments, frame, sourceRate).timestampSeconds;
+        });
     if (dialog.exec() != QDialog::Accepted) return;
 
     const qint64 target = dialog.selectedFrame();
@@ -9617,6 +9712,22 @@ void VDQtMainWindow::onOpenRecentFile() {
 
 void VDQtMainWindow::onFileReopen() {
     if (editorActionsBlocked()) return;
+    if (mActiveTemporaryMedia && mVideoDecoder.isOpen()) {
+        OperationScope operation(*this);
+        const VDQtProjectState original = captureProjectState();
+        const QString currentPath = mVideoDecoder.getFilePath();
+        if (openVideoFileImpl(currentPath)) {
+            // The normal Open reset must not forget how this owned NUT copy
+            // relates to its original raw file. Keep saved projects portable.
+            mTimelineSources = original.sourcePaths;
+            mRawInputPixelFormat = original.rawPixelFormat;
+            mRawInputWidth = original.rawWidth;
+            mRawInputHeight = original.rawHeight;
+            mRawInputFrameRate = original.rawFrameRate;
+            mRawInputByteOffset = original.rawByteOffset;
+        }
+        return;
+    }
     QSettings settings("VirtualDub", "VirtualDub_Port");
     QStringList files = settings.value("recentFiles").toStringList();
     if (!files.isEmpty()) {

@@ -3,6 +3,8 @@
 // namespace helpers build subprocess pipelines and transactional output files;
 // the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
+#include "VDQtVideoAspect.h"
+#include "VDQtTemporaryStorage.h"
 #include "VDQtColorPolicy.h"
 #include "VDQtTimingMath.h"
 #include "VDQtFilterFrameContext.h"
@@ -230,6 +232,23 @@ VDAudioCodecParams configuredAudioParams()
     return VDQtCodecEngine::audioParamsFromConfig(fallback);
 }
 
+void appendImageAspectArguments(QStringList& arguments, AVRational aspect) {
+    const QString filter = QStringLiteral("setsar=%1/%2:max=2147483647").arg(aspect.num).arg(aspect.den);
+    const int existing = arguments.lastIndexOf(QStringLiteral("-vf"));
+    if (existing >= 0 && existing + 1 < arguments.size()) arguments[existing + 1] += ',' + filter;
+    else arguments << "-vf" << filter;
+}
+
+void appendVfrEncoderClock(QStringList& arguments, const QString& codecId, double nominalRate) {
+    const auto clock = VDQtCodecEngine::getVideoEncoderClock(codecId, nominalRate);
+    // The encoder clock may have a codec-specific denominator, but forcing an
+    // output -r requests constant-rate resampling and contradicts -fps_mode vfr.
+    // Keep the NUT stream's precise timestamps; only quantize the encoder clock.
+    arguments << "-fps_mode" << "vfr" << "-enc_time_base:v"
+              << QStringLiteral("%1:%2").arg(clock.numerator).arg(clock.denominator)
+              << "-avoid_negative_ts" << "disabled";
+}
+
 bool appendVideoEncoderArguments(QStringList& args,
                                  const VDVideoCodecParams& params,
                                  int sourceBitDepth,
@@ -241,7 +260,7 @@ bool appendVideoEncoderArguments(QStringList& args,
                                  bool rgbInput = false)
 {
     QString outputPixelFormat = params.pixFmt.trimmed().toLower();
-    const QString codecId = params.codecId.trimmed();
+    const QString codecId = params.codecId.trimmed().toLower();
     QStringList encoderArguments;
     if (!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
             params, preserveNativeVfr, &encoderArguments, errorMessage)) return false;
@@ -505,7 +524,8 @@ public:
               int width,
               int height,
               AVPixelFormat pixelFormat,
-              AVRational averageFrameRate) {
+              AVRational averageFrameRate,
+              AVRational sampleAspectRatio) {
         mProcess = &process;
         mProgress = &progress;
         mDiagnostics = &diagnostics;
@@ -521,12 +541,19 @@ public:
         mStreamIndex = stream->index;
         stream->time_base = AVRational{1, 1000000};
         stream->avg_frame_rate = averageFrameRate;
+        stream->sample_aspect_ratio = sampleAspectRatio;
         stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
         stream->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
         stream->codecpar->format = pixelFormat;
         stream->codecpar->width = width;
         stream->codecpar->height = height;
-        stream->codecpar->codec_tag = 0;
+        stream->codecpar->sample_aspect_ratio = sampleAspectRatio;
+        // RAWVIDEO alone does not identify the packed layout. With tag zero,
+        // NUT selects its first generic raw-video tag (RGB555) even for RGB24,
+        // RGBA or RGBA64 packets, silently misinterpreting every pixel.
+        stream->codecpar->codec_tag = avcodec_pix_fmt_to_codec_tag(pixelFormat);
+        if (!stream->codecpar->codec_tag)
+            return fail(QStringLiteral("The timestamped pipe cannot describe this packed pixel format."), AVERROR(EINVAL));
 
         constexpr int ioBufferSize = 64 * 1024;
         unsigned char *buffer = static_cast<unsigned char *>(av_malloc(ioBufferSize));
@@ -1875,6 +1902,43 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
     if (!std::isfinite(fps) || fps <= 0.0) fps = 29.97;
 
+    const QString timingCodec = selectedVideoParams.codecId.trimmed().toLower();
+    if (preserveNativeVfr && videoMode != VideoMode_DirectStreamCopy
+        && (timingCodec == "mpeg4" || timingCodec == "mpeg1video" || timingCodec == "mpeg2video")) {
+        const int phases = videoMode == VideoMode_FullProcessing
+            ? filters.getTimingInfo().outputFramesPerInput : 1;
+        const auto clock = VDQtCodecEngine::getVideoEncoderClock(timingCodec, sourceFps * std::max(1, phases));
+        qint64 previousTick = -1;
+        // These legacy bitstreams have coarser clocks. Prove distinct output
+        // ticks before Fast Recompress can silently drop colliding frames.
+        for (int ordinal = 0; ordinal < framesToExport; ++ordinal) {
+            const int sourceFrame = sourceFrameAt(VDQtSourceFrameAtOffset(startFrame, endFrame,
+                static_cast<long double>(ordinal) * step));
+            const double first = decoder.getFrameTimestampSeconds(sourceFrame);
+            const int next = VDQtSourceFrameAtOffset(startFrame, endFrame,
+                static_cast<long double>(ordinal + 1) * step);
+            const double last = ordinal + 1 < framesToExport
+                ? decoder.getFrameTimestampSeconds(sourceFrameAt(next))
+                : sourceStartSeconds + sourceDurationSeconds;
+            for (int phase = 0; phase < std::max(1, phases); ++phase) {
+                const long double time = (static_cast<long double>(first) - sourceStartSeconds
+                    + (static_cast<long double>(last) - first) * phase / std::max(1, phases)) * 1000000;
+                qint64 microseconds = 0;
+                const bool validTime = VDQtCheckedRoundedNonnegative(time, &microseconds);
+                const qint64 tick = validTime ? av_rescale_q(microseconds, AVRational{1, 1000000},
+                    AVRational{clock.numerator, clock.denominator}) : -1;
+                if (!validTime || tick <= previousTick) {
+                    mLastError = QStringLiteral(
+                        "The selected encoder's timestamp resolution cannot retain these variable-rate frames. "
+                        "Choose another encoder or explicitly convert to a supported constant frame rate.");
+                    if (parentWidget) QMessageBox::critical(parentWidget, "Unsupported Encoder Timing", mLastError);
+                    return false;
+                }
+                previousTick = tick;
+            }
+        }
+    }
+
     QTemporaryDir smartRenderDirectory;
     QString directCopyInputPath = options.inputPath;
     if (smartEditedDirectCopy) {
@@ -2074,11 +2138,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             encoderArgs << "-r" << QString::number(fps, 'f', 12)
                         << "-fps_mode" << "cfr";
         } else {
-            encoderArgs << "-fps_mode" << "vfr";
             if (preserveNativeVfr) {
-                encoderArgs << "-enc_time_base:v" << "1:1000000"
-                            << "-avoid_negative_ts" << "disabled";
-            }
+                appendVfrEncoderClock(encoderArgs, selectedVideoParams.codecId, sourceFps);
+            } else
+                encoderArgs << "-fps_mode" << "vfr";
         }
 
         if (sourceHasAudio) {
@@ -2351,6 +2414,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     bool applyFilters = (videoMode == VideoMode_FullProcessing);
     int outW = sampleFrame.width();
     int outH = sampleFrame.height();
+    AVRational outputSampleAspect = VDQtImageSampleAspectRatio(sampleFrame);
     int inputFramesToProcess = framesToExport;
     double sourceSelectionOutputFps = fps;
     int filterFramesPerInput = 1;
@@ -2368,6 +2432,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         }
         outW = filteredSample.width();
         outH = filteredSample.height();
+        outputSampleAspect = VDQtImageSampleAspectRatio(filteredSample);
 
         const VDFilterTimingInfo timing = filters.getTimingInfo();
         if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0) {
@@ -2377,7 +2442,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         filterFramesPerInput = timing.outputFramesPerInput;
         if (filterFramesPerInput > 1) {
             fps *= filterFramesPerInput;
-            framesToExport *= filterFramesPerInput;
+            const qint64 expandedFrames = qint64(framesToExport) * filterFramesPerInput;
+            if (expandedFrames > std::numeric_limits<int>::max()) {
+                mLastError = QStringLiteral("The expanded processed frame sequence is too large.");
+                return false;
+            }
+            framesToExport = static_cast<int>(expandedFrames);
         }
     }
     const double outputDurationSeconds = preserveNativeVfr
@@ -2413,6 +2483,23 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     bool isDirectCopyMediaAudio = !audioSrcMedia.isEmpty();
 
     QTemporaryDir temporaryDirectory;
+    if (twoPassRequested) {
+        qint64 requiredBytes = 0;
+        if (!VDQtEstimateFrameTemporaryStorage(outW, outH,
+                sampleFrame.depth() > 32 ? 8 : decoder.sourceHasAlpha() ? 4 : 3,
+                framesToExport, 1024, &requiredBytes)) {
+            mLastError = QStringLiteral("The two-pass intermediate storage estimate is too large.");
+            return false;
+        }
+        // NUT stores uncompressed pixels plus packet headers; encoder analysis
+        // records also need space. This conservative check is not a reservation.
+        if (!temporaryDirectory.isValid()
+            || !VDQtRequireTemporaryStorage(temporaryDirectory.path(), requiredBytes, &mLastError)) {
+            if (mLastError.isEmpty()) mLastError = QStringLiteral("Could not create two-pass temporary storage.");
+            if (parentWidget) QMessageBox::critical(parentWidget, "Two-Pass Storage Error", mLastError);
+            return false;
+        }
+    }
     QString tempAudioPath;
     if (options.includeAudio && !isDirectCopyMediaAudio && audioPlayer && audioPlayer->hasAudio()) {
         if (!temporaryDirectory.isValid()) {
@@ -2629,10 +2716,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             mLastError = videoEncodingError;
             return false;
         }
-        if (preserveNativeVfr)
-            target << "-fps_mode" << "vfr"
-                   << "-enc_time_base:v" << "1:1000000"
-                   << "-avoid_negative_ts" << "disabled";
+        appendImageAspectArguments(target, outputSampleAspect);
+        if (preserveNativeVfr) appendVfrEncoderClock(target, vParams.codecId, sourceFps * filterFramesPerInput);
         if (includeEncodedAudio && hasAudioInput) {
             if (audioMode == AudioMode_DirectStreamCopy)
                 target << "-c:a" << "copy";
@@ -2747,7 +2832,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         if (inputPixelFormat == AV_PIX_FMT_NONE
             || !timestampedWriter.open(ffmpeg, progress, diagnostics, cancelled,
                                        outW, outH, inputPixelFormat,
-                                       terminalFrameRate)) {
+                                       terminalFrameRate, outputSampleAspect)) {
             stopProcess(ffmpeg);
             removePartialOutput(processOutputPath);
             return false;
@@ -2755,6 +2840,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
 
     int doneCount = 0;
+    qint64 lastEncoderTimestamp = -1;
+    const auto encoderClock = VDQtCodecEngine::getVideoEncoderClock(
+        vParams.codecId, sourceFps * filterFramesPerInput);
     for (int inputIndex = 0; inputIndex < inputFramesToProcess; ++inputIndex) {
         if (progress.wasCanceled()) {
             cancelled = true;
@@ -2842,6 +2930,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                 writeFailed = true;
                 break;
             }
+            if (av_cmp_q(VDQtImageSampleAspectRatio(filtered), outputSampleAspect) != 0) {
+                mLastError = QStringLiteral(
+                    "The source/filter pixel aspect ratio changes during this export. "
+                    "A single encoded stream requires one consistent sample aspect ratio.");
+                appendBounded(diagnostics, mLastError.toUtf8());
+                writeFailed = true;
+                break;
+            }
             if (filtered.format() != rawInputImageFormat)
                 filtered = filtered.convertToFormat(rawInputImageFormat);
 
@@ -2854,12 +2950,23 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                     + (vfrFrameEnd - vfrFrameStart)
                         * static_cast<double>(phase + 1) / filteredFrames.size();
                 qint64 ptsUs = 0, endUs = 0;
-                const bool validTime = VDQtCheckedRoundedNonnegative(
+                bool validTime = VDQtCheckedRoundedNonnegative(
                     (static_cast<long double>(phaseStart) - sourceStartSeconds) * 1000000, &ptsUs)
                     && VDQtCheckedRoundedNonnegative(
                         (static_cast<long double>(phaseEnd) - sourceStartSeconds) * 1000000, &endUs)
                     && endUs > ptsUs;
                 if (!validTime) mLastError = QStringLiteral("The processed frame timestamp cannot be represented in microseconds.");
+                if (validTime) {
+                    const qint64 encoderTimestamp = av_rescale_q(ptsUs, AVRational{1, 1000000},
+                        AVRational{encoderClock.numerator, encoderClock.denominator});
+                    if (encoderTimestamp <= lastEncoderTimestamp) {
+                        mLastError = QStringLiteral(
+                            "The selected encoder's timestamp resolution cannot retain these variable-rate frames. "
+                            "Choose another encoder or explicitly convert to a supported constant frame rate.");
+                        validTime = false;
+                    }
+                    lastEncoderTimestamp = encoderTimestamp;
+                }
                 frameWritten = validTime
                     && timestampedWriter.writeImage(filtered, ptsUs, endUs - ptsUs);
             } else {

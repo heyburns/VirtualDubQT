@@ -58,7 +58,7 @@ struct VDVideoCodecParams {
     int huffyuvPredictor = 1;           // 0: Left, 1: Plane, 2: Median
     
     // CineForm specific
-    int cineformQuality = 3;            // 0: medium+, 1: high+, 2: film1+, 3: film2+, 4: film3+
+    int cineformQuality = 3;            // FFmpeg 0..12, from film3+ (0) through low (12).
 };
 
 // Explicitly supported controls, shared by the dialog and command builder.
@@ -76,6 +76,11 @@ struct VDVideoCodecCapabilities {
     bool supportsTwoPass = false;
     bool supportsKeyframes = false;
     bool supportsBFrames = false;
+};
+
+struct VDVideoEncoderClock {
+    int numerator = 1;
+    int denominator = 1000000;
 };
 
 // Audio counterpart to VDVideoCodecInfo/VDVideoCodecParams.
@@ -114,6 +119,7 @@ public:
 
     static VDVideoCodecParams getDefaultVideoParamsForCodec(const QString &codecId);
     static VDVideoCodecCapabilities getVideoCapabilities(const QString &codecId);
+    static VDVideoEncoderClock getVideoEncoderClock(const QString& codecId, double nominalFrameRate);
 
     // Applies only verified encoder controls. Unsupported saved combinations
     // fail with a diagnostic instead of silently choosing a different mode.

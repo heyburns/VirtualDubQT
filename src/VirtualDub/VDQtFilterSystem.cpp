@@ -5,6 +5,9 @@
 #include "VDQtFilterSystem.h"
 #include "VDQtPluginHost.h"
 #include "VDQtFilterValidation.h"
+#include "VDQtFilterGeometry.h"
+#include "VDQtImageResampler.h"
+#include "VDQtVideoAspect.h"
 #include <QTransform>
 #include <QUuid>
 #include <QRgba64>
@@ -116,6 +119,35 @@ void transformRgbPixels(QImage& image, bool highPrecision, Transform&& transform
     });
 }
 
+bool applyChannelLut(QImage& image, bool highPrecision, const QByteArray& bytes) {
+    const int maximum = highPrecision ? 65535 : 255;
+    if (bytes.size() != (maximum + 1) * static_cast<qsizetype>(sizeof(quint16))) return false;
+    const auto *table = reinterpret_cast<const quint16 *>(bytes.constData());
+    uchar *bits = image.bits();
+    if (!bits) return false;
+    const qsizetype stride = image.bytesPerLine();
+    const int width = image.width(), height = image.height();
+    if (highPrecision) {
+        parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
+            auto *row = reinterpret_cast<QRgba64 *>(bits + y * stride);
+            for (int x = 0; x < width; ++x) {
+                const QRgba64 pixel = row[x];
+                row[x] = QRgba64::fromRgba64(table[pixel.red()], table[pixel.green()],
+                                           table[pixel.blue()], pixel.alpha());
+            }
+        });
+    } else {
+        const int bpp = image.format() == QImage::Format_RGB888 ? 3 : 4;
+        parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
+            uchar *row = bits + y * stride;
+            for (int x = 0; x < width; ++x)
+                for (int channel = 0; channel < 3; ++channel)
+                    row[x * bpp + channel] = static_cast<uchar>(table[row[x * bpp + channel]]);
+        });
+    }
+    return true;
+}
+
 quint16 rgba64Channel(const QRgba64& pixel, int channel) {
     switch (channel) {
     case 0: return pixel.red();
@@ -160,6 +192,8 @@ void VDQtFilterSystem::forgetRuntimeInstances() {
 VDQtFilterSystem::CacheStatistics VDQtFilterSystem::cacheStatistics() const {
     CacheStatistics result;
     result.sixAxisEntries = mSixAxisLutCache.size();
+    result.channelLutEntries = mChannelLutCache.size();
+    for (const auto& table : std::as_const(mChannelLutCache)) result.channelLutBytes += table.size();
     result.assetEntries = mAssetCache.size();
     for (const auto& asset : std::as_const(mAssetCache)) result.assetBytes += asset.image.sizeInBytes();
     return result;
@@ -171,6 +205,7 @@ void VDQtFilterSystem::clearFilters() {
     forgetRuntimeInstances();
     mActiveChain.clear();
     mSixAxisLutCache.clear();
+    mChannelLutCache.clear();
     mAssetCache.clear();
     mTemporalStates.clear();
 }
@@ -192,6 +227,7 @@ void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) 
     forgetRuntimeInstances();
     mActiveChain = normalizeChainIds(chain);
     mSixAxisLutCache.clear();
+    mChannelLutCache.clear();
     mAssetCache.clear();
     mTemporalStates.clear();
 }
@@ -599,6 +635,48 @@ void VDQtFilterSystem::resetRuntimeState() {
     forgetRuntimeInstances();
 }
 
+QByteArray VDQtFilterSystem::channelLut(const VDFilterInstance& filter, bool highPrecision) {
+    const int maximum = highPrecision ? 65535 : 255;
+    const bool gammaCorrect = filter.type == VDFilterType::GammaCorrect;
+    const double gamma = gammaCorrect ? 1 : std::clamp(filter.params.value("gamma", 1.0), 0.05, 20.0);
+    const bool levels = filter.type == VDFilterType::Levels;
+    const bool curves = filter.type == VDFilterType::Curves;
+    const double black = levels || curves ? std::clamp(filter.params.value(
+        levels ? "inputBlack" : "black", 0.0) / 255.0, 0.0, 1.0) : 0;
+    const double white = levels || curves ? filter.params.value(
+        levels ? "inputWhite" : "white", 255.0) / 255.0 : 1;
+    const double outputBlack = levels ? std::clamp(filter.params.value("outputBlack", 0.0) / 255.0, 0.0, 1.0) : 0;
+    const double outputWhite = levels ? std::clamp(filter.params.value("outputWhite", 255.0) / 255.0, outputBlack, 1.0) : 1;
+    const bool toLinear = gammaCorrect && filter.params.value("toLinear", 1) > 0.5;
+    QString key = QStringLiteral("%1:%2:").arg(static_cast<int>(filter.type)).arg(maximum);
+    // Key only values that affect this scalar transform. Opacity/range/clip
+    // metadata is applied separately and must not trigger a table rebuild.
+    for (double value : {gamma, black, white, outputBlack, outputWhite, toLinear ? 1.0 : 0.0})
+        key += QString::number(value, 'g', 17) + QLatin1Char(';');
+    QByteArray bytes = mChannelLutCache.value(key);
+    if (!bytes.isEmpty()) return bytes;
+    bytes.resize((maximum + 1) * static_cast<qsizetype>(sizeof(quint16)));
+    auto *table = reinterpret_cast<quint16 *>(bytes.data());
+    if (!table) return {};
+    for (int channel = 0; channel <= maximum; ++channel) {
+        const double value = channel / static_cast<double>(maximum);
+        double adjusted;
+        if (filter.type == VDFilterType::GammaCorrect) {
+            adjusted = toLinear
+                ? value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4)
+                : value <= 0.0031308 ? value * 12.92 : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055;
+        } else {
+            const double normalized = std::clamp((value - black) / (white - black), 0.0, 1.0);
+            adjusted = outputBlack + (outputWhite - outputBlack) * std::pow(normalized, 1.0 / gamma);
+        }
+        table[channel] = static_cast<quint16>(std::clamp(std::llround(adjusted * maximum),
+                                                       0LL, static_cast<long long>(maximum)));
+    }
+    if (mChannelLutCache.size() >= 8) mChannelLutCache.erase(mChannelLutCache.begin());
+    mChannelLutCache.insert(key, bytes);
+    return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // Frame processing and temporal-rate expansion
 // ---------------------------------------------------------------------------
@@ -749,6 +827,11 @@ QImage VDQtFilterSystem::processFilterForPhase(
             QStringLiteral("_sylia.range.start"), 0.0));
         if (context.frameNumber < rangeStart || context.frameNumber >= rangeEnd) return inputFrame;
     }
+    VDQtFilterGeometry geometry;
+    if (!VDQtComputeFilterGeometry(filter, inputFrame.size(), inputFrame.depth() > 32 ? 8 : 4,
+                                  &geometry, &configurationError))
+        return failProcessing(configurationError, &filter);
+    AVRational outputAspect = VDQtImageSampleAspectRatio(inputFrame);
 
     // Normalize only when needed, retaining unique intermediate storage. The
     // caller's original and borrowed earlier Bob phases still detach on write.
@@ -763,20 +846,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
     // script-only range, clipping, and opacity-curve metadata without widening
     // the public filter ABI or losing round-trip compatibility with VCF files.
     {
-        const int clipLeft = std::max(0, static_cast<int>(filter.params.value(
-            QStringLiteral("_sylia.clip.left"), 0.0)));
-        const int clipTop = std::max(0, static_cast<int>(filter.params.value(
-            QStringLiteral("_sylia.clip.top"), 0.0)));
-        const int clipRight = std::max(0, static_cast<int>(filter.params.value(
-            QStringLiteral("_sylia.clip.right"), 0.0)));
-        const int clipBottom = std::max(0, static_cast<int>(filter.params.value(
-            QStringLiteral("_sylia.clip.bottom"), 0.0)));
-        if (clipLeft || clipTop || clipRight || clipBottom) {
-            const int clippedWidth = result.width() - clipLeft - clipRight;
-            const int clippedHeight = result.height() - clipTop - clipBottom;
-            if (clippedWidth <= 0 || clippedHeight <= 0) return {};
-            result = result.copy(clipLeft, clipTop,
-                                 clippedWidth, clippedHeight);
+        if (geometry.inputCrop != QRect(QPoint(), result.size())) {
+            result = result.copy(geometry.inputCrop);
             if (result.isNull()) return {};
         }
 
@@ -835,43 +906,26 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
         case VDFilterType::Canvas: {
-            const int requestedWidth = static_cast<int>(
-                filter.params.value("width", result.width()));
-            const int requestedHeight = static_cast<int>(
-                filter.params.value("height", result.height()));
-            const int width = std::clamp(
-                requestedWidth > 0 ? requestedWidth : result.width(),
-                1, 32768);
-            const int height = std::clamp(
-                requestedHeight > 0 ? requestedHeight : result.height(),
-                1, 32768);
-            QImage canvas(width, height, result.format());
+            QImage canvas(geometry.outputSize, result.format());
             canvas.fill(QColor(
                 std::clamp(static_cast<int>(filter.params.value("red", 0)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("green", 0)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("blue", 0)), 0, 255)));
             QPainter painter(&canvas);
-            painter.drawImage(
-                static_cast<int>(filter.params.value("x", 0)),
-                static_cast<int>(filter.params.value("y", 0)), result);
+            painter.drawImage(geometry.imageOffset, result);
             result = canvas;
             break;
         }
-        case VDFilterType::Curves: {
-            const double black = std::clamp(
-                filter.params.value("black", 0.0) / 255.0, 0.0, 1.0);
-            const double white = filter.params.value("white", 255.0) / 255.0;
-            const double gamma = std::clamp(
-                filter.params.value("gamma", 1.0), 0.05, 20.0);
-            transformRgbPixels(result, highPrecision,
-                [black, white, gamma](double& red, double& green, double& blue) {
-                    const auto curve = [=](double value) {
-                        const double normalized = std::clamp(
-                            (value - black) / (white - black), 0.0, 1.0);
-                        return std::pow(normalized, 1.0 / gamma);
-                    };
-                    red = curve(red); green = curve(green); blue = curve(blue);
-                });
+        case VDFilterType::Curves:
+        case VDFilterType::Levels:
+        case VDFilterType::Gamma:
+        case VDFilterType::GammaCorrect: {
+            // Every representable channel has its own exact old-formula entry.
+            // Expensive pow/transfer work occurs once per parameter/depth key,
+            // not six million times on each HD preview frame. Alpha is untouched.
+            const QByteArray table = channelLut(filter, highPrecision);
+            if (!applyChannelLut(result, highPrecision, table))
+                return failProcessing(QStringLiteral("Not enough memory to apply the channel lookup table."), &filter);
             break;
         }
         case VDFilterType::ChromaSmoother: {
@@ -980,22 +1034,6 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 std::clamp(static_cast<int>(filter.params.value("green", 255)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("blue", 255)), 0, 255)));
             painter.drawText(position, text);
-            break;
-        }
-        case VDFilterType::GammaCorrect: {
-            const bool toLinear = filter.params.value("toLinear", 1) > 0.5;
-            transformRgbPixels(result, highPrecision,
-                [toLinear](double& red, double& green, double& blue) {
-                    const auto convert = [toLinear](double value) {
-                        value = std::clamp(value, 0.0, 1.0);
-                        if (toLinear)
-                            return value <= 0.04045 ? value / 12.92
-                                : std::pow((value + 0.055) / 1.055, 2.4);
-                        return value <= 0.0031308 ? value * 12.92
-                            : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055;
-                    };
-                    red = convert(red); green = convert(green); blue = convert(blue);
-                });
             break;
         }
         case VDFilterType::FieldDelay:
@@ -1194,8 +1232,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
         case VDFilterType::Reduce2:
         case VDFilterType::Reduce2HQ:
             result = result.scaled(
-                std::max(1, result.width() / 2),
-                std::max(1, result.height() / 2), Qt::IgnoreAspectRatio,
+                geometry.outputSize, Qt::IgnoreAspectRatio,
                 filter.type == VDFilterType::Reduce2
                     ? Qt::FastTransformation : Qt::SmoothTransformation);
             break;
@@ -1285,15 +1322,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
         case VDFilterType::WarpResize: {
-            const int requestedWidth = static_cast<int>(
-                filter.params.value("width", result.width()));
-            const int requestedHeight = static_cast<int>(
-                filter.params.value("height", result.height()));
-            const int width = std::clamp(
-                requestedWidth > 0 ? requestedWidth : result.width(), 1, 32768);
-            const int height = std::clamp(
-                requestedHeight > 0 ? requestedHeight : result.height(), 1, 32768);
-            result = result.scaled(width, height, Qt::IgnoreAspectRatio,
+            result = result.scaled(geometry.outputSize, Qt::IgnoreAspectRatio,
                                    Qt::SmoothTransformation);
             break;
         }
@@ -1421,28 +1450,23 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
         case VDFilterType::Resize: {
-            int w = 0;
-            int h = 0;
-            if (static_cast<int>(filter.params.value("sizeMode", 0)) == 1) {
-                w = static_cast<int>(std::llround(
-                    result.width() * filter.params.value("relW", 100.0) / 100.0));
-                h = static_cast<int>(std::llround(
-                    result.height() * filter.params.value("relH", 100.0) / 100.0));
-            } else {
-                w = static_cast<int>(filter.params.value("width", result.width()));
-                h = static_cast<int>(filter.params.value("height", result.height()));
-            }
+            const int w = geometry.intermediateSize.width();
+            const int h = geometry.intermediateSize.height();
             if (w > 0 && h > 0) {
                 const int filterMode = static_cast<int>(
                     filter.params.value("filterMode", 4));
-                const Qt::TransformationMode transformation = filterMode == 0
-                    ? Qt::FastTransformation : Qt::SmoothTransformation;
+                const auto resizeRows = [](int rows, qint64 pixels, const auto& function) {
+                    parallelFor(rows, pixels, function);
+                };
+                QString resizeError;
                 const bool interlaced = filter.params.value("interlaced", 0) > 0.5;
                 if (interlaced && result.height() > 1 && h > 1) {
                     const int evenSourceHeight = (result.height() + 1) / 2;
                     const int oddSourceHeight = result.height() / 2;
                     QImage even(result.width(), evenSourceHeight, result.format());
                     QImage odd(result.width(), std::max(1, oddSourceHeight), result.format());
+                    if (even.isNull() || odd.isNull())
+                        return failProcessing(QStringLiteral("Not enough memory to separate the resized fields."), &filter);
                     for (int y = 0; y < result.height(); ++y) {
                         QImage& field = (y & 1) ? odd : even;
                         std::memcpy(field.scanLine(y / 2), result.constScanLine(y),
@@ -1451,11 +1475,13 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     }
                     const int evenTargetHeight = (h + 1) / 2;
                     const int oddTargetHeight = h / 2;
-                    even = even.scaled(w, evenTargetHeight,
-                                       Qt::IgnoreAspectRatio, transformation);
-                    odd = odd.scaled(w, std::max(1, oddTargetHeight),
-                                     Qt::IgnoreAspectRatio, transformation);
+                    even = VDQtResampleImage(even, QSize(w, evenTargetHeight), filterMode, resizeRows, &resizeError);
+                    if (even.isNull()) return failProcessing(resizeError, &filter);
+                    odd = VDQtResampleImage(odd, QSize(w, std::max(1, oddTargetHeight)), filterMode, resizeRows, &resizeError);
+                    if (odd.isNull()) return failProcessing(resizeError, &filter);
                     QImage woven(w, h, result.format());
+                    if (woven.isNull())
+                        return failProcessing(QStringLiteral("Not enough memory to weave the resized fields."), &filter);
                     for (int y = 0; y < h; ++y) {
                         const QImage& field = (y & 1) ? odd : even;
                         std::memcpy(woven.scanLine(y), field.constScanLine(y / 2),
@@ -1464,8 +1490,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     }
                     result = woven;
                 } else {
-                    result = result.scaled(w, h, Qt::IgnoreAspectRatio,
-                                           transformation);
+                    result = VDQtResampleImage(result, QSize(w, h), filterMode, resizeRows, &resizeError);
+                    if (result.isNull()) return failProcessing(resizeError, &filter);
                 }
 
                 const int framingMode = static_cast<int>(
@@ -1475,53 +1501,20 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     std::clamp(static_cast<int>(filter.params.value("fillColorG", 0)), 0, 255),
                     std::clamp(static_cast<int>(filter.params.value("fillColorB", 0)), 0, 255));
                 if (framingMode == 1) {
-                    const int frameWidth = std::max(1, static_cast<int>(
-                        filter.params.value("frameW", result.width())));
-                    const int frameHeight = std::max(1, static_cast<int>(
-                        filter.params.value("frameH", result.height())));
-                    QImage framed(frameWidth, frameHeight, result.format());
+                    QImage framed(geometry.outputSize, result.format());
                     framed.fill(fillColor);
                     QPainter painter(&framed);
-                    painter.drawImage((frameWidth - result.width()) / 2,
-                                      (frameHeight - result.height()) / 2,
-                                      result);
+                    painter.drawImage(geometry.imageOffset, result);
                     painter.end();
                     result = framed;
                 } else if (framingMode == 2 || framingMode == 3) {
-                    const double aspectWidth = std::max(
-                        1.0, filter.params.value("frameAspectW", 4.0));
-                    const double aspectHeight = std::max(
-                        1.0, filter.params.value("frameAspectH", 3.0));
-                    const double desiredAspect = aspectWidth / aspectHeight;
-                    const double currentAspect = static_cast<double>(result.width())
-                        / std::max(1, result.height());
                     if (framingMode == 2) {
-                        int cropWidth = result.width();
-                        int cropHeight = result.height();
-                        if (currentAspect > desiredAspect)
-                            cropWidth = std::max(1, static_cast<int>(std::llround(
-                                result.height() * desiredAspect)));
-                        else
-                            cropHeight = std::max(1, static_cast<int>(std::llround(
-                                result.width() / desiredAspect)));
-                        result = result.copy((result.width() - cropWidth) / 2,
-                                             (result.height() - cropHeight) / 2,
-                                             cropWidth, cropHeight);
+                        result = result.copy(geometry.outputCrop);
                     } else {
-                        int frameWidth = result.width();
-                        int frameHeight = result.height();
-                        if (currentAspect < desiredAspect)
-                            frameWidth = std::max(1, static_cast<int>(std::llround(
-                                result.height() * desiredAspect)));
-                        else
-                            frameHeight = std::max(1, static_cast<int>(std::llround(
-                                result.width() / desiredAspect)));
-                        QImage framed(frameWidth, frameHeight, result.format());
+                        QImage framed(geometry.outputSize, result.format());
                         framed.fill(fillColor);
                         QPainter painter(&framed);
-                        painter.drawImage((frameWidth - result.width()) / 2,
-                                          (frameHeight - result.height()) / 2,
-                                          result);
+                        painter.drawImage(geometry.imageOffset, result);
                         painter.end();
                         result = framed;
                     }
@@ -2246,40 +2239,6 @@ QImage VDQtFilterSystem::processFilterForPhase(
             });
             break;
         }
-        case VDFilterType::Levels: {
-            const double inputBlack = std::clamp(
-                filter.params.value("inputBlack", 0.0) / 255.0, 0.0, 1.0);
-            const double inputWhite = filter.params.value("inputWhite", 255.0) / 255.0;
-            const double gamma = std::clamp(
-                filter.params.value("gamma", 1.0), 0.05, 20.0);
-            const double outputBlack = std::clamp(
-                filter.params.value("outputBlack", 0.0) / 255.0, 0.0, 1.0);
-            const double outputWhite = std::clamp(
-                filter.params.value("outputWhite", 255.0) / 255.0,
-                outputBlack, 1.0);
-            const auto adjust = [=](double value) {
-                const double normalized = std::clamp(
-                    (value - inputBlack) / (inputWhite - inputBlack), 0.0, 1.0);
-                return outputBlack + (outputWhite - outputBlack)
-                    * std::pow(normalized, 1.0 / gamma);
-            };
-            transformRgbPixels(result, highPrecision,
-                [&](double& red, double& green, double& blue) {
-                    red = adjust(red); green = adjust(green); blue = adjust(blue);
-                });
-            break;
-        }
-        case VDFilterType::Gamma: {
-            const double gamma = std::clamp(
-                filter.params.value("gamma", 1.0), 0.05, 20.0);
-            transformRgbPixels(result, highPrecision,
-                [=](double& red, double& green, double& blue) {
-                    red = std::pow(std::clamp(red, 0.0, 1.0), 1.0 / gamma);
-                    green = std::pow(std::clamp(green, 0.0, 1.0), 1.0 / gamma);
-                    blue = std::pow(std::clamp(blue, 0.0, 1.0), 1.0 / gamma);
-                });
-            break;
-        }
         case VDFilterType::Threshold: {
             const double threshold = std::clamp(
                 filter.params.value("threshold", 128.0) / 255.0, 0.0, 1.0);
@@ -2369,18 +2328,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
         case VDFilterType::Crop: {
-            const int left = std::max(0, static_cast<int>(
-                std::llround(filter.params.value("left", 0.0))));
-            const int top = std::max(0, static_cast<int>(
-                std::llround(filter.params.value("top", 0.0))));
-            const int right = std::max(0, static_cast<int>(
-                std::llround(filter.params.value("right", 0.0))));
-            const int bottom = std::max(0, static_cast<int>(
-                std::llround(filter.params.value("bottom", 0.0))));
-            const int width = result.width() - left - right;
-            const int height = result.height() - top - bottom;
-            if (width > 0 && height > 0)
-                result = result.copy(left, top, width, height);
+            result = result.copy(geometry.outputCrop);
             break;
         }
         case VDFilterType::ChromaShift: {
@@ -2703,6 +2651,18 @@ QImage VDQtFilterSystem::processFilterForPhase(
         }
     }
 
+    // QImage conversion/copy/painting paths do not uniformly preserve custom
+    // text metadata. Keep sample shape with each immutable frame hand-off. The
+    // Windows resize/crop/canvas contract retains SAR; quarter turns exchange
+    // its axes. User display overrides never change this source-owned value.
+    if (filter.type == VDFilterType::Rotate && filter.params.value("mode", 0) != 2) {
+        std::swap(outputAspect.num, outputAspect.den);
+    } else if (filter.type == VDFilterType::Rotate2) {
+        const double angle = filter.params.value("angle", 0);
+        if (angle == 90 || angle == -90 || angle == 270 || angle == -270)
+            std::swap(outputAspect.num, outputAspect.den);
+    }
+    VDQtSetImageSampleAspectRatio(result, outputAspect);
     return result;
 } catch (const std::bad_alloc&) {
     // QImage allocation normally returns a null image, while Qt container/task

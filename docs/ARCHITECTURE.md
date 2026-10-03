@@ -109,8 +109,15 @@ definite end scan to decoder EOF first.
 
 Image sequences and appended media are represented by temporary FFconcat
 manifests. Raw input is materialized to a temporary NUT file after the user
-supplies dimensions and pixel layout. `mTimelineTempDirectory` owns these files
-for the life of the editing session.
+supplies dimensions and pixel layout. The session temporary directory contains
+fresh per-copy subdirectories owned by `VDQtTemporaryMediaFile` leases. Active,
+deferred-open, rollback and private-job consumers pin their lease; the last
+release removes only that generated copy after its decoder/audio/worker closes.
+The weak path registry does not retain old files. Reopen pins before Close,
+projects keep original raw paths/parameters, and recent files exclude ephemeral
+copies. Raw and two-pass copies use checked space estimates and a refreshed
+volume check before writing; this is preflight, not a reservation against other
+processes consuming free space.
 
 ## Video decode and conversion
 
@@ -189,6 +196,10 @@ emits a jump request to `VDQtMainWindow`, which pauses playback, opens the
 frame/time entry dialog, exits timeline zoom when necessary, and then uses the
 ordinary `SetPosition()` path. Frame and time values in that dialog refer to the
 edited timeline, not necessarily the underlying source-frame number.
+Time entry uses an indexed cumulative edited-boundary callback, including the
+exclusive end, instead of multiplying by average FPS. The dialog binary-searches
+the frame displayed at the requested time. Its operation scope joins preview
+work and blocks source/edit replacement while that callback borrows the decoder.
 
 `VDQtTimeline` stores source-identity intent separately from its segment list.
 An unedited unknown/estimated source allows decoding beyond the provisional
@@ -246,6 +257,15 @@ stage size and precision before allocation. Invalid settings report an error;
 they must not enter unsafe casts or level calculations. Pipeline/project loading
 also migrates missing or duplicate IDs once while preserving valid unique IDs.
 
+`VDQtFilterGeometry` supplies the same checked sizing plan to processing,
+validation and the chain table. Relative aspect/alignment controls resolve
+against each incoming stage. Existing saved absolute dimensions are already
+resolved; the long Windows script signature resolves its controls once during
+configuration. Conditional or plug-in-defined table dimensions remain unknown.
+`VDQtImageResampler` implements the existing point, linear, cubic and Lanczos
+choices at source precision, with reduction-aware support for precise modes,
+premultiplied color accumulation and parity-separated interlaced resizing.
+
 Required effects must not be silently omitted. A failed sequence discards every
 output phase, resets partial runtime history, and records a pipeline-local
 `VDFilterProcessingError` (filter ID/name and actionable message). Preview keeps
@@ -254,12 +274,23 @@ export/server callers propagate it and do not publish partial output. Missing
 image reads are not cached, so restoring an asset allows a retry.
 
 Transient chain replacement resets temporal history and private plugin runtimes,
-but retains immutable parameter-keyed six-axis tables (at most eight). Asset
+but retains immutable parameter-keyed six-axis tables (at most eight). Gamma,
+sRGB conversion, Curves and Levels also use bounded immutable channel tables,
+computed with their original integer-level formulas at 8/16-bit precision.
+Derived caches are pipeline-private and keyed by all affecting parameters. Asset
 images are pipeline-local and bounded by 64 entries / 64 MiB of decoded pixels;
 larger valid images are drawn without retention. Each use checks canonical path,
 size and modification time before reusing an image. This catches ordinary edits,
 replacement and deletion, not content changes that preserve all that metadata.
 Clear and persistent chain replacement release derived caches as well as history.
+
+Source sample-aspect ratio travels with each QImage through a normalized rational
+metadata tag, including cached and worker-delivered images. Manual display aspect
+overrides are presentation-only. Resize/crop/pad inherit the ratio, while exact
+quarter turns reciprocate it. Export and frame serving declare the resulting
+stream ratio and reject unsupported changes mid-stream. Timestamped NUT declares
+the packed raw-video FourCC explicitly; leaving it unset can make a demuxer
+interpret RGB24 as RGB15 despite the supplied pixel-format field.
 
 `VDQtFilterContextForFrame()` is the common input clock contract. Filter position
 and time refer to the edited timeline; separate source fields identify the decoded

@@ -21,6 +21,9 @@
 #include <QLabel>
 #include <QPointer>
 #include <QProcess>
+#include <QSettings>
+#include <QRadioButton>
+#include <QTextEdit>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QThread>
@@ -378,6 +381,216 @@ bool projectValidation(VDQtTestFixtures& fixtures) {
     const auto panes = window.findChildren<VDVideoDisplayWidget*>();
     return check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
                  "original editor remains usable after rejected project loads");
+}
+
+bool rawLifetime(VDQtTestFixtures& fixtures) {
+    const QString raw = fixtures.directory.filePath("source.rgb");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=64x48:rate=24",
+                          "-frames:v", "4", "-pix_fmt", "rgb24", "-c:v", "rawvideo",
+                          "-threads", "1", "-f", "rawvideo", raw})) return false;
+    const QByteArray original = readFile(raw);
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    if (!queue || !position || panes.isEmpty()) return false;
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::VideoAnalysis;
+    job.sourcePaths = {raw};
+    job.rawPixelFormat = "rgb24";
+    job.rawWidth = 64; job.rawHeight = 48; job.rawFrameRate = 24;
+    job.audioDisabled = true;
+    if (!queue->replaceJobs({job})) return false;
+    const auto reload = [&] {
+        return QMetaObject::invokeMethod(&window, "reloadQueuedJob", Qt::DirectConnection,
+                                         Q_ARG(int, 0));
+    };
+    // Read the existing application log instead of adding a private test API
+    // or persisting ephemeral copies in the recent-file menu.
+    const auto currentMaterialization = [&] {
+        const auto *text = VDLogWindow::instance(&window)->findChild<QTextEdit*>();
+        if (!text) return QString();
+        const QString entries = text->toPlainText();
+        const QString prefix = QStringLiteral("[File] Opened video stream: ");
+        const qsizetype last = entries.lastIndexOf(prefix);
+        if (last < 0) return QString();
+        const QString entry = entries.mid(last + prefix.size()).section('\n', 0, 0);
+        return entry.left(entry.indexOf(" ("));
+    };
+    if (!reload() || !invoke(window, "onEditSelectAll")) return false;
+    QString active = currentMaterialization();
+    if (!check(active != raw && QFileInfo::exists(active)
+               && QFileInfo(active).fileName() == "source.nut"
+               && position->GetRangeEnd() == 3,
+               "queued raw reload opens an owned materialized source")) return false;
+    if (!check(!QSettings("VirtualDub", "VirtualDub_Port").value("recentFiles")
+                   .toStringList().contains(active),
+               "recent-file history never persists an owned raw copy")) return false;
+    const QString session = QFileInfo(QFileInfo(active).absolutePath()).absolutePath();
+    const auto materializations = [&] {
+        return QDir(session).entryList({"raw-*"}, QDir::Dirs | QDir::NoDotAndDotDot).size();
+    };
+    if (!invoke(window, "onFileReopen")
+        || !check(QFileInfo::exists(active) && materializations() == 1,
+                  "reopening a raw source retains rather than deletes or recopies its lease")) return false;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const QString prior = active;
+        if (!reload() || !invoke(window, "onEditSelectAll")) return false;
+        active = currentMaterialization();
+        if (!check(active != prior && !QFileInfo::exists(prior) && QFileInfo::exists(active)
+                   && materializations() == 1,
+                   "successive raw loads release the previous file immediately")) return false;
+    }
+    position->SetZoomRange(0, 3);
+    const QString project = fixtures.directory.filePath("raw-session.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", project)) return false;
+    VDQtProjectState saved;
+    QString error;
+    if (!VDQtProjectFile::loadProject(project, &saved, &error)
+        || !check(saved.sourcePath == raw && saved.rawPixelFormat == "rgb24",
+                  "projects save the original raw input, not an ephemeral copy")) return false;
+    const QString prior = active;
+    if (!chooseProjectFile(window, "onFileLoadProject", project)) return false;
+    active = currentMaterialization();
+    if (!check(active != prior && !QFileInfo::exists(prior) && QFileInfo::exists(active)
+               && materializations() == 1, "successful raw project restore releases old and validation leases")) return false;
+
+    // A late project failure must keep the raw source alive for rollback even
+    // though normal replacement closes it before opening the candidate.
+    position->SetZoomRange(0, 3);
+    saved.sourcePath = fixtures.avs; saved.sourcePaths = {fixtures.avs};
+    saved.rawPixelFormat.clear();
+    saved.sourceFrameCount = 48; saved.sourceFrameCountExact = true;
+    saved.timelineExplicit = true; saved.timelineSegments = {{0, 4}};
+    saved.audioDisabled = false; saved.audioStreamIndex = 0;
+    saved.audioSourcePath = fixtures.directory.filePath("raw-rollback-audio.wav");
+    const QString candidate = fixtures.directory.filePath("raw-rollback.vdqproject");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "sine=duration=0.1", "-c:a", "pcm_s16le",
+                          saved.audioSourcePath})
+        || !VDQtProjectFile::saveProject(candidate, saved, &error)) return false;
+    bool removed = false;
+    QTimer disappearing;
+    disappearing.setInterval(0);
+    QObject::connect(&disappearing, &QTimer::timeout, &window, [&] {
+        if (!removed && !position->HasZoomRange()) removed = QFile::remove(saved.audioSourcePath);
+    });
+    disappearing.start();
+    const bool rejected = chooseProjectFile(window, "onFileLoadProject", candidate, true);
+    disappearing.stop();
+    if (!check(removed && rejected && QFileInfo::exists(active) && materializations() == 1
+               && position->GetRangeEnd() == 3 && position->HasZoomRange(),
+               "late project failure restores the still-owned raw source")
+        || !check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
+                  "restored raw source remains previewable")) return false;
+    if (!invoke(window, "onFileClose")
+        || !check(!QFileInfo::exists(active) && materializations() == 0,
+                  "Close removes raw copies after decoder and preview consumers stop")) return false;
+    if (!window.openVideoFile(fixtures.mp4) || !invoke(window, "runPendingJobs")) return false;
+    return check(queue->jobAt(0)->status == VDQtJobStatus::Complete
+                 && materializations() == 0 && readFile(raw) == original,
+                 "offline raw analysis releases its own copy without changing the original input");
+}
+
+bool vfrJump(VDQtTestFixtures& fixtures) {
+    const QString media = fixtures.directory.filePath("jump-vfr.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-frames:v", "3",
+            "-vf", "settb=1/1000,setpts=N*10", "-enc_time_base", "1:1000", "-fps_mode", "passthrough",
+            "-c:v", "ffv1", "-threads", "1", "-an", media})) return false;
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(media)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!position) return false;
+    const auto jump = [&](const QString& text, qint64 expected, const QString& currentTime) {
+        bool answered = false, correctTime = false, blocked = false;
+        QTimer responder;
+        responder.setInterval(5);
+        QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+            auto *dialog = qobject_cast<VDJumpToPositionDialog*>(QApplication::activeModalWidget());
+            if (!dialog || answered) return;
+            answered = true;
+            auto *time = dialog->findChild<QLineEdit*>("jumpFrameTime");
+            correctTime = time && time->text() == currentTime;
+            // A modal dialog dispatches events: source replacement must not
+            // invalidate the borrowed indexed timing callback while it runs.
+            blocked = !window.openVideoFile(fixtures.avs);
+            if (!time) { dialog->reject(); return; }
+            for (auto *radio : dialog->findChildren<QRadioButton*>())
+                if (radio->text().contains("at time")) radio->setChecked(true);
+            time->setText(text);
+            dialog->accept();
+        });
+        responder.start();
+        const bool invoked = invoke(window, "onEditJumpToPosition");
+        responder.stop();
+        return check(invoked && answered && correctTime && blocked && position->GetPosition() == expected,
+                     "real jump dialog uses edited VFR boundaries and holds source ownership");
+    };
+    if (!jump("20 ms", 2, "0:00.000")) return false;
+    QString error;
+    if (!window.runAutomationText("VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(2,1); "
+                                  "VirtualDub.subset.AddRange(0,2);", fixtures.directory.path(), &error)) return false;
+    position->SetPosition(1);
+    return jump("45 ms", 2, "0:00.033");
+}
+
+bool resizeScript(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    QString error;
+    if (!window.runAutomationText("VirtualDub.video.filters.Clear(); VirtualDub.video.filters.Add(\"resize\"); "
+        "VirtualDub.video.filters.instance[0].Config(160,180,0); VirtualDub.video.filters.Add(\"resize\"); "
+        "VirtualDub.video.filters.instance[1].Config(80,99,0,4,3,1,80,99,4,3,0,0,8,0);",
+        fixtures.directory.path(), &error)) return check(false, error.toUtf8().constData());
+    const auto& chain = VDQtFilterSystem::instance().getActiveChain();
+    if (!check(chain.size() == 2 && chain.at(0).params.value("height") == 180
+               && chain.at(1).params.value("width") == 80 && chain.at(1).params.value("height") == 88
+               && chain.at(1).params.value("codecAdjust") == 8,
+               "long resize scripts resolve aspect and alignment against the preceding stage")) return false;
+    if (!window.runAutomationText("VirtualDub.video.filters.instance[1].Config(23,11,0);",
+                                  fixtures.directory.path(), &error)) return false;
+    VDQtVideoDecoder decoder;
+    if (!decoder.openFile(fixtures.mp4)) return false;
+    VDQtFilterSystem filters;
+    filters.replaceActiveChainTransient(VDQtFilterSystem::instance().getActiveChain());
+    return check(filters.processFrame(decoder.getFrameImage(0)).size() == QSize(23, 11),
+                 "short resize signature keeps explicit dimensions and clears prior aspect/alignment controls");
+}
+
+bool externalEncoderLogs(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    const QString script = fixtures.directory.filePath("noisy-encoder.sh");
+    const QByteArray noise = "dd if=/dev/zero bs=65536 count=96 2>/dev/null\n"
+                             "printf 'FINAL_EXTERNAL_ENCODER_DIAGNOSTIC\\n' >&2\n";
+    if (!fixtures.writeText(script, noise + "cp -- \"$1\" \"$2\"\n")) return false;
+    QSettings settings;
+    settings.beginGroup("ExternalEncoderSets/test-noisy");
+    settings.setValue("program", "/bin/sh");
+    settings.setValue("arguments", QString("\"%1\" \"{input}\" \"{output}\"").arg(script));
+    settings.endGroup();
+    QString error;
+    if (!window.runAutomationText("VirtualDub.ExportViaEncoderSet(\"noisy-success.mkv\",\"test-noisy\");",
+                                  fixtures.directory.path(), &error))
+        return check(false, error.toUtf8().constData());
+    VDQtVideoDecoder result;
+    if (!check(result.openFile(fixtures.directory.filePath("noisy-success.mkv"))
+               && !result.getFrameImage(0).isNull(), "verbose external encoder still commits a usable output")) return false;
+    if (!fixtures.writeText(script, noise + "exit 7\n")) return false;
+    return check(!window.runAutomationText("VirtualDub.ExportViaEncoderSet(\"noisy-failure.mkv\",\"test-noisy\");",
+                                          fixtures.directory.path(), &error)
+                 && error.contains("FINAL_EXTERNAL_ENCODER_DIAGNOSTIC")
+                 && error.size() <= 17000
+                 && !QFileInfo::exists(fixtures.directory.filePath("noisy-failure.mkv")),
+                 "external failure retains the final diagnostic without publishing partial output");
 }
 
 bool appendState(VDQtTestFixtures& fixtures) {
@@ -1967,6 +2180,10 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "numeric_json") return jsonIntegerInputs(fixtures);
     if (scenario == "numeric_script") return scriptIntegerInputs(fixtures);
     if (scenario == "append_state") return appendState(fixtures);
+    if (scenario == "raw_lifetime") return rawLifetime(fixtures);
+    if (scenario == "vfr_jump") return vfrJump(fixtures);
+    if (scenario == "resize_script") return resizeScript(fixtures);
+    if (scenario == "external_encoder_logs") return externalEncoderLogs(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);

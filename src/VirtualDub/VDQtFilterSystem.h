@@ -182,6 +182,8 @@ public:
     // call only on the thread that owns this private pipeline.
     struct CacheStatistics {
         qsizetype sixAxisEntries = 0;
+        qsizetype channelLutEntries = 0;
+        qsizetype channelLutBytes = 0;
         qsizetype assetEntries = 0;
         qsizetype assetBytes = 0;
     };
@@ -189,6 +191,7 @@ public:
 
 private:
     QImage failProcessing(const QString& message, const VDFilterInstance *filter = nullptr);
+    QByteArray channelLut(const VDFilterInstance& filter, bool highPrecision);
     VDFilterProcessingError mProcessingError;
     void forgetRuntimeInstances();
     QString runtimeInstanceId(const QString& filterId) const;
@@ -209,6 +212,9 @@ private:
     // Expensive derived data are cached by parameter/asset key and reused
     // across frames. They are intentionally local to this pipeline instance.
     QHash<QString, QByteArray> mSixAxisLutCache;
+    // Exact independent-channel tables, not coarse RGB cube approximations.
+    // Eight 65,536-entry quint16 tables retain at most 1 MiB of table pixels.
+    QHash<QString, QByteArray> mChannelLutCache;
     struct CachedAsset {
         QImage image;
         QString canonicalPath;

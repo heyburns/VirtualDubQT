@@ -11,6 +11,8 @@ Already completed before this checklist
 ---------------------------------------
 [x] Release/sanitizer presets, isolated fixtures and application baselines.
 [x] H01: parallel filter image detachment and allocation-failure handling.
+[ ] H01 follow-up: remaining built-in raw destinations must check failed detach
+    allocations. New restricted-memory probes reproduce Blur and Field Delay crashes.
 [x] H06/H07: guarded source transitions and private running-job pipelines.
 [x] H08/H09: numbered-output approval and recoverable replacement transactions.
 [x] S02/S12: recursive source protection and operation-scoped dependency audits.
@@ -35,7 +37,8 @@ Remaining execution sequence
     Individual AVS/I/O calls are not preemptible.
 [x] M16: complete immutable indexes shared between preview/editor/export/audio
     timing consumers; cold keyframe buttons use actual keyframes, not FPS guesses.
-[ ] Variable-rate jump-to-time (cumulative edited timeline time is now corrected).
+[x] Variable-rate jump-to-time: real cumulative edited boundaries, checked parser
+    arithmetic and a source-owning modal operation scope.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
     hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;
@@ -73,7 +76,10 @@ Remaining execution sequence
     Unsupported floating-point video fails clearly at open, not as a null preview.
 [x] M09: encoder-specific effective codec controls and shared validated arguments.
     Unsupported saved combinations report errors; Fast Recompress remains intact.
-[ ] M13: source/display/export pixel-aspect metadata.
+[x] M13 core: source/per-frame/display/filter/export/server pixel-aspect metadata.
+    Manual view choices remain presentation-only; exact quarter turns reciprocate.
+[ ] M13 plug-in follow-up: VDX bitmap aspect fields and returned-ratio negotiation.
+    Fast Recompress uses demuxer SAR; arbitrary per-frame AVS changes are not scanned.
 [x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
 [x] M21: known numeric conversion defects in saved inputs and runtime calculations.
     Project/job positions, segments and raw offsets now reject unsafe casts,
@@ -95,18 +101,34 @@ Remaining execution sequence
     Wire format remains CFR NUT: sampling can omit short intervals or repeat
     long ones, with less than one output tick of boundary quantization. Existing
     rate conversion/decimation applies; RGB alpha and 16-bit channels are retained.
-[ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.
+[x] S11/P08 core: scoped raw leases, rollback/reopen/job ownership and checked raw/
+    two-pass video space preflight. Original inputs and portable project paths stay intact.
+[ ] P08 follow-up: include coexisting temporary PCM/filtered/concatenated audio in
+    the two-pass availability estimate; write failures remain checked.
 [x] P10: source-owned Close cleanup and bounded, metadata-checked bitmap caches.
 [x] P04 cache substep: reuse immutable six-axis tables across preview restarts.
-[ ] P04/P06/P07/P11: remaining measured filter/display/log/buffer optimizations.
+[x] P04 channel substep: exact bounded Gamma/sRGB/Curves/Levels tables at 8/16 bits.
+[x] P07: continuously drain external encoder diagnostics into a bounded byte ring.
+[x] Queue performance: hashed destination identities replace pairwise filesystem checks.
+[ ] P04/P06/P11: remaining measured filter/display/progress/buffer optimizations.
     Offline audio-device avoidance is already fixed; full playback gains are not implied.
+[ ] Audio EOF follow-up: producer devices must account for QIODevice read-ahead;
+    independent small-read probe stopped with 4096 valid bytes still buffered.
+[ ] Process completion follow-up: guard remaining polling loops when event-pumping
+    callbacks finish their child process before the next waitForFinished call.
 [ ] Progressive MP4/AVS -> ProRes slowdown: representative repeated-cycle profiling;
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
-[ ] M19/C07: correct existing resampling/temporal/warp choices and geometry predictions.
+[x] M19/C07 substep: distinct existing resamplers, precision/alpha/interlaced resizing,
+    shared geometry plans, script alignment and honest conditional table predictions.
+[ ] M19: original temporal/IVTC/interpolation/warp algorithms remain separate work;
+    rate/lookahead contracts and native algorithm parity are not claimed by sizing fixes.
 [x] C06: share identical application/controller-test compilation in a static core.
 [x] C02/C03: temporary preview-menu action ownership and confirmed unused state.
 [ ] C04/C07: remaining duplication, diagnostics and overflow-safe progress.
     Common multi-output transactions and audio-save processing are already extracted.
+    Geometry, native path identity and process diagnostic helpers are now also shared.
+[ ] Waveform follow-up: assemble selections across cuts/reordering, show actual
+    resampled WAV rate, stream peaks with bounded memory and handle float64 explicitly.
 [x] Q03 follow-up: repeatable real-binary MP4/AVS decode/export smoke test.
 [x] Q02: accurate CMake minimum, Release instructions and optimized default builds.
 [x] Q01: native-package command dependencies and bundled AppImage ffmpeg/ffprobe.
@@ -120,6 +142,11 @@ Remaining execution sequence
     runtime/plugin compatibility separately; no plugins/system files were changed.
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
+
+Latest verified checkpoint: Release 78/78, ASan/UBSan 74/74 and independently
+rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. VFR packed RGB24,
+RGBA8 and RGBA16 round trips now compare exact pixels and timestamps. This does
+not resolve the unchecked follow-ups above.
 
 Checkpoint evidence and limitations live in docs/TESTING.txt.
 Do not remove working features or legacy ABI/reference source as a cleanup shortcut.

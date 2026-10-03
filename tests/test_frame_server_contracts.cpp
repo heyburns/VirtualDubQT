@@ -3,6 +3,7 @@
 #include "VirtualDub/VDQtFrameServer.h"
 #include "VirtualDub/VDQtVideoDecoder.h"
 #include "VirtualDub/VDQtTimingMath.h"
+#include "VirtualDub/VDQtVideoAspect.h"
 #include "support/VDQtTestFixtures.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -90,7 +91,7 @@ bool servedTimingAndPrecision(VDQtTestFixtures& fixtures) {
     bool passed = true;
     const QString vfr = fixtures.directory.filePath("short-vfr.mkv");
     if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-frames:v", "3",
-            "-vf", "settb=1/1000,setpts=N*10", "-enc_time_base", "1:1000", "-fps_mode", "passthrough",
+            "-vf", "settb=1/1000,setpts=N*10,setsar=4/3", "-enc_time_base", "1:1000", "-fps_mode", "passthrough",
             "-c:v", "ffv1", "-threads", "1", "-an", vfr})) return false;
     VDQtVideoDecoder source;
     if (!source.openFile(vfr) || !source.ensureFrameIndex().errorMessage.isEmpty()) return false;
@@ -105,6 +106,8 @@ bool servedTimingAndPrecision(VDQtTestFixtures& fixtures) {
     VDQtVideoDecoder received;
     if (!received.openFile(output) || !received.ensureFrameIndex().errorMessage.isEmpty()) return false;
     passed &= check(received.getFrameCount() == 2, "short VFR frames do not each force a CFR output tick");
+    passed &= check(av_cmp_q(VDQtImageSampleAspectRatio(received.getFrameImage(0)), AVRational{4, 3}) == 0,
+                    "frame serving retains non-square sample aspect metadata in NUT");
     passed &= check(received.getFrameImage(0).convertToFormat(QImage::Format_RGB888)
         == source.getFrameImage(0).convertToFormat(QImage::Format_RGB888)
         && received.getFrameImage(1).convertToFormat(QImage::Format_RGB888)
