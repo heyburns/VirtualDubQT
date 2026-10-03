@@ -308,3 +308,24 @@ Validation: Release log/source/provisional-playback/CLI smoke checks passed (4/4
 sanitizer log/source/provisional-playback checks passed (3/3). The rebuilt regular
 build/VirtualDubQt also passed generated-processing.vcf with isolated settings.
 This repairs the extra observation recorded above; no user process was restarted.
+
+Failed session recovery (H11)
+----------------------------
+
+operation_recovery drives the real startup question and project loader with a
+valid saved edit list whose verified source length no longer matches. Its bytes
+must survive failed restoration, opening another source, the actual thirty-second
+timer callback (dispatched without waiting), File Close and accepted window Close.
+It then recreates the editor to test explicit discard and successful restoration.
+All snapshots and settings are disposable; the repaired log lifetime enables this
+real multi-window-lifetime check in one test process.
+
+Inherited snapshots are protected before any source teardown or event dispatch.
+Only successful restore or an explicit No consumes them. A failed restore pauses
+new snapshot writes and logs/displays the saved path and manual-save guidance,
+so the sole recovery record cannot be silently overwritten by a new session.
+Multi-instance ownership and fully transactional project restoration remain open.
+
+Validation: Release recovery/empty/source/log/CLI checks passed (5/5); equivalent
+sanitizer controller checks passed (4/4). Regular build/VirtualDubQt rebuilt and
+passed generated-processing.vcf under isolated configuration/data directories.

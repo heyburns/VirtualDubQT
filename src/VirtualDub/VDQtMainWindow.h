@@ -292,6 +292,9 @@ private:
     QTimer *mPlaybackTimer;
     QTimer *mRecoveryTimer = nullptr;
     QString mRecoveryPath;
+    // An inherited recovery record is protected until successful restoration or
+    // explicit discard. Source switches, timers and a clean exit are not discard.
+    bool mRecoverySnapshotProtected = false;
     QElapsedTimer mPlaybackElapsedTimer;
     int mPlaybackStartFrame = 0;
     int mPlaybackPausedFrame = -1;

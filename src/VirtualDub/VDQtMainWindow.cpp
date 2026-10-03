@@ -505,6 +505,7 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
             QDir(queueDirectory).filePath(QStringLiteral("VirtualDub.vdqjobs")));
         mRecoveryPath = QDir(queueDirectory).filePath(
             QStringLiteral("crash-recovery.vdqproject"));
+        mRecoverySnapshotProtected = QFileInfo::exists(mRecoveryPath);
     }
     connect(mJobQueue, &VDQtJobQueue::runRequested,
             this, &VDQtMainWindow::runPendingJobs);
@@ -589,13 +590,30 @@ VDQtMainWindow::VDQtMainWindow(QWidget *parent)
             QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
         if (answer == QMessageBox::Yes) {
             if (loadProjectFile(mRecoveryPath)) {
+                mRecoverySnapshotProtected = false;
                 mCurrentProjectPath.clear();
                 statusBar()->showMessage(
                     QStringLiteral("Recovered the previous editing session. "
                                    "Use Save Project As to keep it."));
+            } else {
+                const QString message = QStringLiteral(
+                    "Recovery could not be completed. The original snapshot is preserved at %1. "
+                    "Save the current session as a project; automatic recovery saving is paused "
+                    "until the original snapshot is recovered or explicitly discarded.").arg(mRecoveryPath);
+                VDLogWindow::instance(this)->appendLog(QStringLiteral("[Recovery] ") + message);
+                statusBar()->showMessage(message);
+                return;
             }
+        } else if (answer == QMessageBox::No) {
+            mRecoverySnapshotProtected = false;
+        } else {
+            return;
         }
-        QFile::remove(mRecoveryPath);
+        if (!QFile::remove(mRecoveryPath) && QFileInfo::exists(mRecoveryPath)) {
+            mRecoverySnapshotProtected = true;
+            VDLogWindow::instance(this)->appendLog(
+                QStringLiteral("[Recovery] Could not remove the consumed snapshot: %1").arg(mRecoveryPath));
+        }
     });
 
     qApp->installEventFilter(this);
@@ -1466,7 +1484,7 @@ void VDQtMainWindow::releaseVideoSource() {
     mAudioSourcePath.clear();
     mAudioStreamIndex = -1;
     mAudioDisabled = false;
-    if (!mRecoveryPath.isEmpty()) QFile::remove(mRecoveryPath);
+    if (!mRecoverySnapshotProtected && !mRecoveryPath.isEmpty()) QFile::remove(mRecoveryPath);
     updateEditActions();
     statusBar()->showMessage("No Video File Loaded");
     VDLogWindow::instance(this)->appendLog("[File] Closed current video session.");
@@ -1587,7 +1605,7 @@ VDQtProjectState VDQtMainWindow::captureProjectState() const {
 }
 
 void VDQtMainWindow::saveRecoverySnapshot() {
-    if (mAutomationUnattended || !mVideoDecoder.isOpen()
+    if (mRecoverySnapshotProtected || mAutomationUnattended || !mVideoDecoder.isOpen()
         || mRecoveryPath.isEmpty()) return;
     QString error;
     if (!VDQtProjectFile::saveProject(
@@ -5212,7 +5230,7 @@ void VDQtMainWindow::closeEvent(QCloseEvent *event) {
     QMainWindow::closeEvent(event);
     if (event->isAccepted()) {
         if (mRecoveryTimer) mRecoveryTimer->stop();
-        if (!mRecoveryPath.isEmpty()) QFile::remove(mRecoveryPath);
+        if (!mRecoverySnapshotProtected && !mRecoveryPath.isEmpty()) QFile::remove(mRecoveryPath);
     }
 }
 

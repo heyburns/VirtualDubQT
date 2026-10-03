@@ -6,6 +6,7 @@
 #include "VirtualDub/VDQtFrameServer.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -14,6 +15,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPointer>
+#include <QStandardPaths>
 #include <QThread>
 #include <QtEndian>
 #include <iostream>
@@ -105,6 +107,82 @@ bool logLifetime() {
                        "live editor reuses its log dialog")) return false;
         }
         if (!check(log.isNull(), "editor destruction deletes the parent-owned log")) return false;
+    }
+    return true;
+}
+
+bool recoveryRetention(VDQtTestFixtures& fixtures) {
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (!QDir().mkpath(directory)) return false;
+    const QString recovery = QDir(directory).filePath("crash-recovery.vdqproject");
+    VDQtProjectState project;
+    project.sourcePath = fixtures.avs;
+    project.sourcePaths = {fixtures.avs};
+    project.audioDisabled = true;
+    project.sourceFrameCount = 100; // Source really has 48: fails after old loader opens it.
+    project.sourceFrameCountExact = true;
+    project.timelineExplicit = true;
+    project.timelineSegments = {{0, 8}};
+    QString error;
+    if (!VDQtProjectFile::saveProject(recovery, project, &error)) return false;
+    const QByteArray original = readFile(recovery);
+    bool asked = false;
+    int failures = 0;
+    QMessageBox::StandardButton decision = QMessageBox::Yes;
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, qApp, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *message = qobject_cast<QMessageBox*>(widget);
+            if (!message || !message->isVisible()) continue;
+            if (message->windowTitle() == "Recover Editing Session?") {
+                asked = true;
+                message->button(decision)->click();
+            } else {
+                ++failures;
+                message->accept();
+            }
+        }
+    });
+    responder.start();
+    {
+        VDQtMainWindow window;
+        window.show();
+        const bool recoveryFailed = waitFor([&] { return asked && failures > 0; });
+        if (!recoveryFailed) std::cerr << "Recovery: asked=" << asked << ", failures=" << failures
+                                     << ", snapshot exists=" << QFile::exists(recovery) << '\n';
+        if (!check(recoveryFailed,
+                   "saved invalid frame references reach the real recovery failure path")
+            || !check(readFile(recovery) == original, "failed recovery preserves its original snapshot")) return false;
+        if (!window.openVideoFile(fixtures.mp4)) return false;
+        // Dispatch the actual autosave callback without waiting thirty seconds.
+        for (QTimer *timer : window.findChildren<QTimer*>()) {
+            if (timer->interval() == 30000)
+                QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+        }
+        if (!check(readFile(recovery) == original, "new session autosave cannot overwrite failed recovery")) return false;
+        invoke(window, "onFileClose");
+        window.close();
+        if (!check(readFile(recovery) == original,
+                   "source and application Close cannot delete failed recovery")) return false;
+    }
+    asked = false; decision = QMessageBox::No;
+    {
+        VDQtMainWindow window;
+        if (!check(waitFor([&] { return asked; }) && !QFile::exists(recovery),
+                   "explicit recovery discard removes the saved snapshot")) return false;
+    }
+    project.sourceFrameCount = 48;
+    if (!VDQtProjectFile::saveProject(recovery, project, &error)) return false;
+    asked = false; failures = 0; decision = QMessageBox::Yes;
+    {
+        VDQtMainWindow window;
+        window.show();
+        if (!check(waitFor([&] { return asked; }) && failures == 0 && !QFile::exists(recovery),
+                   "successful recovery consumes its snapshot only after restoration")) return false;
+        const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+        if (!check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
+                   "successfully recovered source still previews")) return false;
     }
     return true;
 }
@@ -739,6 +817,7 @@ bool sourceProtection(VDQtTestFixtures& fixtures) {
 
 bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
     if (scenario == "log_lifetime") return logLifetime();
+    if (scenario == "recovery") return recoveryRetention(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);
