@@ -73,7 +73,6 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
-    void buildContextMenu();
     QSize calculateScaledSize() const;
 
     QString mTitle;

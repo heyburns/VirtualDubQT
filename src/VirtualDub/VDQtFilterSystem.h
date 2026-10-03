@@ -195,7 +195,6 @@ private:
     struct TemporalState {
         qint64 lastFrameNumber = -1;
         QImage previousFrame;
-        QList<QImage> history;
     };
 
     QList<VDFilterInstance> mActiveChain;

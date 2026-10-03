@@ -72,8 +72,6 @@ public:
         QString videoCodecOverride;
         QString videoPixelFormatOverride;
         int animationLoopCount = 0;
-        bool animationAlpha = true;
-        bool animationGrayscale = false;
         QMap<QString, QString> metadata;
         // Conservatively copies a clean GOP-aligned range and otherwise falls
         // back to the selected recompression mode for frame-exact output.

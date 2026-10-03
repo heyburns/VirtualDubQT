@@ -200,7 +200,6 @@ private:
     FrameCountStatus mFrameCountStatus;
     double mFps;
     int mVideoStreamIndex;
-    int64_t mDuration;
 
     // FFmpeg ownership. Frames/packets belong exclusively to this decoder.
     AVFormatContext *mFormatCtx;

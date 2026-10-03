@@ -1282,7 +1282,6 @@ public:
             QMutexLocker locker(&mMutex);
             mBuffer.clear();
             mBufferOffset = 0;
-            mBaseOutputSample = outputSample;
             mBaseSample = sample;
             mProducedOutputSample = outputSample;
             mBytesDelivered = 0;
@@ -1611,7 +1610,6 @@ private:
     int mSourceRate = 0;
     int mOutputRate = 0;
     int64_t mTotalOutputSamples = 0;
-    int64_t mBaseOutputSample = 0;
     int64_t mBaseSample = 0;
     int64_t mProducedOutputSample = 0;
     int64_t mBytesDelivered = 0;

@@ -886,6 +886,25 @@ audio-export contracts, inclusion, snapshot, safety, queue, controller and
 stabilization cases. The rebuilt regular app independently passed real
 MP4/native-AVS decode/export smoke. Physical listening is not claimed.
 
+Preview menu ownership and unused state (C02/C03)
+-----------------------------------------------
+
+The menu-lifetime test failed before repair: four empty action groups survived
+each context menu until the display widget was destroyed. Groups now belong to
+their short-lived submenus. Twenty actual menu opens check exclusive selected
+actions, functioning zoom changes and no surviving groups after each close.
+
+Removed only reference-checked state: an unused temporal history list, decoder
+duration field, audio-device base cursor, redundant animation flags/assignments
+and an undeclared display-menu builder. Animation alpha/grayscale still use the
+actual pixel-format choice; real decoder EOF duration and audio cursor logic
+remain intact. The log-lifetime test now separates pointer validation from weak
+pointer ownership, eliminating its misleading null-dereference warning.
+
+Validation: full Release 51/51 and ASan/UBSan 47/47 passed, including menu,
+animation, source, audio and EOF regressions. The rebuilt regular binary passed
+actual MP4/native-AVS decode/export smoke. Physical audio/capture are excluded.
+
 Masked playback picture/audio separation
 ---------------------------------------
 

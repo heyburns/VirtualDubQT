@@ -217,7 +217,7 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
     // ZOOM SUBMENU
     // -------------------------------------------------------------------------
     QMenu *zoomMenu = menu.addMenu("Zoom");
-    QActionGroup *zoomGroup = new QActionGroup(this);
+    QActionGroup *zoomGroup = new QActionGroup(zoomMenu);
 
     struct ZoomOption { QString label; double ratio; };
     ZoomOption zoomOpts[] = {
@@ -250,7 +250,7 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
     // ASPECT RATIO SUBMENU
     // -------------------------------------------------------------------------
     QMenu *arMenu = menu.addMenu("Aspect Ratio");
-    QActionGroup *arGroup = new QActionGroup(this);
+    QActionGroup *arGroup = new QActionGroup(arMenu);
 
     struct AROption { QString label; AspectRatioMode mode; };
     AROption arOpts[] = {
@@ -286,7 +286,7 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
     // PREFERRED FILTER SUBMENU
     // -------------------------------------------------------------------------
     QMenu *filterMenu = menu.addMenu("Preferred filter");
-    QActionGroup *filterGroup = new QActionGroup(this);
+    QActionGroup *filterGroup = new QActionGroup(filterMenu);
 
     struct FilterOption { QString label; FilterMode mode; };
     FilterOption filterOpts[] = {
@@ -313,7 +313,7 @@ void VDVideoDisplayWidget::contextMenuEvent(QContextMenuEvent *event) {
     // DISPLAY MODE SUBMENU
     // -------------------------------------------------------------------------
     QMenu *dispMenu = menu.addMenu("Display mode");
-    QActionGroup *dispGroup = new QActionGroup(this);
+    QActionGroup *dispGroup = new QActionGroup(dispMenu);
 
     struct DispOption { QString label; DisplayMode mode; };
     DispOption dispOpts[] = {

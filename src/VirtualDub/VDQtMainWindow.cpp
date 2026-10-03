@@ -2548,8 +2548,6 @@ bool VDQtMainWindow::exportAutomationVideo(const QString& outputPath,
                               : QStringLiteral("rgb24"));
         options.containerType = QStringLiteral("apng");
         options.animationLoopCount = animationLoopCount;
-        options.animationAlpha = animationAlpha;
-        options.animationGrayscale = animationGrayscale;
     }
     options.unattended = mAutomationUnattended;
     VDQtVideoExporter exporter;
@@ -6103,8 +6101,6 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     options.containerType = animatedPng ? QStringLiteral("apng")
                                         : QStringLiteral("gif");
     options.animationLoopCount = loopCount->value();
-    options.animationAlpha = preserveAlpha && preserveAlpha->isChecked();
-    options.animationGrayscale = grayscale && grayscale->isChecked();
     options.metadata = mTextMetadata;
     options.protectedSourcePaths = mTimelineSources;
     options.timelineExplicit = mTimeline.isModified();

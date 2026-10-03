@@ -77,8 +77,9 @@ Remaining execution sequence
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
 [ ] M19/C07: correct existing resampling/temporal/warp choices and geometry predictions.
 [x] C06: share identical application/controller-test compilation in a static core.
-[ ] C02/C03/C04/C07: confirmed unused state, menu ownership, duplication, diagnostics
-    and overflow-safe progress. Common multi-output transactions are already extracted.
+[x] C02/C03: temporary preview-menu action ownership and confirmed unused state.
+[ ] C04/C07: remaining duplication, diagnostics and overflow-safe progress.
+    Common multi-output transactions and audio-save processing are already extracted.
 [x] Q03 follow-up: repeatable real-binary MP4/AVS decode/export smoke test.
 [x] Q02: accurate CMake minimum, Release instructions and optimized default builds.
 [ ] Q01/Q03: command-tool packaging, PR CI and clean

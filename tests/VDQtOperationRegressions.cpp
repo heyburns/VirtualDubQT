@@ -109,8 +109,10 @@ bool logLifetime() {
         QPointer<VDLogWindow> log;
         {
             QWidget owner;
-            log = VDLogWindow::instance(&owner);
-            if (!check(log && log->parentWidget() == &owner,
+            VDLogWindow *created = VDLogWindow::instance(&owner);
+            if (!created) return check(false, "log dialog is created");
+            log = created;
+            if (!check(created->parentWidget() == &owner,
                        "new log dialog belongs to the current editor")) return false;
             log->appendLog(QStringLiteral("lifetime regression"));
             if (!check(VDLogWindow::instance(&owner) == log,
@@ -845,6 +847,7 @@ bool audioExportContracts(VDQtTestFixtures& fixtures) {
     QObject::connect(&responder, &QTimer::timeout, &window, [&] {
         for (QWidget *widget : QApplication::topLevelWidgets()) {
             if (auto *dialog = qobject_cast<VDSaveAudioDialog*>(widget); dialog && dialog->isVisible()) {
+                if (deadline.elapsed() > 5000) { failed = true; dialog->reject(); continue; }
                 if (!dialog->property("testChosen").toBool()) {
                     dialog->setProperty("testChosen", true);
                     const auto lines = dialog->findChildren<QLineEdit*>();

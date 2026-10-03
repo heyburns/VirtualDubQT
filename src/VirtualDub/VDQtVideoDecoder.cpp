@@ -254,7 +254,6 @@ VDQtVideoDecoder::VDQtVideoDecoder()
       mFrameCountStatus(FrameCountStatus::Unknown),
       mFps(0.0),
       mVideoStreamIndex(-1),
-      mDuration(AV_NOPTS_VALUE),
       mFormatCtx(nullptr),
       mCodecCtx(nullptr),
       mSwsCtx(nullptr),
@@ -855,10 +854,6 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     mFps = isUsableFrameRate(frameRate) ? av_q2d(frameRate) : 0.0;
     mFrameCount = frameCount;
     mFrameCountStatus = frameCountStatus;
-    mDuration = videoStream->duration;
-    if (mDuration == AV_NOPTS_VALUE && mFormatCtx->duration != AV_NOPTS_VALUE) {
-        mDuration = av_rescale_q(mFormatCtx->duration, AV_TIME_BASE_Q, videoStream->time_base);
-    }
     mStreamStartTimestamp = streamStartTimestamp;
     mSourceBitDepth = sourceBitDepth;
     mSourceHasAlpha = sourceHasAlpha;
@@ -996,7 +991,6 @@ void VDQtVideoDecoder::close() {
     mFrameCountStatus = FrameCountStatus::Unknown;
     mFps = 0.0;
     mVideoStreamIndex = -1;
-    mDuration = AV_NOPTS_VALUE;
     mSourceBitDepth = 8;
     mSourceHasAlpha = false;
     mOutputPixelFormat = AV_PIX_FMT_RGB24;
