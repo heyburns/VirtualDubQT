@@ -41,6 +41,7 @@ VDVideoDisplayWidget::VDVideoDisplayWidget(const QString& title, QWidget *parent
 
 void VDVideoDisplayWidget::setFrameImage(const QImage& img) {
     mFrameImage = img;
+    if (img.isNull()) mScaledFrameCache.clear();
     // Let Qt coalesce obsolete paints when playback or scrubbing produces
     // frames faster than the display can refresh.
     update();
@@ -53,6 +54,7 @@ void VDVideoDisplayWidget::setLabelText(const QString& text) {
 
 void VDVideoDisplayWidget::clearDisplay() {
     mFrameImage = QImage();
+    mScaledFrameCache.clear();
     mInfoText = "No Video Loaded";
     mPanOffset = QPoint(0, 0);
     update();
@@ -179,13 +181,9 @@ void VDVideoDisplayWidget::paintEvent(QPaintEvent *event) {
         // QImage with the output display or other read-only consumers.
         QSize drawSize = calculateScaledSize();
 
-        QImage renderImg = mFrameImage;
-        if (mDisplayMode == DisplayMode::AlphaOnly && mFrameImage.hasAlphaChannel()) {
-            renderImg = mFrameImage.convertToFormat(QImage::Format_Alpha8);
-        }
-
         Qt::TransformationMode transformMode = (mFilterMode == FilterMode::Point) ? Qt::FastTransformation : Qt::SmoothTransformation;
-        QImage scaled = renderImg.scaled(drawSize, Qt::IgnoreAspectRatio, transformMode);
+        const QImage scaled = mScaledFrameCache.render(mFrameImage, drawSize,
+            mDisplayMode == DisplayMode::AlphaOnly, transformMode);
 
         int x = (width() - scaled.width()) / 2 + mPanOffset.x();
         int y = (height() - scaled.height()) / 2 + mPanOffset.y();

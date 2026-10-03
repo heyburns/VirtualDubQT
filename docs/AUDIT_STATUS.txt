@@ -11,8 +11,9 @@ Already completed before this checklist
 ---------------------------------------
 [x] Release/sanitizer presets, isolated fixtures and application baselines.
 [x] H01: parallel filter image detachment and allocation-failure handling.
-[ ] H01 follow-up: remaining built-in raw destinations must check failed detach
-    allocations. New restricted-memory probes reproduce Blur and Field Delay crashes.
+[x] H01 follow-up: check every built-in write destination before raw rows/painters.
+    Previously crashing Blur/Field Delay probes and all 100 restricted-memory
+    paths now report named failures, preserve callers and recover after allocation.
 [x] H06/H07: guarded source transitions and private running-job pipelines.
 [x] H08/H09: numbered-output approval and recoverable replacement transactions.
 [x] S02/S12: recursive source protection and operation-scoped dependency audits.
@@ -64,6 +65,13 @@ Remaining execution sequence
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
 [x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
     Effects run once after edit assembly; source precision is retained until encoding.
+[ ] Newly reproduced video-audio follow-up: edited video preparation and the
+    direct AudioPlayer multi-range helper still render effects before each cut
+    is concatenated. A Chorus reference differs exactly at the first cut.
+    Join source-precision PCM first, then run the captured effects once; preserve
+    final video/audio timing and codec choices. Filtered intermediates currently
+    force 16/24-bit WAVs before a requested 32-bit final encode. Audio preparation
+    must also forward the outer queue-abort callback, not only its local dialog.
 [x] M14/M15: matching audio effects and device-boundary conversion without bypass.
     All ten effects, EOF tails, seek resets and supported sink formats tested
     with PCM fixtures; physical listening/device negotiation remains a hardware gate.
@@ -103,19 +111,25 @@ Remaining execution sequence
     rate conversion/decimation applies; RGB alpha and 16-bit channels are retained.
 [x] S11/P08 core: scoped raw leases, rollback/reopen/job ownership and checked raw/
     two-pass video space preflight. Original inputs and portable project paths stay intact.
-[ ] P08 follow-up: include coexisting temporary PCM/filtered/concatenated audio in
+[x] P08 follow-up: include coexisting temporary PCM/filtered/concatenated audio in
     the two-pass availability estimate; write failures remain checked.
 [x] P10: source-owned Close cleanup and bounded, metadata-checked bitmap caches.
 [x] P04 cache substep: reuse immutable six-axis tables across preview restarts.
 [x] P04 channel substep: exact bounded Gamma/sRGB/Curves/Levels tables at 8/16 bits.
 [x] P07: continuously drain external encoder diagnostics into a bounded byte ring.
 [x] Queue performance: hashed destination identities replace pairwise filesystem checks.
-[ ] P04/P06/P11: remaining measured filter/display/progress/buffer optimizations.
+[x] P06 display/progress: bounded exact scaled-image reuse, throttled presentation,
+    per-input cancellation and forced last edited export frame.
+[x] P11 measurement: bounded primed native-AVS pulls measured p99 27.04 us;
+    no evidence justifies a speculative buffer rewrite. Hardware remains separate.
+[ ] P04 remaining measured filter work: improve Blur's strided vertical access;
+    benchmark other kernels before changing precision or thread budgets.
     Offline audio-device avoidance is already fixed; full playback gains are not implied.
-[ ] Audio EOF follow-up: producer devices must account for QIODevice read-ahead;
-    independent small-read probe stopped with 4096 valid bytes still buffered.
-[ ] Process completion follow-up: guard remaining polling loops when event-pumping
-    callbacks finish their child process before the next waitForFinished call.
+[x] Audio EOF follow-up: both producers include QIODevice read-ahead in EOF;
+    exact byte totals, tiny/unaligned reads, restarts and seek-to-EOF now pass.
+[x] Process completion follow-up: state-aware remaining polling loops when
+    event-pumping callbacks finish children; real audio waiters have a bounded
+    regression reproducing the former repeated-callback/cancellation failure.
 [ ] Progressive MP4/AVS -> ProRes slowdown: representative repeated-cycle profiling;
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
 [x] M19/C07 substep: distinct existing resamplers, precision/alpha/interlaced resizing,
@@ -127,8 +141,9 @@ Remaining execution sequence
 [ ] C04/C07: remaining duplication, diagnostics and overflow-safe progress.
     Common multi-output transactions and audio-save processing are already extracted.
     Geometry, native path identity and process diagnostic helpers are now also shared.
-[ ] Waveform follow-up: assemble selections across cuts/reordering, show actual
-    resampled WAV rate, stream peaks with bounded memory and handle float64 explicitly.
+[x] Waveform follow-up: ordered edits/masks, rendered duration/rate/precision,
+    bounded RIFF/RF64/float64 peaks, finite video windows and actual audio EOF.
+    Cancellation survives phase completion; genuine failures remain visible.
 [x] Q03 follow-up: repeatable real-binary MP4/AVS decode/export smoke test.
 [x] Q02: accurate CMake minimum, Release instructions and optimized default builds.
 [x] Q01: native-package command dependencies and bundled AppImage ffmpeg/ffprobe.
@@ -143,10 +158,11 @@ Remaining execution sequence
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
 
-Latest verified checkpoint: Release 78/78, ASan/UBSan 74/74 and independently
-rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. VFR packed RGB24,
-RGBA8 and RGBA16 round trips now compare exact pixels and timestamps. This does
-not resolve the unchecked follow-ups above.
+Latest verified checkpoint: Release 183/183, ASan/UBSan 79/79 and independently
+rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. This includes
+100 native allocation-failure cases and actual waveform/export-preview dialogs.
+VFR packed RGB24, RGBA8 and RGBA16 round trips compare exact pixels/timestamps.
+This does not resolve the unchecked follow-ups above.
 
 Checkpoint evidence and limitations live in docs/TESTING.txt.
 Do not remove working features or legacy ABI/reference source as a cleanup shortcut.

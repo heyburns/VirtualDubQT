@@ -398,6 +398,31 @@ if (BUILD_TESTING)
         LABELS "encoder;export;dialog;contracts" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
 
+    add_executable(export_efficiency_tests tests/test_export_efficiency.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(export_efficiency_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(export_efficiency_tests)
+    add_test(NAME export_efficiency_tests COMMAND export_efficiency_tests)
+    set_tests_properties(export_efficiency_tests PROPERTIES
+        LABELS "export;display;performance;storage;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    add_executable(waveform_contract_tests tests/test_waveform_contracts.cpp)
+    target_include_directories(waveform_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(waveform_contract_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(waveform_contract_tests)
+    add_test(NAME waveform_contract_tests COMMAND waveform_contract_tests)
+    set_tests_properties(waveform_contract_tests PROPERTIES
+        LABELS "audio;waveform;contracts;resources" TIMEOUT 30)
+
+    add_executable(process_completion_tests tests/test_process_completion.cpp)
+    target_link_libraries(process_completion_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(process_completion_tests)
+    add_test(NAME process_completion_tests COMMAND process_completion_tests)
+    set_tests_properties(process_completion_tests PROPERTIES
+        LABELS "audio;process;regression;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if (Python3_Interpreter_FOUND)
         add_test(NAME package_runtime_contract_tests
@@ -407,7 +432,7 @@ if (BUILD_TESTING)
             LABELS "packaging;runtime;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -598,6 +623,30 @@ if (BUILD_TESTING)
                 LABELS "filters;memory;allocation" TIMEOUT 30)
         endif()
     endforeach()
+
+    # Address-space fault injection deliberately excludes sanitizers: their
+    # shadow mappings make a native RLIMIT_AS budget unsuitable. Run each
+    # filter/precision in its own process so one crash cannot hide later cases.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ENABLE_SANITIZERS)
+        add_executable(filter_allocation_tests tests/test_filter_allocation.cpp)
+        target_link_libraries(filter_allocation_tests PRIVATE vdqt_core)
+        vdqt_enable_diagnostics(filter_allocation_tests)
+        foreach(allocation_case IN ITEMS
+                sixaxis bob resize rotate fliph flipv brightness grayscale invert blur sharpen
+                deinterlace emboss fieldswap hsv levels threshold posterize gamma smoother crop
+                chromashift pixelate fill canvas curves chromasmoother fielddelay gammacorrect
+                interlace interpolate motion temporal ivtc television warpsharp drawtext drawtime
+                perspective reduce reducehq rotate2 warpresize logo convert
+                resize_interlaced resize_framed rotate2_cropped opacity clipping)
+            foreach(allocation_depth IN ITEMS 8 16)
+                add_test(NAME filter_destination_allocation_${allocation_case}_${allocation_depth}
+                    COMMAND filter_allocation_tests ${allocation_case} ${allocation_depth})
+                set_tests_properties(filter_destination_allocation_${allocation_case}_${allocation_depth}
+                    PROPERTIES LABELS "filters;memory;allocation" TIMEOUT 60
+                    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+            endforeach()
+        endforeach()
+    endif()
 
     # Build a real shared VDX module rather than mocking the dlopen ABI.
     add_library(vdqt_test_plugin MODULE

@@ -10,9 +10,10 @@
 #include <QContextMenuEvent>
 #include <QMouseEvent>
 #include <QPoint>
+#include "VDQtDisplayImageCache.h"
 
 // One of the main window's input/output preview panes. The widget owns a
-// detached QImage and handles presentation only: zoom, pixel aspect ratio,
+// implicitly shared QImage and handles presentation only: zoom, pixel aspect ratio,
 // alpha visualization, interpolation, and panning. Decoding and filtering must
 // stay outside paintEvent so exposing/resizing the window remains inexpensive.
 class VDVideoDisplayWidget : public QWidget {
@@ -78,6 +79,7 @@ private:
     QString mTitle;
     QString mInfoText;
     QImage mFrameImage;
+    VDQtDisplayImageCache mScaledFrameCache;
 
     double mZoomLevel; // -1.0 = fit image to available widget area.
     AspectRatioMode mAspectRatioMode;

@@ -148,13 +148,17 @@ public:
 
     QString getAudioLayoutString() const;
     QString getAudioCompressionString() const;
+    // false keeps the requested count as a hard cap but skips artificial EOF
+    // tail padding; it does not remove silence belonging to timestamp gaps.
     bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr,
-                           const QList<VDAudioFilterInstance> *filterChain = nullptr);
+                           const QList<VDAudioFilterInstance> *filterChain = nullptr,
+                           bool padToRequestedLength = true);
     bool exportAudioRangesToFile(
         const QString& outputPath,
         const QList<QPair<int64_t, int64_t>>& sampleRanges,
         std::function<bool(int progress, int total)> progressCallback = nullptr,
-        const QList<VDAudioFilterInstance> *filterChain = nullptr);
+        const QList<VDAudioFilterInstance> *filterChain = nullptr,
+        bool padToRequestedLength = true);
 
 #ifdef VDQT_AUDIO_TESTING
     bool lastExportUsedSeekForTesting() const { return mLastExportUsedSeek; }
@@ -202,6 +206,10 @@ private:
 };
 
 #ifdef VDQT_AUDIO_TESTING
+bool VDQtRunAudioEofRegression(const QString& filePath, int64_t expectedSampleFrames,
+                              QString *errorMessage);
+bool VDQtRunAvsAudioEofRegression(AVS_Clip *clip, const AVS_VideoInfo *vi,
+                                 QString *errorMessage);
 bool VDQtRunAudioBufferRegression(const QString& filePath, QString *errorMessage);
 bool VDQtRunAudioDecodeAheadDeadlineRegression(const QString& filePath, QString *errorMessage);
 bool VDQtRunAudioRapidSeekRegression(const QString& filePath,

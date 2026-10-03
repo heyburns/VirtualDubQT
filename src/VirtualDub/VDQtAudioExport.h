@@ -1,6 +1,7 @@
 #ifndef VDQT_AUDIO_EXPORT_H
 #define VDQT_AUDIO_EXPORT_H
 
+#include <QString>
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtTimeline.h"
@@ -19,6 +20,10 @@ struct VDQtAudioExportRequest {
     VDAudioCodecParams codec;
     QList<VDAudioFilterInstance> filters;
     QList<QPair<int64_t, int64_t>> sampleRanges;
+    // Video exports retain their requested soundtrack length by padding EOF.
+    // Audio-only waveform windows instead stop at the actual source EOF.
+    // Real timestamp gaps remain silence in either case.
+    bool padToRequestedLength = true;
 };
 
 // Empty edits mean source identity. An explicitly empty timeline must be

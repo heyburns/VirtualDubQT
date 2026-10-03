@@ -228,6 +228,10 @@ the serialized filter ID. Reset, replacement, and destruction release only that
 pipeline's instances; identical IDs in another preview/export pipeline remain
 independent. Destination image storage is detached before parallel row tasks
 start, and every task completes before its image owner can be released.
+Every actual built-in image mutation checks the allocation/detach result before
+using raw rows or starting a painter. A null allocation raises a controlled
+failure at the pipeline boundary, not a dereference inside a worker. Read-only
+and no-op stages retain their inexpensive implicit sharing.
 
 Field Delay/Interlace history retains the incoming stage frame, not an output
 already containing a copied old field. Recursive blend/smoother history instead
@@ -338,6 +342,11 @@ the held picture's mapping would repeatedly rewind sound inside a mask. The
 decode worker likewise reports the advancing interval's duration in both plain
 Play and Play Preview. Physical listening remains a separate validation gate.
 
+Audio producer EOF and delivery EOF are different: Qt's `QIODevice` can still
+hold private read-ahead after the decoder and producer buffer have drained.
+Both audio readers include that base-class buffer in their EOF predicate, so
+small or non-frame-aligned consumer reads do not discard the end of a track.
+
 Offline audio export uses the same conversion rules but writes transactionally
 through a staged file. Small timestamp jitter is smoothed; genuine gaps remain
 silence.
@@ -350,6 +359,19 @@ The shared renderer extracts source-precision PCM without effects, concatenates
 edits, then filters/encodes once. Cuts do not restart effect history or append a
 tail per segment. A transaction checks destination identity before installation;
 the outer caller still owns source-graph safety and user overwrite approval.
+
+Waveform previews use these same ordered edited ranges, capped by their summed
+length rather than their first-to-last source span. Effects run once after
+assembly. `VDQtWaveform` streams checked RIFF/RF64 PCM or floating-point samples
+into bounded peak storage; captions use the rendered WAV's actual duration,
+rate, channels and precision. One-sample clips repeat their peak across columns.
+The source-owning modal scope and multi-phase progress dialog preserve editor
+state and cancellation while indexing, extracting and reading peaks.
+Video waveform windows end at the finite edited video boundary, retaining real
+timeline silence where its audio is shorter. Audio-only windows pass a bounded
+stop-at-EOF extraction policy: the cap must not create artificial trailing
+silence, and a container's estimated sample count is not proof of exact EOF.
+The ordinary audio export policy remains unchanged.
 
 ## Export modes
 
@@ -367,6 +389,16 @@ for the entire workflow, and restores controls on every return path. Private
 helpers may nest scopes, but public actions cannot start a competing operation.
 Job Control and progress/cancel dialogs stay usable. Unattended error reporting
 never disables this protection.
+
+UI work has a separate budget from media work. `VDQtUiUpdateThrottle` limits
+progress text/table updates to about ten per second and interactive export
+preview presentation to about thirty. Callbacks and cancellation/event polling
+remain per input frame; the last rendered timeline frame is always presented.
+Each display caches one byte-identical scaled image, up to 32 MiB, for unchanged
+frame/size/interpolation/alpha settings. Expose, pan and badge repaints reuse it;
+Clear releases it and oversized results are drawn without retained caching.
+Two-pass space estimates include checked coexisting extracted, filtered and
+concatenated PCM files as well as video; this is a preflight, not a reservation.
 
 - Direct Stream Copy remuxes compressed packets when edits/ranges permit it.
 - Fast Recompress keeps video in an FFmpeg-native planar pipeline and bypasses

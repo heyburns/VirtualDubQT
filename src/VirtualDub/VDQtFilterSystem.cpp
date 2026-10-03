@@ -36,6 +36,16 @@ constexpr qint64 kParallelFilterPixelThreshold = 256 * 1024;
 constexpr qsizetype kMaximumAssetBytes = qsizetype{64} * 1024 * 1024;
 constexpr qsizetype kMaximumAssetEntries = 64;
 
+// QImage's copy-on-write allocation reports failure with a null pointer rather
+// than an exception. Centralize the check at each real mutation, before row
+// tasks or painters can touch that pointer. Do not pre-detach every stage:
+// geometry-only/no-op stages should still hand off shared immutable pixels.
+uchar *checkedImageBits(QImage& image) {
+    uchar *bits = image.bits();
+    if (!bits) throw std::bad_alloc();
+    return bits;
+}
+
 // Split independent rows across the global Qt thread pool only when the image
 // is large enough to repay task scheduling. Callers must capture disjoint output
 // rows and treat their input image as immutable. Detach destinations with bits()
@@ -78,7 +88,7 @@ template <typename Transform>
 void transformRgbPixels(QImage& image, bool highPrecision, Transform&& transform) {
     const int width = image.width();
     const int height = image.height();
-    uchar *bits = image.bits();
+    uchar *bits = checkedImageBits(image);
     const int stride = image.bytesPerLine();
     if (highPrecision) {
         parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
@@ -123,8 +133,7 @@ bool applyChannelLut(QImage& image, bool highPrecision, const QByteArray& bytes)
     const int maximum = highPrecision ? 65535 : 255;
     if (bytes.size() != (maximum + 1) * static_cast<qsizetype>(sizeof(quint16))) return false;
     const auto *table = reinterpret_cast<const quint16 *>(bytes.constData());
-    uchar *bits = image.bits();
-    if (!bits) return false;
+    uchar *bits = checkedImageBits(image);
     const qsizetype stride = image.bytesPerLine();
     const int width = image.width(), height = image.height();
     if (highPrecision) {
@@ -791,7 +800,7 @@ bool VDQtFilterSystem::processFrameSequence(
                 // keep unique buffers without a full-image copy at every stage.
                 QImage incoming = phase + 1 == expansion ? std::move(current[inputPhase]) : current.at(inputPhase);
                 QImage output = processFilterForPhase(std::move(incoming), phase, stageContext, filterIndex);
-                if (output.isNull()) return failSequence(QStringLiteral("The filter chain could not produce an output frame."));
+                if (output.isNull()) return failSequence(QStringLiteral("The filter chain could not produce an output frame."), &filter);
                 nextBytes += output.sizeInBytes();
                 if (remainingBytes + nextBytes + historyBytes() > sequenceBudget)
                     return failSequence(QStringLiteral("The filter sequence exceeds its 512 MiB image budget."), &filter);
@@ -901,17 +910,21 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 std::clamp(static_cast<int>(filter.params.value("green", 0)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("blue", 0)), 0, 255));
             color.setAlphaF(std::clamp(filter.params.value("alpha", 1.0), 0.0, 1.0));
-            QPainter painter(&result);
+            checkedImageBits(result);
+            QPainter painter;
+            if (!painter.begin(&result)) throw std::bad_alloc();
             painter.fillRect(QRect(x, y, width, height), color);
             break;
         }
         case VDFilterType::Canvas: {
             QImage canvas(geometry.outputSize, result.format());
+            checkedImageBits(canvas);
             canvas.fill(QColor(
                 std::clamp(static_cast<int>(filter.params.value("red", 0)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("green", 0)), 0, 255),
                 std::clamp(static_cast<int>(filter.params.value("blue", 0)), 0, 255)));
-            QPainter painter(&canvas);
+            QPainter painter;
+            if (!painter.begin(&canvas)) throw std::bad_alloc();
             painter.drawImage(geometry.imageOffset, result);
             result = canvas;
             break;
@@ -937,7 +950,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             if (highPrecision) {
                 const uchar *sourceBits = source.constBits();
                 const int sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
+                uchar *destinationBits = checkedImageBits(result);
                 const int destinationStride = result.bytesPerLine();
                 parallelFor(height, static_cast<qint64>(width) * height,
                     [&](int y) {
@@ -977,7 +990,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const int bytesPerPixel = result.format() == QImage::Format_RGB888 ? 3 : 4;
             const uchar *sourceBits = source.constBits();
             const int sourceStride = source.bytesPerLine();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int destinationStride = result.bytesPerLine();
             parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
                 const uchar *sourceRow = sourceBits + static_cast<qint64>(y) * sourceStride;
@@ -1014,7 +1027,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     .arg(context.frameNumber >= 0
                              ? QString::number(context.frameNumber)
                              : QStringLiteral("?"));
-            QPainter painter(&result);
+            checkedImageBits(result);
+            QPainter painter;
+            if (!painter.begin(&result)) throw std::bad_alloc();
             painter.setRenderHint(QPainter::TextAntialiasing, true);
             QFont font = painter.font();
             font.setPixelSize(std::clamp(
@@ -1061,15 +1076,25 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     || filter.type == VDFilterType::Interlace) {
                     const int delayedParity = static_cast<int>(filter.params.value(
                         filter.type == VDFilterType::FieldDelay ? "field" : "fieldOrder", 1)) & 1;
+                    // incomingFieldFrame deliberately shares this buffer for
+                    // history. Detach once here, not via unchecked scanLine()
+                    // on every row; allocation failure must abort the sequence.
+                    uchar *destinationBits = checkedImageBits(result);
+                    const qsizetype destinationStride = result.bytesPerLine();
+                    const uchar *previousBits = previous.constBits();
+                    const qsizetype previousStride = previous.bytesPerLine();
                     for (int y = delayedParity; y < result.height(); y += 2)
-                        std::memcpy(result.scanLine(y), previous.constScanLine(y),
+                        std::memcpy(destinationBits + y * destinationStride,
+                                    previousBits + y * previousStride,
                                     static_cast<size_t>(std::min(
-                                        result.bytesPerLine(), previous.bytesPerLine())));
+                                        destinationStride, previousStride)));
                 } else if (filter.type == VDFilterType::Interpolate
                            || filter.type == VDFilterType::MotionBlur) {
                     const double opacity = std::clamp(
                         filter.params.value("amount", 0.5), 0.0, 1.0);
-                    QPainter painter(&result);
+                    checkedImageBits(result);
+                    QPainter painter;
+                    if (!painter.begin(&result)) throw std::bad_alloc();
                     painter.setOpacity(opacity);
                     painter.drawImage(0, 0, previous);
                 } else {
@@ -1085,8 +1110,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                         // The input, prior output, and opacity snapshot may all
                         // share storage. Detach once on the caller thread; the
                         // previous QImage keeps its read buffer alive until join.
-                        uchar *destinationBits = result.bits();
-                        if (!destinationBits) return {};
+                        uchar *destinationBits = checkedImageBits(result);
                         const qsizetype destinationStride = result.bytesPerLine();
                         parallelFor(height, static_cast<qint64>(width) * height,
                                     [=](int y) {
@@ -1112,8 +1136,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                         const int width = result.width(), height = result.height();
                         const uchar *previousBits = previous.constBits();
                         const qsizetype previousStride = previous.bytesPerLine();
-                        uchar *destinationBits = result.bits();
-                        if (!destinationBits) return {};
+                        uchar *destinationBits = checkedImageBits(result);
                         const qsizetype destinationStride = result.bytesPerLine();
                         // Use the same motion gate and strength as the 8-bit
                         // kernel, without quantizing RGB or blending alpha.
@@ -1156,8 +1179,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(std::max(0, height - 2),
                             static_cast<qint64>(width) * height,
@@ -1180,8 +1202,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(std::max(0, height - 2), static_cast<qint64>(width) * height, [=](int row) {
                     const int y = row + 1;
@@ -1220,8 +1241,10 @@ QImage VDQtFilterSystem::processFilterForPhase(
             QTransform transform;
             if (QTransform::quadToQuad(sourceQuad, destinationQuad, transform)) {
                 QImage transformed(result.size(), result.format());
+                checkedImageBits(transformed);
                 transformed.fill(Qt::black);
-                QPainter painter(&transformed);
+                QPainter painter;
+                if (!painter.begin(&transformed)) throw std::bad_alloc();
                 painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 painter.setTransform(transform);
                 painter.drawImage(0, 0, result);
@@ -1241,11 +1264,14 @@ QImage VDQtFilterSystem::processFilterForPhase(
             QTransform transform;
             transform.rotate(filter.params.value("angle", 0));
             result = result.transformed(transform, Qt::SmoothTransformation);
+            if (result.isNull()) throw std::bad_alloc();
             if (filter.params.value("expand", 1) <= 0.5
                 && result.size() != originalSize) {
                 QImage cropped(originalSize, result.format());
+                checkedImageBits(cropped);
                 cropped.fill(Qt::black);
-                QPainter painter(&cropped);
+                QPainter painter;
+                if (!painter.begin(&cropped)) throw std::bad_alloc();
                 painter.drawImage((originalSize.width() - result.width()) / 2,
                                   (originalSize.height() - result.height()) / 2,
                                   result);
@@ -1264,8 +1290,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(height, static_cast<qint64>(width) * height,
                             [=](int y) {
@@ -1298,8 +1323,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
                     auto *destination = reinterpret_cast<QRgba64*>(destinationBits + y * destinationStride);
@@ -1336,8 +1360,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(height, static_cast<qint64>(width) * height,
                             [=](int y) {
@@ -1363,8 +1386,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const int width = result.width(), height = result.height();
                 const uchar *sourceBits = source.constBits();
                 const qsizetype sourceStride = source.bytesPerLine();
-                uchar *destinationBits = result.bits();
-                if (!destinationBits) return {};
+                uchar *destinationBits = checkedImageBits(result);
                 const qsizetype destinationStride = result.bytesPerLine();
                 parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
                     auto *destination = reinterpret_cast<QRgba64*>(destinationBits + y * destinationStride);
@@ -1433,7 +1455,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 }
             }
             {
-                QPainter painter(&result);
+                checkedImageBits(result);
+                QPainter painter;
+                if (!painter.begin(&result)) throw std::bad_alloc();
                 painter.setOpacity(std::clamp(
                     filter.params.value("opacity", 1.0), 0.0, 1.0));
                 painter.drawImage(
@@ -1467,11 +1491,19 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     QImage odd(result.width(), std::max(1, oddSourceHeight), result.format());
                     if (even.isNull() || odd.isNull())
                         return failProcessing(QStringLiteral("Not enough memory to separate the resized fields."), &filter);
+                    uchar *evenBits = checkedImageBits(even);
+                    uchar *oddBits = checkedImageBits(odd);
+                    const qsizetype evenStride = even.bytesPerLine();
+                    const qsizetype oddStride = odd.bytesPerLine();
+                    const uchar *sourceBits = result.constBits();
+                    const qsizetype sourceStride = result.bytesPerLine();
                     for (int y = 0; y < result.height(); ++y) {
-                        QImage& field = (y & 1) ? odd : even;
-                        std::memcpy(field.scanLine(y / 2), result.constScanLine(y),
+                        const qsizetype fieldStride = (y & 1) ? oddStride : evenStride;
+                        uchar *fieldBits = (y & 1) ? oddBits : evenBits;
+                        std::memcpy(fieldBits + (y / 2) * fieldStride,
+                                    sourceBits + y * sourceStride,
                                     static_cast<size_t>(std::min(
-                                        field.bytesPerLine(), result.bytesPerLine())));
+                                        fieldStride, sourceStride)));
                     }
                     const int evenTargetHeight = (h + 1) / 2;
                     const int oddTargetHeight = h / 2;
@@ -1482,11 +1514,13 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     QImage woven(w, h, result.format());
                     if (woven.isNull())
                         return failProcessing(QStringLiteral("Not enough memory to weave the resized fields."), &filter);
+                    uchar *wovenBits = checkedImageBits(woven);
+                    const qsizetype wovenStride = woven.bytesPerLine();
                     for (int y = 0; y < h; ++y) {
                         const QImage& field = (y & 1) ? odd : even;
-                        std::memcpy(woven.scanLine(y), field.constScanLine(y / 2),
+                        std::memcpy(wovenBits + y * wovenStride, field.constScanLine(y / 2),
                                     static_cast<size_t>(std::min(
-                                        woven.bytesPerLine(), field.bytesPerLine())));
+                                        wovenStride, field.bytesPerLine())));
                     }
                     result = woven;
                 } else {
@@ -1502,8 +1536,10 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     std::clamp(static_cast<int>(filter.params.value("fillColorB", 0)), 0, 255));
                 if (framingMode == 1) {
                     QImage framed(geometry.outputSize, result.format());
+                    checkedImageBits(framed);
                     framed.fill(fillColor);
-                    QPainter painter(&framed);
+                    QPainter painter;
+                    if (!painter.begin(&framed)) throw std::bad_alloc();
                     painter.drawImage(geometry.imageOffset, result);
                     painter.end();
                     result = framed;
@@ -1512,8 +1548,10 @@ QImage VDQtFilterSystem::processFilterForPhase(
                         result = result.copy(geometry.outputCrop);
                     } else {
                         QImage framed(geometry.outputSize, result.format());
+                        checkedImageBits(framed);
                         framed.fill(fillColor);
-                        QPainter painter(&framed);
+                        QPainter painter;
+                        if (!painter.begin(&framed)) throw std::bad_alloc();
                         painter.drawImage(geometry.imageOffset, result);
                         painter.end();
                         result = framed;
@@ -1569,7 +1607,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             QImage temp = result;
 
             if (highPrecision) {
-                uchar *resultBits = result.bits();
+                uchar *resultBits = checkedImageBits(result);
                 const int resultStride = result.bytesPerLine();
                 const uchar *tempBits = temp.constBits();
                 const int tempStride = temp.bytesPerLine();
@@ -1637,7 +1675,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
-            uchar *resultBits = result.bits();
+            uchar *resultBits = checkedImageBits(result);
             const int resultStride = result.bytesPerLine();
             const uchar *tempBits = temp.constBits();
             const int tempStride = temp.bytesPerLine();
@@ -1767,7 +1805,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             int h = result.height();
             int w = result.width();
             if (highPrecision) {
-                uchar *resultBits = result.bits();
+                uchar *resultBits = checkedImageBits(result);
                 const int resultStride = result.bytesPerLine();
                 parallelFor(h, static_cast<qint64>(w) * h, [&](int y) {
                     QRgba64 *scan = reinterpret_cast<QRgba64 *>(
@@ -1831,7 +1869,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 mSixAxisLutCache.insert(lutKey, lutBytes);
             }
             const uchar *lut = reinterpret_cast<const uchar *>(lutBytes.constData());
-            uchar *resultBits = result.bits();
+            uchar *resultBits = checkedImageBits(result);
             const int resultStride = result.bytesPerLine();
             parallelFor(h, static_cast<qint64>(w) * h, [&](int y) {
                 uchar *scan = resultBits
@@ -1890,7 +1928,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
 
             if (highPrecision) {
-                uchar *resultBits = result.bits();
+                uchar *resultBits = checkedImageBits(result);
                 const int resultStride = result.bytesPerLine();
                 parallelFor(result.height(),
                             static_cast<qint64>(result.width()) * result.height(),
@@ -1916,7 +1954,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             int bytesPerPixel = (result.format() == QImage::Format_RGB888) ? 3 : 4;
             int h = result.height();
             int w = result.width();
-            uchar *resultBits = result.bits();
+            uchar *resultBits = checkedImageBits(result);
             const int resultStride = result.bytesPerLine();
 
             parallelFor(h, static_cast<qint64>(w) * h, [&](int y) {
@@ -1946,7 +1984,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     const qint64 windowSize = static_cast<qint64>(radius) * 2 + 1;
                     const uchar *imageSourceBits = image.constBits();
                     const int imageSourceStride = image.bytesPerLine();
-                    uchar *horizontalBits = horizontal.bits();
+                    uchar *horizontalBits = checkedImageBits(horizontal);
                     const int horizontalStride = horizontal.bytesPerLine();
                     parallelFor(h, static_cast<qint64>(w) * h, [&](int y) {
                         const QRgba64 *src = reinterpret_cast<const QRgba64 *>(
@@ -1970,7 +2008,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                         }
                     });
                     const uchar *horizontalSourceBits = horizontal.constBits();
-                    uchar *imageDestinationBits = image.bits();
+                    uchar *imageDestinationBits = checkedImageBits(image);
                     const int imageDestinationStride = image.bytesPerLine();
                     parallelFor(w, static_cast<qint64>(w) * h, [&](int x) {
                         for (int c = 0; c < 3; ++c) {
@@ -2017,7 +2055,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 int winSize = 2 * radius + 1;
                 const uchar *imageSourceBits = img.constBits();
                 const int imageSourceStride = img.bytesPerLine();
-                uchar *temporaryBits = temp.bits();
+                uchar *temporaryBits = checkedImageBits(temp);
                 const int temporaryStride = temp.bytesPerLine();
 
                 // Horizontal pass
@@ -2043,7 +2081,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
 
                 // Vertical pass
                 const uchar *temporarySourceBits = temp.constBits();
-                uchar *imageDestinationBits = img.bits();
+                uchar *imageDestinationBits = checkedImageBits(img);
                 const int imageDestinationStride = img.bytesPerLine();
                 parallelFor(w, static_cast<qint64>(w) * h, [&](int x) {
                     for (int c = 0; c < 3; ++c) {
@@ -2085,7 +2123,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const QImage source = result;
             const uchar *sourceBits = source.constBits();
             const int sourceStride = source.bytesPerLine();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int destinationStride = result.bytesPerLine();
             if (highPrecision) {
                 parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
@@ -2130,7 +2168,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
         case VDFilterType::FieldSwap: {
             const QImage source = result;
             const uchar *sourceBits = source.constBits();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int sourceStride = source.bytesPerLine();
             const int destinationStride = result.bytesPerLine();
             const int height = result.height();
@@ -2153,7 +2191,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const QImage source = result;
             const uchar *sourceBits = source.constBits();
             const int sourceStride = source.bytesPerLine();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int destinationStride = result.bytesPerLine();
             if (highPrecision) {
                 parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
@@ -2273,7 +2311,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const QImage source = result;
             const uchar *sourceBits = source.constBits();
             const int sourceStride = source.bytesPerLine();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int destinationStride = result.bytesPerLine();
             if (highPrecision) {
                 parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
@@ -2344,7 +2382,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const QImage source = result;
             const uchar *sourceBits = source.constBits();
             const int sourceStride = source.bytesPerLine();
-            uchar *destinationBits = result.bits();
+            uchar *destinationBits = checkedImageBits(result);
             const int destinationStride = result.bytesPerLine();
             if (highPrecision) {
                 parallelFor(height, static_cast<qint64>(width) * height, [&](int y) {
@@ -2388,7 +2426,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 2, 256);
             const int width = result.width();
             const int height = result.height();
-            uchar *bits = result.bits();
+            uchar *bits = checkedImageBits(result);
             const int stride = result.bytesPerLine();
             const int blockRows = (height + blockSize - 1) / blockSize;
             parallelFor(blockRows, static_cast<qint64>(width) * height, [&](int blockRow) {
@@ -2438,7 +2476,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
         }
         case VDFilterType::Grayscale: {
             if (highPrecision) {
-                uchar *resultBits = result.bits();
+                uchar *resultBits = checkedImageBits(result);
                 const int resultStride = result.bytesPerLine();
                 parallelFor(result.height(),
                             static_cast<qint64>(result.width()) * result.height(),
@@ -2459,7 +2497,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 break;
             }
             const int bpp = result.format() == QImage::Format_RGB888 ? 3 : 4;
-            uchar *resultBits = result.bits();
+            uchar *resultBits = checkedImageBits(result);
             const int resultStride = result.bytesPerLine();
             parallelFor(result.height(),
                         static_cast<qint64>(result.width()) * result.height(),
@@ -2479,6 +2517,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
         case VDFilterType::InvertColor: {
+            checkedImageBits(result);
             result.invertPixels(QImage::InvertRgb);
             break;
         }
@@ -2493,7 +2532,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             const qint64 centerWeight = 256LL + 8LL * v;
 
             if (highPrecision) {
-                uchar *resultBits = result.bits();
+                uchar *resultBits = checkedImageBits(result);
                 const int resultStride = result.bytesPerLine();
                 const uchar *tempBits = temp.constBits();
                 const int tempStride = temp.bytesPerLine();
@@ -2536,7 +2575,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
 
             int bpp = (result.format() == QImage::Format_RGB888) ? 3 : 4;
-            uchar *resultBits = result.bits();
+            uchar *resultBits = checkedImageBits(result);
             const int resultStride = result.bytesPerLine();
             const uchar *tempBits = temp.constBits();
             const int tempStride = temp.bytesPerLine();
@@ -2623,7 +2662,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             if (opacity < 1.0) {
                 QImage blended = opacitySource;
-                QPainter painter(&blended);
+                checkedImageBits(blended);
+                QPainter painter;
+                if (!painter.begin(&blended)) throw std::bad_alloc();
                 const int opacityLeft = std::max(0, static_cast<int>(
                     filter.params.value(QStringLiteral(
                         "_sylia.opacityClip.left"), 0.0)));
@@ -2669,6 +2710,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
     // bookkeeping can throw. Both mean this phase failed, including legacy
     // callers that consume processFrame() rather than processFrameSequence().
     resetRuntimeState();
-    failProcessing(QStringLiteral("Not enough memory to process the filter frame."));
+    const VDFilterInstance *failedFilter = filterIndex >= 0 && filterIndex < mActiveChain.size()
+        ? &mActiveChain.at(filterIndex) : nullptr;
+    failProcessing(QStringLiteral("Not enough memory to process the filter frame."), failedFilter);
     return {};
 }

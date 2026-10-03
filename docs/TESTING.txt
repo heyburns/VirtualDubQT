@@ -1325,3 +1325,67 @@ The final isolated LUT benchmark measured 2.78 ms/frame at 8-bit and 2.72 ms/fra
 at 16-bit; timing varies, and the original controlled comparison above remains
 the directly paired result. Physical devices, arbitrary plug-ins, leak detection,
 the user-specific slowdown and clean package installation remain unverified.
+
+Allocation, audio delivery, waveform and presentation follow-ups
+---------------------------------------------------------------
+
+  ctest --preset release-checks -R 'filter_destination_allocation|filter_geometry_table|waveform_contract|export_efficiency|process_completion|operation_waveform|operation_export_preview|stabilization'
+
+The 100 destination-allocation cases cover 50 built-in paths at both 8-bit and
+16-bit precision, including clipping, opacity, interlaced/framed sizing and
+non-expanding rotation. Each owns a preallocated frame/history/assets and warms
+its worker pool before setting a temporary native address-space budget. Failed
+detach/allocation must produce a named failure with no partial sequence or
+mutated caller image; removing the budget must allow recovery. Blur at 8-bit
+and Field Delay at 16-bit previously segfaulted in the independent baseline.
+These RLIMIT_AS cases run only on Linux without sanitizers; normal pixel/history
+contracts still run in ASan/UBSan. Table sizing also checks the actual RGBA64
+byte budget rather than assuming four bytes/pixel.
+
+EOF-driven audio pulls cover one-byte and non-frame-aligned reads, larger sink
+reads, restarting and seeking to EOF. Before repair the FFmpeg fixture delivered
+32769 of 48028 bytes and native AVS delivered 753665 of 768000 bytes, leaving Qt
+read-ahead unread. Both readers must now deliver every byte before reporting EOF.
+The native AVS buffer measurement (40 seconds, 48 kHz stereo PCM) showed median
+1.05 us, p99 27.04 us, maximum 69.08 us per primed pull, with a bounded 152192-byte
+producer buffer. That measurement does not justify a speculative ring-buffer
+rewrite or establish physical audio quality.
+
+process_completion_tests uses its own executable as a controlled child encoder
+in a temporary PATH. Its progress callback allows the child to exit and pumps
+the finished event before returning, exercising the actual audio export waiters.
+The baseline failed ten assertions in 0.60 s; the test deliberately cancels a
+second spurious callback rather than hanging indefinitely. Cases cover success,
+exit-7 final diagnostics and cancellation before/after child completion. Real
+FFmpeg cases separately check a finite audio-only cap stops at actual EOF,
+ordinary requested-range padding remains unchanged, shorter caps remain strict,
+after-EOF failure preserves destinations, and single/multiple edit routes agree.
+
+Waveform parser contracts cover PCM 8/16/24/32, float 32/64, valid-bit extensible
+WAV, RIFF/RF64 lengths/chunks, one-sample clips, finite values, checked arithmetic,
+atomic errors and cancellation. Peak reading retains only a 32 KiB sample block
+and up to 32 KiB of peaks, not the entire WAV. Actual modal-controller tests
+inspect chart pixels and captions for reordered/cut/masked audio, filtered
+24 kHz output, edited playhead starts, finite identity boundaries, short audio,
+cancel/error reporting and operation ownership. Original bytes and saved editor
+state are compared before and after. Video windows intentionally preserve their
+finite edited duration when the audio ends early; audio-only windows stop at EOF
+without treating an estimated duration as authoritative.
+
+export_efficiency_tests verifies deterministic first/interval/final UI updates,
+byte-identical Qt scaling at both precisions and alpha modes, cache invalidation,
+Clear, oversized-cache bypass, checked coexisting PCM estimates and real reordered
+video/audio exports with per-input cancellation. operation_export_preview checks
+the actual Save Video completion dialog, final edited ordinal and both panes.
+The one-entry scaled-frame cache retains at most 32 MiB per pane. An isolated
+3840x2160 RGBA64-to-1280x720 Smooth scaling comparison measured 4782.6 ms for
+100 repeated old-style paints versus 45.5 ms with reuse, with identical pixels.
+This is unchanged-frame repaint work, not changing-frame playback or export fps.
+
+Validation of this follow-up checkpoint, 2026-10-03: focused regressions passed,
+then full Release 183/183 (71.58 s) and ASan/UBSan 79/79 (89.15 s). The separately
+rebuilt regular executable passed MP4/native-AVS raw export and FFV1/native-AVS
+raw/encoded runtime smoke checks. Hardware and leak detection remain excluded.
+An independent Chorus/cut comparison subsequently reproduced effects restarting
+at cuts in edited video audio preparation; it is an open next-gate fix, not
+covered by the successful audio-only assembly checks.

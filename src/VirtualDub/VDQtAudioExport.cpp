@@ -118,9 +118,11 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
     bool extracted = false;
     if (request.sampleRanges.size() == 1) {
         const auto range = request.sampleRanges.first();
-        extracted = player.exportAudioToFile(wav, range.first, range.second, extractionProgress, &noFilters);
+        extracted = player.exportAudioToFile(wav, range.first, range.second, extractionProgress,
+                                            &noFilters, request.padToRequestedLength);
     } else {
-        extracted = player.exportAudioRangesToFile(wav, request.sampleRanges, extractionProgress, &noFilters);
+        extracted = player.exportAudioRangesToFile(wav, request.sampleRanges, extractionProgress,
+                                                  &noFilters, request.padToRequestedLength);
     }
     if (!extracted) return fail(errorMessage, QStringLiteral("Audio extraction failed or was cancelled."));
     VDQtAudioFilterSystem filters;
@@ -152,7 +154,7 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
                 "-af", graph, "-c:a", "pcm_s16le", lameInput});
             if (!effects.waitForStarted(5000))
                 return fail(errorMessage, QStringLiteral("Audio filter renderer could not start."));
-            while (!effects.waitForFinished(50)) {
+            while (effects.state() != QProcess::NotRunning && !effects.waitForFinished(50)) {
                 effects.readAllStandardError();
                 if (progress && !progress(75, 100)) {
                     effects.kill(); effects.waitForFinished(3000);
@@ -180,7 +182,7 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
         return fail(errorMessage, QStringLiteral("The audio encoder could not start."));
     QByteArray diagnostic, output;
     bool cancelled = false;
-    while (!process.waitForFinished(50)) {
+    while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
         diagnostic += process.readAllStandardError();
         diagnostic = diagnostic.right(64 * 1024);
         output += process.readAllStandardOutput();

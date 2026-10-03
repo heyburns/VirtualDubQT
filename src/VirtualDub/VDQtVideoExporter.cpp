@@ -5,6 +5,8 @@
 #include "VDQtVideoExporter.h"
 #include "VDQtVideoAspect.h"
 #include "VDQtTemporaryStorage.h"
+#include "VDQtVideoExportStorage.h"
+#include "VDQtUiUpdateThrottle.h"
 #include "VDQtColorPolicy.h"
 #include "VDQtTimingMath.h"
 #include "VDQtFilterFrameContext.h"
@@ -1246,6 +1248,7 @@ bool VDQtVideoExporter::exportRawVideo(
     progress.setValue(0);
     QElapsedTimer timer;
     timer.start();
+    VDQtUiUpdateThrottle rawProgressUpdates(100);
 
     bool cancelled = false;
     bool failed = false;
@@ -1307,15 +1310,17 @@ bool VDQtVideoExporter::exportRawVideo(
                 break;
             }
             ++completedFrames;
-            progress.setValue(completedFrames);
-            const double elapsedSeconds = timer.elapsed() / 1000.0;
-            const double currentFps = elapsedSeconds > 0.0
-                ? completedFrames / elapsedSeconds : 0.0;
-            progress.setLabelText(
-                QString("Exporting raw frame %1 of %2\nSpeed: %3 fps")
-                    .arg(completedFrames)
-                    .arg(framesToExport)
-                    .arg(currentFps, 0, 'f', 1));
+            if (rawProgressUpdates.shouldUpdate(timer.elapsed(), completedFrames == framesToExport)) {
+                progress.setValue(completedFrames);
+                const double elapsedSeconds = timer.elapsed() / 1000.0;
+                const double currentFps = elapsedSeconds > 0.0
+                    ? completedFrames / elapsedSeconds : 0.0;
+                progress.setLabelText(
+                    QString("Exporting raw frame %1 of %2\nSpeed: %3 fps")
+                        .arg(completedFrames)
+                        .arg(framesToExport)
+                        .arg(currentFps, 0, 'f', 1));
+            }
             QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
             if (progress.wasCanceled()
                 || (progressCallback
@@ -2491,6 +2496,20 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             mLastError = QStringLiteral("The two-pass intermediate storage estimate is too large.");
             return false;
         }
+        if (options.includeAudio && !isDirectCopyMediaAudio && audioPlayer && audioPlayer->hasAudio()) {
+            const qint64 segments = editedTimeline
+                ? renderTimeline.copyRange(startFrame, endFrame + 1).size() : 1;
+            qint64 audioBytes = 0;
+            if (!VDQtEstimatePcmTemporaryStorage(
+                    std::max(sourceDurationSeconds, outputDurationSeconds),
+                    audioPlayer->getSampleRate(), audioPlayer->getChannels(),
+                    processing.audioFilters, segments, &audioBytes, &mLastError)
+                || audioBytes > std::numeric_limits<qint64>::max() - requiredBytes) {
+                if (mLastError.isEmpty()) mLastError = QStringLiteral("The combined two-pass video/audio storage estimate is too large.");
+                return false;
+            }
+            requiredBytes += audioBytes;
+        }
         // NUT stores uncompressed pixels plus packet headers; encoder analysis
         // records also need space. This conservative check is not a reservation.
         if (!temporaryDirectory.isValid()
@@ -2608,18 +2627,15 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                     if (!concatProcess.waitForStarted(3000)) {
                         audioPrepared = false;
                     } else {
-                        while (!concatProcess.waitForFinished(kProcessPollMs)) {
-                            QApplication::processEvents(
-                                QEventLoop::AllEvents, kProcessPollMs);
-                            if (audioProgress.wasCanceled()) {
-                                stopProcess(concatProcess);
-                                break;
-                            }
-                        }
-                        audioPrepared = !audioProgress.wasCanceled()
-                            && concatProcess.exitStatus() == QProcess::NormalExit
-                            && concatProcess.exitCode() == 0
-                            && validOutputFile(tempAudioPath);
+                        QByteArray concatDiagnostics;
+                        bool concatCancelled = false;
+                        // The shared waiter checks state before waiting again:
+                        // event pumping may already have delivered finished().
+                        audioPrepared = waitForProcess(concatProcess, audioProgress,
+                            concatDiagnostics, concatCancelled) && validOutputFile(tempAudioPath);
+                        if (!audioPrepared && !concatCancelled)
+                            mLastError = QStringLiteral("Edited audio concatenation failed: %1")
+                                .arg(QString::fromUtf8(concatDiagnostics).trimmed());
                     }
                 }
             }
@@ -2811,6 +2827,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
     QElapsedTimer timer;
     timer.start();
+    VDQtUiUpdateThrottle processedProgressUpdates(100);
 
     TimestampedNutWriter timestampedWriter;
     if (preserveNativeVfr) {
@@ -2979,25 +2996,25 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             }
 
             if (frameCallback)
-                frameCallback(f, rawFrame, filtered);
+                frameCallback(timelineFrame, rawFrame, filtered);
             ++doneCount;
         }
         if (cancelled || writeFailed)
             break;
 
-        int pct = static_cast<int>(95.0 * doneCount / framesToExport);
-        progress.setValue(pct);
-
-        double elapsedSec = timer.elapsed() / 1000.0;
-        double currentFps = (elapsedSec > 0) ? (doneCount / elapsedSec) : 0;
-        double remainingSec = (currentFps > 0) ? ((framesToExport - doneCount) / currentFps) : 0;
-
-        progress.setLabelText(QString("Exporting frame %1 of %2 (%3%)\nSpeed: %4 fps | ETA: %5s")
-            .arg(doneCount)
-            .arg(framesToExport)
-            .arg(static_cast<int>(100.0 * doneCount / framesToExport))
-            .arg(currentFps, 0, 'f', 1)
-            .arg(remainingSec, 0, 'f', 0));
+        if (processedProgressUpdates.shouldUpdate(timer.elapsed(), doneCount == framesToExport)) {
+            int pct = static_cast<int>(95.0 * doneCount / framesToExport);
+            progress.setValue(pct);
+            double elapsedSec = timer.elapsed() / 1000.0;
+            double currentFps = (elapsedSec > 0) ? (doneCount / elapsedSec) : 0;
+            double remainingSec = (currentFps > 0) ? ((framesToExport - doneCount) / currentFps) : 0;
+            progress.setLabelText(QString("Exporting frame %1 of %2 (%3%)\nSpeed: %4 fps | ETA: %5s")
+                .arg(doneCount)
+                .arg(framesToExport)
+                .arg(static_cast<int>(100.0 * doneCount / framesToExport))
+                .arg(currentFps, 0, 'f', 1)
+                .arg(remainingSec, 0, 'f', 0));
+        }
 
         QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
         if (progressCallback

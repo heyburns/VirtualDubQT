@@ -1245,6 +1245,27 @@ int main(int argc, char **argv) {
         }
 
         QString audioBufferError;
+        const QString eofFixture = settingsDirectory.filePath(QStringLiteral("audio_eof.wav"));
+        if (!require(runProcess(
+                         QStringLiteral("ffmpeg"),
+                         { QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+                           QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"), QStringLiteral("sine=sample_rate=48000:duration=0.3"),
+                           QStringLiteral("-af"), QStringLiteral("atrim=end_sample=12007"),
+                           QStringLiteral("-ac"), QStringLiteral("2"),
+                           QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                           QStringLiteral("-y"), eofFixture },
+                         &ffmpegError),
+                     "create exact PCM audio EOF fixture")) {
+            std::cerr << ffmpegError.constData() << '\n';
+            return 1;
+        }
+        if (!require(VDQtRunAudioEofRegression(eofFixture, 12007, &audioBufferError),
+                     "FFmpeg EOF retains all QIODevice read-ahead with tiny and non-frame-aligned pulls")) {
+            std::cerr << audioBufferError.toStdString() << '\n';
+            return 1;
+        }
+        audioBufferError.clear();
         if (!require(VDQtRunAudioBufferRegression(audioFixture, &audioBufferError),
                      "bounded live-audio buffer primes, pulls, and rebuilds after seek")) {
             std::cerr << audioBufferError.toStdString() << '\n';
@@ -2504,6 +2525,13 @@ int main(int argc, char **argv) {
         }
 
         QString avsAudioError;
+        if (!require(VDQtRunAvsAudioEofRegression(
+                         decoder.getAvsClip(), decoder.getAvsVi(), &avsAudioError),
+                     "native AviSynth EOF retains every PCM byte through QIODevice read-ahead")) {
+            std::cerr << avsAudioError.toStdString() << '\n';
+            return 1;
+        }
+        avsAudioError.clear();
         if (!require(VDQtRunAvsAudioDecodeAheadDeadlineRegression(
                          decoder.getAvsClip(), decoder.getAvsVi(), &avsAudioError),
                      "AviSynth graph evaluation stays off the real-time audio pull path")) {

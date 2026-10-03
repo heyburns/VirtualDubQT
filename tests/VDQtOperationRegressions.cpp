@@ -21,6 +21,8 @@
 #include <QLabel>
 #include <QPointer>
 #include <QProcess>
+#include <QPainter>
+#include <QProgressDialog>
 #include <QSettings>
 #include <QRadioButton>
 #include <QTextEdit>
@@ -29,6 +31,7 @@
 #include <QThread>
 #include <QtEndian>
 #include <iostream>
+#include <limits>
 
 namespace {
 bool check(bool condition, const char *message) {
@@ -846,6 +849,283 @@ bool audioSnapshot(VDQtTestFixtures& fixtures) {
         }
     }
     return true;
+}
+
+bool waveformPreview(VDQtTestFixtures& fixtures) {
+    // Exact, constant plateaus make the chart itself an observable contract:
+    // deleting/reordering a quarter changes its height, not just a file header.
+    const QString source = fixtures.directory.filePath("waveform-source.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=32x24:rate=10:duration=2",
+            "-f", "lavfi", "-i",
+            "aevalsrc='if(lt(t,0.5),0.125,if(lt(t,1),0.75,if(lt(t,1.5),0.375,0.5)))':s=48000:d=2",
+            "-c:v", "ffv1", "-c:a", "pcm_f32le", source})) return false;
+    const QByteArray original = readFile(source);
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(source) || !invoke(window, "onEditSelectAll")) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!position || position->GetRangeEnd() != 19) return false;
+    position->SetPosition(7);
+    position->SetSelection(0, 20);
+    position->SetZoomRange(0, 19);
+
+    enum class Outcome { Chart, Cancelled, Error };
+    const auto capture = [&](Outcome expected, QImage *result) {
+        bool shown = false, cancelled = false, errorShown = false, guarded = true;
+        QString diagnostic;
+        const QString title = window.windowTitle();
+        const qint64 playhead = position->GetPosition(), last = position->GetRangeEnd();
+        const qint64 selectionStart = position->GetSelectionStart();
+        const qint64 selectionEnd = position->GetSelectionEnd();
+        QElapsedTimer deadline;
+        deadline.start();
+        QTimer responder;
+        responder.setInterval(1);
+        QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                if (auto *progress = qobject_cast<QProgressDialog*>(widget)) {
+                    if (progress->isVisible() && progress->labelText().contains("waveform")) {
+                        guarded &= !window.menuBar()->isEnabled() && !position->isEnabled();
+                        if (expected == Outcome::Cancelled || deadline.elapsed() > 10000) {
+                            cancelled = true;
+                            progress->cancel();
+                        }
+                    }
+                    continue;
+                }
+                if (auto *message = qobject_cast<QMessageBox*>(widget)) {
+                    if (!message->isVisible()) continue;
+                    errorShown = true;
+                    diagnostic = message->text();
+                    message->accept();
+                    continue;
+                }
+                auto *dialog = qobject_cast<QDialog*>(widget);
+                if (!dialog || !dialog->isVisible() || dialog->windowTitle() != "Audio Waveform") continue;
+                shown = true;
+                guarded &= !window.menuBar()->isEnabled() && !position->isEnabled();
+                // These are real public slots, not direct edits of controller
+                // internals. Nested modal events cannot close or mutate the source.
+                guarded &= invoke(window, "onFileClose") && invoke(window, "onEditResetTimeline")
+                    && invoke(window, "onEditDelete");
+                guarded &= window.windowTitle() == title && position->GetRangeEnd() == last
+                    && position->GetPosition() == playhead
+                    && position->GetSelectionStart() == selectionStart
+                    && position->GetSelectionEnd() == selectionEnd;
+                for (QLabel *label : dialog->findChildren<QLabel*>()) {
+                    const QPixmap pixmap = label->pixmap();
+                    if (!pixmap.isNull() && pixmap.size() == QSize(1100, 360) && result)
+                        *result = pixmap.toImage();
+                }
+                dialog->reject();
+            }
+        });
+        responder.start();
+        const bool invoked = invoke(window, "onViewAudioWaveform");
+        responder.stop();
+        if (errorShown && expected != Outcome::Error)
+            std::cerr << "Unexpected waveform diagnostic: " << diagnostic.toStdString() << '\n';
+        return check(invoked && guarded && window.menuBar()->isEnabled() && position->isEnabled()
+            && position->GetPosition() == playhead && position->GetRangeEnd() == last
+            && position->GetSelectionStart() == selectionStart && position->GetSelectionEnd() == selectionEnd
+            && (expected == Outcome::Chart ? shown && !errorShown && result && !result->isNull()
+                : expected == Outcome::Cancelled ? cancelled && !shown && !errorShown
+                : errorShown && !shown && !diagnostic.isEmpty()),
+            "waveform modal operation preserves editor state, releases ownership, and reports the requested outcome");
+    };
+    const auto amplitudeAt = [](const QImage& chart, int x) {
+        for (int y = 30; y <= 180; ++y)
+            if (chart.pixelColor(x, y) == QColor(0, 205, 225))
+                return (180 - y) / 162.0;
+        return -1.0;
+    };
+    const auto peaksMatch = [&](const QImage& chart, const QList<double>& peaks) {
+        for (int i = 0; i < peaks.size(); ++i) {
+            const int x = static_cast<int>((i + 0.5) * chart.width() / peaks.size());
+            if (std::abs(amplitudeAt(chart, x) - peaks[i]) >= 0.012)
+                std::cerr << "Waveform x=" << x << " actual=" << amplitudeAt(chart, x)
+                          << " expected=" << peaks[i] << '\n';
+            if (!check(std::abs(amplitudeAt(chart, x) - peaks[i]) < 0.012,
+                       "rendered waveform peaks follow included source intervals, including masks")) return false;
+        }
+        return true;
+    };
+    const auto captionMatches = [](const QImage& chart, double duration, double start, int rate) {
+        // Re-render only the caption using the same public Qt image painter.
+        // No OCR, private controller hook, or hidden chart metadata is required.
+        QImage expected(chart.size(), QImage::Format_ARGB32_Premultiplied);
+        expected.fill(QColor(18, 18, 24));
+        QPainter painter(&expected);
+        painter.setPen(QColor(210, 210, 220));
+        painter.drawText(10, 18,
+            QString("%1 s from timeline %2 s — %3 Hz, %4 channel(s), %5-bit")
+                .arg(duration, 0, 'f', 3).arg(start, 0, 'f', 3).arg(rate).arg(1).arg(32));
+        painter.end();
+        return check(chart.copy(0, 0, chart.width(), 28).convertToFormat(QImage::Format_RGB32)
+            == expected.copy(0, 0, expected.width(), 28).convertToFormat(QImage::Format_RGB32),
+            "waveform caption reports the filtered output's actual duration and sample rate");
+    };
+
+    const QString project = fixtures.directory.filePath("waveform-session.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", project)) return false;
+    QJsonObject saved = QJsonDocument::fromJson(readFile(project)).object();
+    QImage chart;
+    if (!capture(Outcome::Chart, &chart) || !peaksMatch(chart, {0.125, 0.75, 0.375, 0.5})
+        || !captionMatches(chart, 2, 0, 48000) || !invoke(window, "onFileSaveProject")
+        || !check(QJsonDocument::fromJson(readFile(project)).object() == saved,
+                  "waveform inspection leaves the complete saved session unchanged")) return false;
+    position->SetSelection(0, 0);
+    position->SetPosition(0);
+    if (!capture(Outcome::Chart, &chart) || !captionMatches(chart, 2, 0, 48000)
+        || !peaksMatch(chart, {0.125, 0.75, 0.375, 0.5})) return false;
+    QString error;
+    if (!window.runAutomationText(
+            "VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(15,5); "
+            "VirtualDub.subset.AddMaskedRange(0,5); VirtualDub.subset.AddRange(10,5); "
+            "VirtualDub.audio.filters.Clear(); VirtualDub.audio.filters.Add(\"resample\"); "
+            "VirtualDub.audio.filters.instance[0].SetInt(0,24000);",
+            fixtures.directory.path(), &error)) {
+        std::cerr << error.toStdString() << '\n'; return false;
+    }
+    position->SetPosition(6);
+    position->SetSelection(0, 15);
+    position->SetZoomRange(0, 14);
+    const auto effects = VDQtAudioFilterSystem::instance().activeChain();
+    if (!invoke(window, "onFileSaveProject")) return false;
+    saved = QJsonDocument::fromJson(readFile(project)).object();
+    if (!capture(Outcome::Chart, &chart) || !peaksMatch(chart, {0.5, 0.125, 0.375})
+        || !captionMatches(chart, 1.5, 0, 24000) || !invoke(window, "onFileSaveProject")
+        || !check(readFile(source) == original
+            && VDQtAudioFilterSystem::instance().activeChain() == effects
+            && QJsonDocument::fromJson(readFile(project)).object() == saved,
+            "edited/resampled waveform does not alter source media, effects, timeline, zoom or playhead")) return false;
+    // Without a selection, start at the edited playhead, not source frame 5.
+    position->SetSelection(0, 0);
+    position->SetPosition(5);
+    if (!capture(Outcome::Chart, &chart) || !peaksMatch(chart, {0.125, 0.375})
+        || !captionMatches(chart, 1, 0.5, 24000) || !capture(Outcome::Cancelled, nullptr)) return false;
+
+    // A one-sample external WAV is shorter than a single chart column. The
+    // existing video/audio export contract pads a selected video interval with
+    // silence; retain the real first sample and display that silent tail safely.
+    const QString shortAudio = fixtures.directory.filePath("waveform-one-sample.wav");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "aevalsrc=0.25:s=48000:d=0.01",
+            "-af", "atrim=end_sample=1", "-c:a", "pcm_s16le", shortAudio})
+        || !window.runAutomationText(
+            "VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(0,20); "
+            "VirtualDub.audio.filters.Clear(); VirtualDub.audio.SetSource(\"waveform-one-sample.wav\");",
+            fixtures.directory.path(), &error)) return false;
+    position->SetSelection(0, 20);
+    position->SetPosition(3);
+    if (!capture(Outcome::Chart, &chart) || !peaksMatch(chart, {0, 0, 0, 0})
+        || !check(std::abs(amplitudeAt(chart, 0) - 0.25) < 0.012,
+                  "one-sample audio retains its real first peak before the timeline's silent tail")
+        || !captionMatches(chart, 2, 0, 48000)) return false;
+
+    // Public configuration storage deliberately cannot guarantee every caller
+    // passed validation. A bad effect must show an error, not be mistaken for
+    // cancellation when the progress dialog is programmatically closed.
+    auto invalid = VDQtAudioFilterSystem::instance().createFilter(VDAudioFilterType::Gain);
+    invalid.params["decibels"] = std::numeric_limits<double>::quiet_NaN();
+    VDQtAudioFilterSystem::instance().replaceActiveChain({invalid});
+    const bool diagnosed = capture(Outcome::Error, nullptr);
+    VDQtAudioFilterSystem::instance().clear();
+    return diagnosed && check(readFile(source) == original,
+                               "all waveform success/cancel/error paths preserve original media");
+}
+
+bool exportPreview(VDQtTestFixtures& fixtures) {
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(fixtures.mp4)) return false;
+    const QImage raw = reference.getFrameImage(3).convertToFormat(QImage::Format_RGBA8888);
+    VDQtFilterSystem processing;
+    processing.replaceActiveChain(invertChain());
+    const QImage filtered = processing.processFrame(raw).convertToFormat(QImage::Format_RGBA8888);
+    if (raw.isNull() || filtered.isNull()) return false;
+    const QByteArray original = readFile(fixtures.mp4);
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    QString error;
+    if (!window.openVideoFile(fixtures.mp4)
+        || !window.runAutomationText(
+            "VirtualDub.video.SetMode(3); VirtualDub.audio.SetSource(0); "
+            "VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(16,4); VirtualDub.subset.AddRange(0,4); "
+            "VirtualDub.video.filters.Clear(); VirtualDub.video.filters.Add(\"invert\");",
+            fixtures.directory.path(), &error)) return false;
+    VDQtCodecEngine::instance().setVideoParams(VDQtCodecEngine::getDefaultVideoParamsForCodec("ffv1"));
+    VDSaveVideoSessionConfig save;
+    save.fileTypeIndex = 2; // Matroska, compatible with the lossless fixture codec.
+    VDQtCodecSettings::instance().setSaveVideoSessionConfig(save);
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    auto *inputPreview = window.findChild<VDVideoDisplayWidget*>("inputPreview");
+    auto *outputPreview = window.findChild<VDVideoDisplayWidget*>("outputPreview");
+    if (!position || !inputPreview || !outputPreview) return false;
+    position->SetSelection(0, 0);
+    position->SetPosition(1);
+    const QString output = fixtures.directory.filePath("edited-export-preview.mkv");
+    bool chosen = false, completed = false, correct = true;
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<VDSaveVideoDialog*>(widget)) {
+                if (!dialog->isVisible() || chosen) continue;
+                const auto lines = dialog->findChildren<QLineEdit*>();
+                if (lines.size() != 1) { correct = false; dialog->reject(); continue; }
+                lines.first()->setText(output);
+                chosen = true;
+                dialog->accept();
+            } else if (auto *message = qobject_cast<QMessageBox*>(widget)) {
+                if (!message->isVisible()) continue;
+                completed = message->windowTitle() == "Export Complete";
+                const bool rawMatches = inputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888) == raw;
+                const bool filteredMatches = outputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888) == filtered;
+                const bool finalState = completed && position->GetPosition() == 7
+                    && rawMatches && filteredMatches
+                    && !window.menuBar()->isEnabled() && !position->isEnabled();
+                if (!finalState)
+                    std::cerr << "Export preview: dialog=" << message->windowTitle().toStdString()
+                              << " playhead=" << position->GetPosition() << " raw=" << rawMatches
+                              << " filtered=" << filteredMatches << " menu=" << window.menuBar()->isEnabled()
+                              << " position=" << position->isEnabled() << '\n';
+                if (!rawMatches) {
+                    const QImage actual = inputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888);
+                    std::cerr << "Raw format=" << inputPreview->frameImage().format()
+                              << " size=" << actual.width() << 'x' << actual.height()
+                              << " swapped=" << (actual == filtered)
+                              << " actualRGB=" << actual.pixelColor(0, 0).name().toStdString()
+                              << " expectedRGB=" << raw.pixelColor(0, 0).name().toStdString() << '\n';
+                    for (int candidate = 0; candidate < 24; ++candidate)
+                        if (reference.getFrameImage(candidate).convertToFormat(QImage::Format_RGBA8888) == actual)
+                            std::cerr << "Actual raw matches source ordinal " << candidate << '\n';
+                    if (actual.size() == raw.size()) {
+                        int maximumDifference = 0;
+                        for (int y = 0; y < raw.height(); ++y)
+                            for (int x = 0; x < raw.width() * 4; ++x)
+                                maximumDifference = std::max(maximumDifference,
+                                    std::abs(int(actual.constScanLine(y)[x]) - int(raw.constScanLine(y)[x])));
+                        std::cerr << "Export raw maximum pixel difference=" << maximumDifference << '\n';
+                    }
+                }
+                correct &= finalState;
+                // Inspect before the completion dialog returns, when the final
+                // forced export repaint is visible and ownership is still held.
+                message->accept();
+            }
+        }
+    });
+    responder.start();
+    const bool invoked = invoke(window, "onFileSaveAVI");
+    responder.stop();
+    if (!check(invoked && chosen && completed && correct
+        && window.menuBar()->isEnabled() && position->isEnabled()
+        && readFile(fixtures.mp4) == original,
+        "actual Save Video finishes on the final edited ordinal with matching raw/filtered previews")) return false;
+    VDQtVideoDecoder encoded;
+    return check(encoded.openFile(output) && encoded.ensureFrameIndex().totalFrames == 8
+        && !encoded.getFrameImage(7).isNull(), "the preview-tested export contains all edited frames");
 }
 
 bool queueIsolation(VDQtTestFixtures& fixtures) {
@@ -2187,6 +2467,8 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);
+    if (scenario == "waveform") return waveformPreview(fixtures);
+    if (scenario == "export_preview") return exportPreview(fixtures);
     if (scenario == "audio_inclusion") return audioInclusion(fixtures);
     if (scenario == "audio_export") return audioExportContracts(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);

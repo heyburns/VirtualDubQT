@@ -12,6 +12,8 @@
 #include "VDQtTimeFormatting.h"
 #include "VDQtFilterValidation.h"
 #include "VDQtAudioExport.h"
+#include "VDQtWaveform.h"
+#include "VDQtUiUpdateThrottle.h"
 #include "VDQtSourceSafety.h"
 #include "VDQtOutputTransaction.h"
 #include "VDQtBatchWizard.h"
@@ -4636,11 +4638,18 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         audioPrepared = audioPlayer.openFile(inputPath);
     }
 
-    const auto progress = [this, row](int completed, int total) {
+    QElapsedTimer progressClock;
+    progressClock.start();
+    VDQtUiUpdateThrottle progressUpdates(100);
+    const auto progress = [this, row, &progressClock, &progressUpdates](int completed, int total) {
         const double fraction = total > 0
             ? std::clamp(static_cast<double>(completed) / total, 0.0, 1.0)
             : 0.0;
-        mJobQueue->setJobProgress(row, fraction);
+        // The queue view is substantially more expensive than cancellation
+        // polling. Keep the latter prompt while painting at most ten times/s.
+        if (progressUpdates.shouldUpdate(progressClock.elapsed(),
+                                         total > 0 && completed >= total))
+            mJobQueue->setJobProgress(row, fraction);
         QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
         return !mQueueAbortRequested;
     };
@@ -5324,22 +5333,38 @@ void VDQtMainWindow::onFileSaveAVI() {
 
         VDQtVideoExporter exporter;
 
-        auto frameCallback = [this, opts](int frameIndex, const QImage &rawFrame, const QImage &filteredFrame) {
+        QElapsedTimer previewClock;
+        previewClock.start();
+        VDQtUiUpdateThrottle previewUpdates(33);
+        int latestPreviewFrame = -1;
+        QImage latestRaw, latestFiltered;
+        const auto presentPreview = [&] {
+            if (latestPreviewFrame < 0) return;
             if (opts.videoMode == VideoMode_NormalRecompress) {
                 // Normal Recompress: live preview in INPUT pane ONLY
-                mInputDisplay->setFrameImage(rawFrame);
-                mPositionControl->SetPositionSilent(frameIndex);
-                QCoreApplication::processEvents();
+                mInputDisplay->setFrameImage(latestRaw);
+                mPositionControl->SetPositionSilent(latestPreviewFrame);
             } else if (opts.videoMode == VideoMode_FullProcessing) {
                 // Full Processing: live preview in BOTH Input and Output panes
-                mInputDisplay->setFrameImage(rawFrame);
-                mOutputDisplay->setFrameImage(filteredFrame);
-                mPositionControl->SetPositionSilent(frameIndex);
-                QCoreApplication::processEvents();
+                mInputDisplay->setFrameImage(latestRaw);
+                mOutputDisplay->setFrameImage(latestFiltered);
+                mPositionControl->SetPositionSilent(latestPreviewFrame);
             }
+        };
+        const auto frameCallback = [&](int frameIndex, const QImage &rawFrame, const QImage &filteredFrame) {
+            latestPreviewFrame = frameIndex;
+            latestRaw = rawFrame;
+            latestFiltered = filteredFrame;
+            if (previewUpdates.shouldUpdate(previewClock.elapsed()))
+                presentPreview();
+            // The exporter pumps events for every input frame. Do not nest a
+            // second event loop solely to repaint each encoded output frame.
         };
 
         bool ok = exporter.exportVideo(opts, &mVideoDecoder, &mAudioPlayer, this, frameCallback);
+        // Fast exports can finish inside a throttle interval; always show the
+        // last actually rendered timeline frame, including cuts/rate filters.
+        presentPreview();
 
         if (ok) {
             VDLogWindow::instance(this)->appendLog(QString("[Export] Video export successfully completed: %1").arg(savePath));
@@ -6301,13 +6326,27 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     if (options.timelineExplicit) options.timelineSegments = mTimeline.segments();
 
     VDQtVideoExporter exporter;
+    QElapsedTimer previewClock;
+    previewClock.start();
+    VDQtUiUpdateThrottle previewUpdates(33);
+    int latestPreviewFrame = -1;
+    QImage latestRaw, latestFiltered;
+    const auto presentPreview = [&] {
+        if (latestPreviewFrame < 0) return;
+        mInputDisplay->setFrameImage(latestRaw);
+        mOutputDisplay->setFrameImage(latestFiltered);
+        mPositionControl->SetPositionSilent(latestPreviewFrame);
+    };
     const bool success = exporter.exportVideo(
         options, &mVideoDecoder, nullptr, this,
-        [this](int frameIndex, const QImage& raw, const QImage& filtered) {
-            mInputDisplay->setFrameImage(raw);
-            mOutputDisplay->setFrameImage(filtered);
-            mPositionControl->SetPositionSilent(frameIndex);
+        [&](int frameIndex, const QImage& raw, const QImage& filtered) {
+            latestPreviewFrame = frameIndex;
+            latestRaw = raw;
+            latestFiltered = filtered;
+            if (previewUpdates.shouldUpdate(previewClock.elapsed()))
+                presentPreview();
         });
+    presentPreview();
     if (success) {
         statusBar()->showMessage(
             QString("%1 saved to %2").arg(formatName, QFileInfo(outputPath).fileName()));
@@ -7299,159 +7338,139 @@ void VDQtMainWindow::onViewAudioWaveform() {
         return;
     }
     const int sampleRate = mAudioPlayer.getSampleRate();
-    double startSeconds = 0.0;
-    double durationSeconds = 10.0;
-    if (mPositionControl->hasSelection()) {
-        const int firstFrame = audioSourceFrameForTimelineFrame(
-            mPositionControl->GetSelectionStart());
-        const int lastFrame = audioSourceFrameForTimelineFrame(
-            mPositionControl->GetSelectionEnd() - 1);
-        startSeconds = mVideoDecoder.getFrameTimestampSeconds(firstFrame);
-        const double lastTime = mVideoDecoder.getFrameTimestampSeconds(lastFrame);
-        const double lastDuration = mVideoDecoder.getFrameDurationSeconds(lastFrame);
-        if (!std::isfinite(startSeconds))
-            startSeconds = firstFrame / std::max(0.001, mVideoDecoder.getFps());
-        if (std::isfinite(lastTime) && std::isfinite(lastDuration)
-            && lastTime + lastDuration > startSeconds) {
-            durationSeconds = lastTime + lastDuration - startSeconds;
-        }
-    } else {
-        const int sourceFrame = audioSourceFrameForTimelineFrame(
-            mPositionControl->GetPosition());
-        startSeconds = mVideoDecoder.getFrameTimestampSeconds(sourceFrame);
-        if (!std::isfinite(startSeconds))
-            startSeconds = sourceFrame / std::max(0.001, mVideoDecoder.getFps());
-    }
-    durationSeconds = std::clamp(durationSeconds, 0.05, 30.0);
-    const int64_t firstSample = VDQtSamplePosition(startSeconds, sampleRate);
-    const int64_t sampleCount = VDQtSamplePosition(durationSeconds, sampleRate);
+    const bool selected = mPositionControl->hasSelection();
+    const qint64 firstFrame = selected ? mPositionControl->GetSelectionStart()
+                                      : mPositionControl->GetPosition();
+    const qint64 lastFrame = selected ? mPositionControl->GetSelectionEnd() - 1 : -1;
+    double startSeconds = 0;
     QTemporaryDir directory;
-    if (!directory.isValid()) return;
+    if (!directory.isValid()) {
+        QMessageBox::critical(this, QStringLiteral("Audio Waveform"),
+                              QStringLiteral("Temporary waveform storage could not be created."));
+        return;
+    }
     const QString wavPath = directory.filePath(QStringLiteral("waveform.wav"));
-    QProgressDialog progress(
-        QStringLiteral("Decoding the waveform preview..."),
-        QStringLiteral("Cancel"), 0, 100, this);
+    QProgressDialog progress(QStringLiteral("Decoding the waveform preview..."),
+                             QStringLiteral("Cancel"), 0, 100, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
-    const bool exported = mAudioPlayer.exportAudioToFile(
-        wavPath, firstSample, sampleCount,
-        [&](int value, int maximum) {
-            progress.setRange(0, std::max(1, maximum));
-            progress.setValue(value);
-            QApplication::processEvents(QEventLoop::AllEvents, 10);
-            return !progress.wasCanceled();
-        });
-    progress.close();
+    // Indexing, extraction, effects and peak reading share this dialog. A
+    // completed intermediate phase must not reset a user's cancellation.
+    progress.setAutoReset(false);
+    progress.setAutoClose(false);
+    QElapsedTimer clock;
+    clock.start();
+    VDQtUiUpdateThrottle uiUpdates(100);
+    const auto report = [&](int value, int maximum) {
+        if (progress.wasCanceled()) return false;
+        if (uiUpdates.shouldUpdate(clock.elapsed(), value >= maximum)) {
+            progress.setValue(VDQtScaledProgress(value, maximum, 100));
+        }
+        // Throttle painting, not input/cancellation handling.
+        QApplication::processEvents(QEventLoop::AllEvents, 10);
+        return !progress.wasCanceled();
+    };
+    QString error;
+    QList<QPair<int64_t, int64_t>> ranges;
+    if (mVideoDecoder.isOpen()) {
+        // Unknown identity estimates can legitimately contain zero reported
+        // frames before indexing. Only an explicitly empty edit suppresses audio.
+        if (mTimeline.isEmpty()) {
+            progress.close();
+            QMessageBox::information(this, QStringLiteral("Audio Waveform"),
+                                     QStringLiteral("The edited timeline has no frames."));
+            return;
+        }
+        const QList<VDQtTimelineSegment> edits = mTimeline.isIdentity()
+            ? QList<VDQtTimelineSegment>() : mTimeline.segments();
+        // Unlike a full Save Audio, a video waveform ends at the edited video
+        // boundary. Passing the generic full-soundtrack EOF sentinel here would
+        // turn the preview cap into requested silence beyond a short source.
+        const auto scan = mVideoDecoder.ensureFrameIndex(report);
+        VDQtTimeline previewTimeline;
+        previewTimeline.reset(scan.totalFrames, true);
+        const bool validTimeline = !scan.cancelled && scan.errorMessage.isEmpty()
+            && scan.totalFrames > 0
+            && (edits.isEmpty() || previewTimeline.replaceSegments(edits, &error));
+        if (!validTimeline) {
+            const bool canceled = progress.wasCanceled() || scan.cancelled;
+            progress.close();
+            if (!canceled)
+                QMessageBox::critical(this, QStringLiteral("Audio Waveform"),
+                    !scan.errorMessage.isEmpty() ? scan.errorMessage
+                        : !error.isEmpty() ? error
+                        : QStringLiteral("The waveform timeline could not be indexed."));
+            return;
+        }
+        const qint64 finiteLastFrame = selected ? lastFrame : previewTimeline.frameCount() - 1;
+        if (!VDQtAudioRangesForTimeline(mVideoDecoder, edits, firstFrame, finiteLastFrame,
+                                        sampleRate, &ranges, &error, report)) {
+            const bool canceled = progress.wasCanceled();
+            progress.close();
+            if (!canceled)
+                QMessageBox::critical(this, QStringLiteral("Audio Waveform"), error);
+            return;
+        }
+        startSeconds = VDQtFilterContextForFrame(mVideoDecoder, edits, firstFrame).timestampSeconds;
+    } else {
+        // Preserve external-audio-only previews without inventing a video index.
+        ranges = {{0, -1}};
+    }
+    VDQtAudioExportRequest request;
+    request.outputPath = wavPath;
+    request.codec.codecId = QStringLiteral("pcm_f32le");
+    request.codec.bitDepth = 32;
+    request.codec.sampleRate = request.codec.channels = 0;
+    request.filters = VDQtAudioFilterSystem::instance().activeChain();
+    request.padToRequestedLength = mVideoDecoder.isOpen();
+    const int64_t cap = int64_t(sampleRate) * (selected ? 30 : 10);
+    // Assemble cuts in edit order before effects: histories and tails run once.
+    const bool exported = VDQtCapAudioSampleRanges(ranges, cap, &request.sampleRanges, &error)
+        && VDQtExportAudio(mAudioPlayer, request, report, &error);
     if (!exported) {
-        if (!progress.wasCanceled())
+        const bool canceled = progress.wasCanceled();
+        progress.close();
+        if (!canceled)
             QMessageBox::critical(this, QStringLiteral("Audio Waveform"),
-                                  QStringLiteral("The waveform audio could not be decoded."));
+                error.isEmpty() ? QStringLiteral("The waveform audio could not be decoded.") : error);
         return;
     }
 
-    QFile wav(wavPath);
-    if (!wav.open(QIODevice::ReadOnly)) return;
-    const QByteArray bytes = wav.readAll();
-    const auto le16 = [&bytes](qsizetype offset) -> quint16 {
-        if (offset < 0 || offset + 2 > bytes.size()) return 0;
-        const auto *p = reinterpret_cast<const uchar *>(bytes.constData() + offset);
-        return static_cast<quint16>(p[0] | (p[1] << 8));
-    };
-    const auto le32 = [&bytes](qsizetype offset) -> quint32 {
-        if (offset < 0 || offset + 4 > bytes.size()) return 0;
-        const auto *p = reinterpret_cast<const uchar *>(bytes.constData() + offset);
-        return static_cast<quint32>(p[0])
-            | (static_cast<quint32>(p[1]) << 8)
-            | (static_cast<quint32>(p[2]) << 16)
-            | (static_cast<quint32>(p[3]) << 24);
-    };
-    quint16 formatTag = 0;
-    quint16 channels = 0;
-    quint16 bits = 0;
-    qsizetype dataOffset = -1;
-    qsizetype dataSize = 0;
-    for (qsizetype offset = 12; offset + 8 <= bytes.size();) {
-        const QByteArray id = bytes.mid(offset, 4);
-        const quint32 chunkSize = le32(offset + 4);
-        const qsizetype payload = offset + 8;
-        if (id == QByteArray("fmt ") && chunkSize >= 16
-            && payload + 16 <= bytes.size()) {
-            formatTag = le16(payload);
-            channels = le16(payload + 2);
-            bits = le16(payload + 14);
-            if (formatTag == 0xfffe && chunkSize >= 40)
-                formatTag = le16(payload + 24);
-        } else if (id == QByteArray("data")) {
-            dataOffset = payload;
-            dataSize = std::min<qsizetype>(
-                chunkSize == 0xffffffffU ? bytes.size() - payload : chunkSize,
-                bytes.size() - payload);
-            break;
-        }
-        const quint64 next = static_cast<quint64>(payload)
-            + chunkSize + (chunkSize & 1U);
-        if (next <= static_cast<quint64>(offset)
-            || next > static_cast<quint64>(bytes.size())) break;
-        offset = static_cast<qsizetype>(next);
-    }
-    const int bytesPerSample = bits / 8;
-    const int bytesPerFrame = channels * bytesPerSample;
-    if (dataOffset < 0 || channels == 0 || bytesPerSample <= 0
-        || bytesPerFrame <= 0 || dataSize < bytesPerFrame) {
-        QMessageBox::critical(this, QStringLiteral("Audio Waveform"),
-                              QStringLiteral("The temporary WAV layout is unsupported."));
+    VDQtWaveformData waveform;
+    progress.setLabelText(QStringLiteral("Drawing the waveform preview..."));
+    const bool decoded = VDQtReadWaveformPeaks(wavPath, 1100, &waveform, &error,
+        [&](qint64 current, qint64 total) {
+            const int percent = total > 0 ? static_cast<int>(std::clamp(
+                static_cast<long double>(current) / total * 100, 0.0L, 100.0L)) : 0;
+            return report(percent, 100);
+        });
+    const bool canceled = progress.wasCanceled();
+    progress.close();
+    if (!decoded) {
+        if (!canceled)
+            QMessageBox::critical(this, QStringLiteral("Audio Waveform"), error);
         return;
     }
-    const qint64 frames = dataSize / bytesPerFrame;
     QImage chart(1100, 360, QImage::Format_ARGB32_Premultiplied);
+    if (chart.isNull()) {
+        QMessageBox::critical(this, QStringLiteral("Audio Waveform"),
+                              QStringLiteral("The waveform image could not be allocated."));
+        return;
+    }
     chart.fill(QColor(18, 18, 24));
     QPainter painter(&chart);
     painter.setPen(QColor(55, 55, 68));
     painter.drawLine(0, chart.height() / 2, chart.width(), chart.height() / 2);
     painter.setPen(QPen(QColor(0, 205, 225), 1));
-    const auto normalizedSample = [&](const char *sample) {
-        const auto *p = reinterpret_cast<const uchar *>(sample);
-        if (formatTag == 3 && bits == 32) {
-            float value = 0.0f;
-            std::memcpy(&value, sample, sizeof(value));
-            return std::clamp(static_cast<double>(value), -1.0, 1.0);
-        }
-        if (bits == 8) return (static_cast<int>(p[0]) - 128) / 128.0;
-        qint64 value = 0;
-        if (bits == 16)
-            value = static_cast<qint16>(p[0] | (p[1] << 8));
-        else if (bits == 24) {
-            value = static_cast<qint32>(p[0] | (p[1] << 8) | (p[2] << 16));
-            if (value & 0x800000) value |= ~0xffffffLL;
-        } else if (bits == 32)
-            value = static_cast<qint32>(le32(sample - bytes.constData()));
-        else return 0.0;
-        const double scale = std::ldexp(1.0, bits - 1);
-        return std::clamp(value / scale, -1.0, 1.0);
-    };
     for (int x = 0; x < chart.width(); ++x) {
-        const qint64 begin = frames * x / chart.width();
-        const qint64 end = std::max(begin + 1,
-            frames * (x + 1) / chart.width());
-        double peak = 0.0;
-        for (qint64 frame = begin; frame < end; ++frame) {
-            const char *frameData = bytes.constData() + dataOffset
-                + frame * bytesPerFrame;
-            for (int channel = 0; channel < channels; ++channel)
-                peak = std::max(peak, std::abs(normalizedSample(
-                    frameData + channel * bytesPerSample)));
-        }
-        const int halfHeight = chart.height() / 2 - 18;
-        const int amplitude = static_cast<int>(peak * halfHeight);
-        painter.drawLine(x, chart.height() / 2 - amplitude,
-                         x, chart.height() / 2 + amplitude);
+        const int amplitude = static_cast<int>(waveform.peaks.at(x) * (chart.height() / 2 - 18));
+        painter.drawLine(x, chart.height() / 2 - amplitude, x, chart.height() / 2 + amplitude);
     }
     painter.setPen(QColor(210, 210, 220));
     painter.drawText(10, 18,
-        QString("%1 s from %2 s — %3 Hz, %4 channel(s), %5-bit")
-            .arg(frames / static_cast<double>(sampleRate), 0, 'f', 3)
-            .arg(startSeconds, 0, 'f', 3)
-            .arg(sampleRate).arg(channels).arg(bits));
+        QString("%1 s from timeline %2 s — %3 Hz, %4 channel(s), %5-bit")
+            .arg(waveform.durationSeconds, 0, 'f', 3).arg(startSeconds, 0, 'f', 3)
+            .arg(waveform.sampleRate).arg(waveform.channels).arg(waveform.validBits));
     painter.end();
 
     QDialog dialog(this);
@@ -8920,7 +8939,7 @@ void VDQtMainWindow::onCaptureVideo() {
     connect(&progress, &QDialog::rejected, &progress,
             [&]() { stopRequested = true; });
     progress.show();
-    while (!capture.waitForFinished(100)) {
+    while (capture.state() != QProcess::NotRunning && !capture.waitForFinished(100)) {
         diagnosticTail += capture.readAllStandardError();
         if (livePreview->isChecked()) {
             previewBytes += capture.readAllStandardOutput();

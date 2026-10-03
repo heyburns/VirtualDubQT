@@ -110,6 +110,9 @@ public:
         bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     };
 
+    // frameCallback runs for every rendered output picture. Its index is the
+    // selected EDITED TIMELINE position, not the source decoder ordinal; Bob
+    // phases can share an index. UI clients may throttle presentation locally.
     bool exportVideo(const ExportOptions& options,
                      VDQtVideoDecoder *activeDecoder = nullptr,
                      VDQtAudioPlayer *audioPlayer = nullptr,

@@ -162,7 +162,7 @@ void VDVideoFiltersDialog::refreshFilterTable() {
 
     int curW = mSourceWidth > 0 ? mSourceWidth : 1920;
     int curH = mSourceHeight > 0 ? mSourceHeight : 1080;
-    int bytesPerPixel = 4;
+    int bytesPerPixel = mSourceFrame.depth() > 32 ? 8 : 4;
     bool currentSizeKnown = true;
 
     for (int i = 0; i < chain.size(); i++) {

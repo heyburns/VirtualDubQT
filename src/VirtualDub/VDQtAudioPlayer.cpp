@@ -979,6 +979,8 @@ public:
         if (!path.isEmpty()) QFile::remove(path);
     }
 
+    int64_t dataBytesWritten() const { return mDataBytes; }
+
 private:
     QByteArray makeHeader(int64_t dataBytes) const
     {
@@ -1111,7 +1113,9 @@ bool transcodeTemporaryWav(const QString &wavPath,
 
     QByteArray diagnosticTail;
     bool cancelled = false;
-    while (!process.waitForFinished(50)) {
+    // waitForFinished() returns false when the child is already NotRunning,
+    // not only on timeout. A very fast encoder must not spin forever here.
+    while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
         diagnosticTail += process.readAll();
         if (diagnosticTail.size() > 64 * 1024) {
             diagnosticTail.remove(0, diagnosticTail.size() - 64 * 1024);
@@ -1225,7 +1229,10 @@ public:
     bool atEnd() const override
     {
         QMutexLocker locker(&mMutex);
-        return mProducerEof && bufferedBytesUnlocked() == 0;
+        // Qt may retain read-ahead after our producer window is empty. A sink
+        // or filter trusting EOF must still be able to drain those PCM bytes.
+        return mProducerEof && bufferedBytesUnlocked() == 0
+            && QIODevice::bytesAvailable() == 0;
     }
 
     void close() override
@@ -1634,6 +1641,108 @@ private:
 };
 
 #ifdef VDQT_AUDIO_TESTING
+namespace {
+// Read only until the device reports EOF, exactly as a downstream filter/sink
+// may do. A small caller read can leave a large QIODevice-private read-ahead
+// tail after the producer's own PCM buffer is empty.
+bool verifyAudioEofForTesting(QIODevice& device, qint64 expectedBytes,
+                             int pullBytes, QString *errorMessage) {
+    std::array<char, 8192> buffer;
+    qint64 delivered = 0;
+    QElapsedTimer deadline;
+    deadline.start();
+    while (!device.atEnd()) {
+        if (deadline.elapsed() > 10000) {
+            if (errorMessage) *errorMessage = QStringLiteral("Audio EOF did not arrive within the test deadline.");
+            return false;
+        }
+        const qint64 amount = device.read(buffer.data(), pullBytes);
+        if (amount < 0 || amount > expectedBytes - delivered) {
+            if (errorMessage) *errorMessage = QStringLiteral("Audio EOF consumption returned invalid or extra PCM bytes.");
+            return false;
+        }
+        if (amount > 0) delivered += amount;
+        else QThread::msleep(1);
+    }
+    if (delivered != expectedBytes || device.bytesAvailable() != 0) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "Audio EOF with %1-byte pulls delivered %2 of %3 bytes; %4 unread bytes remain.")
+                .arg(pullBytes).arg(delivered).arg(expectedBytes).arg(device.bytesAvailable());
+        return false;
+    }
+    if (device.read(buffer.data(), 1) != 0 || !device.atEnd()) {
+        if (errorMessage) *errorMessage = QStringLiteral("Reading completed audio did not retain a stable empty EOF.");
+        return false;
+    }
+    if (errorMessage) errorMessage->clear();
+    return true;
+}
+}
+
+bool VDQtRunAudioEofRegression(const QString& filePath, int64_t expectedSampleFrames,
+                              QString *errorMessage) {
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+    if (expectedSampleFrames < 1
+        || expectedSampleFrames > std::numeric_limits<qint64>::max() / format.bytesPerFrame()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The audio EOF fixture length is invalid.");
+        return false;
+    }
+    VDQtFFmpegAudioDevice device(filePath, -1, format, expectedSampleFrames);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+    bool first = true;
+    for (const int pull : {1, 3, 7, 64, 8192}) {
+        if (!first && !device.seekToSample(0)) {
+            if (errorMessage) *errorMessage = device.error();
+            return false;
+        }
+        first = false;
+        if (!verifyAudioEofForTesting(device, expectedSampleFrames * format.bytesPerFrame(),
+                                     pull, errorMessage)) return false;
+    }
+    if (!device.seekToSample(expectedSampleFrames)) {
+        if (errorMessage) *errorMessage = QStringLiteral("Seeking the FFmpeg EOF fixture to its end failed: %1")
+            .arg(device.error());
+        return false;
+    }
+    return verifyAudioEofForTesting(device, 0, 1, errorMessage);
+}
+
+bool VDQtRunAvsAudioEofRegression(AVS_Clip *clip, const AVS_VideoInfo *vi,
+                                 QString *errorMessage) {
+    if (!clip || !vi || !avs_has_audio(vi) || vi->nchannels < 1 || vi->num_audio_samples < 1
+        || vi->num_audio_samples > std::numeric_limits<qint64>::max() / (qint64(vi->nchannels) * 2)) {
+        if (errorMessage) *errorMessage = QStringLiteral("The AviSynth EOF fixture length is invalid.");
+        return false;
+    }
+    AVSAudioDevice device(clip, vi);
+    if (!device.initialize()) {
+        if (errorMessage) *errorMessage = device.error();
+        return false;
+    }
+    bool first = true;
+    for (const int pull : {1, 3, 7, 64, 8192}) {
+        if (!first && !device.seekToSample(0)) {
+            if (errorMessage) *errorMessage = device.error();
+            return false;
+        }
+        first = false;
+        if (!verifyAudioEofForTesting(device, vi->num_audio_samples * vi->nchannels * 2,
+                                     pull, errorMessage)) return false;
+    }
+    if (!device.seekToSample(vi->num_audio_samples)) {
+        if (errorMessage) *errorMessage = QStringLiteral("Seeking the AviSynth EOF fixture to its end failed: %1")
+            .arg(device.error());
+        return false;
+    }
+    return verifyAudioEofForTesting(device, 0, 1, errorMessage);
+}
+
 bool VDQtRunAudioBufferRegression(const QString& filePath, QString *errorMessage)
 {
     QAudioFormat format;
@@ -2039,7 +2148,9 @@ QString AVSAudioDevice::error() const
 bool AVSAudioDevice::atEnd() const
 {
     QMutexLocker locker(&m_mutex);
-    return m_producerEof && bufferedBytesUnlocked() == 0;
+    // The producer's EOF does not consume QIODevice's private read-ahead tail.
+    return m_producerEof && bufferedBytesUnlocked() == 0
+        && QIODevice::bytesAvailable() == 0;
 }
 
 void AVSAudioDevice::close()
@@ -2801,7 +2912,8 @@ bool VDQtAudioPlayer::exportAudioToFile(
     int64_t startSample,
     int64_t sampleCount,
     std::function<bool(int progress, int total)> progressCallback,
-    const QList<VDAudioFilterInstance> *filterChain)
+    const QList<VDAudioFilterInstance> *filterChain,
+    bool padToRequestedLength)
 {
 #ifdef VDQT_AUDIO_TESTING
     mLastExportUsedSeek = false;
@@ -2836,6 +2948,8 @@ bool VDQtAudioPlayer::exportAudioToFile(
         sampleCount = maximumAvailable;
     }
     if (sampleCount == 0 || maximumAvailable == 0) return false;
+    if (sampleCount > 0 && startSample > std::numeric_limits<int64_t>::max() - sampleCount)
+        return false;
 
     VDQtAudioFilterSystem filters;
     filters.replaceActiveChain(filterChain ? *filterChain
@@ -3100,7 +3214,10 @@ bool VDQtAudioPlayer::exportAudioToFile(
             if (decodedCursor >= wantedEnd) break;
         }
 
-        if (ok && !decoder.failed() && wantedEnd != std::numeric_limits<int64_t>::max() &&
+        // A waveform's finite window is a cap, not a request to invent audio
+        // after EOF. Leave the timestamp-gap padding inside the decode loop
+        // unchanged: that silence is part of the source's actual timeline.
+        if (padToRequestedLength && ok && !decoder.failed() && wantedEnd != std::numeric_limits<int64_t>::max() &&
             decodedCursor < wantedEnd) {
             const int64_t silenceStart = std::max(startSample, decodedCursor);
             if (silenceStart < wantedEnd &&
@@ -3114,12 +3231,14 @@ bool VDQtAudioPlayer::exportAudioToFile(
                        << decoder.error();
             ok = false;
         }
-        if (ok && sampleCount > 0 && writtenSamples != sampleCount) {
+        if (ok && padToRequestedLength && sampleCount > 0 && writtenSamples != sampleCount) {
             qWarning() << "[VDQtAudioPlayer] Audio source ended before the requested sample range:"
                        << writtenSamples << "of" << sampleCount << "samples were available.";
             ok = false;
         }
-        if (writtenSamples <= 0) ok = false;
+        if (writtenSamples <= 0 || writer.dataBytesWritten() <= 0
+            || writer.dataBytesWritten() % bytesPerFrame != 0
+            || writer.dataBytesWritten() / bytesPerFrame != writtenSamples) ok = false;
 
         if (ok && (!progressCallback ||
                    progressCallback(extractionProgressMaximum, 100))) {
@@ -3156,7 +3275,8 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
     const QString& outputPath,
     const QList<QPair<int64_t, int64_t>>& sampleRanges,
     std::function<bool(int progress, int total)> progressCallback,
-    const QList<VDAudioFilterInstance> *filterChain)
+    const QList<VDAudioFilterInstance> *filterChain,
+    bool padToRequestedLength)
 {
     if (sampleRanges.isEmpty() || outputPath.isEmpty()) return false;
     const QList<VDAudioFilterInstance> filters = filterChain ? *filterChain
@@ -3168,7 +3288,7 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
     if (sampleRanges.size() == 1) {
         return exportAudioToFile(outputPath, sampleRanges.first().first,
                                  sampleRanges.first().second,
-                                 std::move(progressCallback), filterChain);
+                                 std::move(progressCallback), filterChain, padToRequestedLength);
     }
     QTemporaryDir directory;
     if (!directory.isValid()) return false;
@@ -3186,7 +3306,7 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
                     const int aggregate = static_cast<int>(std::llround(
                         90.0 * (index + fraction) / sampleRanges.size()));
                     return progressCallback(std::clamp(aggregate, 0, 90), 100);
-                }, filterChain)) {
+                }, filterChain, padToRequestedLength)) {
             return false;
         }
         segmentPaths.append(segmentPath);
@@ -3221,7 +3341,8 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
          QStringLiteral("-y"), stagedPath});
     if (!process.waitForStarted(5000)) return false;
     bool cancelled = false;
-    while (!process.waitForFinished(50)) {
+    // An already-completed child also makes waitForFinished() return false.
+    while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
         if (progressCallback && !progressCallback(95, 100)) {
             cancelled = true;
             process.terminate();

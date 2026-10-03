@@ -63,12 +63,29 @@ bool disabledAndConditional() {
     }
     return passed;
 }
+
+bool highDepthAllocationBudget() {
+    auto& filters = VDQtFilterSystem::instance();
+    filters.clearFilters();
+    filters.addFilter(VDFilterType::Canvas);
+    // This canvas is below 512 MiB at four bytes per pixel but exceeds it at
+    // native RGBA64 depth. Only describe the requested output; never allocate it.
+    configure(0, {{"width", 30000}, {"height", 3000}});
+    const QImage source(8, 8, QImage::Format_RGBA64);
+    VDVideoFiltersDialog dialog(8, 8, source);
+    auto *table = dialog.findChild<QTableWidget *>();
+    return check(table && table->item(0, 2)->text() == "Invalid"
+        && table->item(0, 3)->text().contains("invalid settings")
+        && !table->item(0, 2)->toolTip().isEmpty(),
+        "filter table validates the actual native-depth allocation budget");
+}
 }
 
 int main(int argc, char **argv) {
     QApplication application(argc, argv);
     bool passed = chainDimensions();
     passed &= disabledAndConditional();
+    passed &= highDepthAllocationBudget();
     VDQtFilterSystem::instance().clearFilters();
     return passed ? 0 : 1;
 }
