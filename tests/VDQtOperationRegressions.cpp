@@ -1536,6 +1536,69 @@ bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
     QString error;
     if (!VDQtProjectFile::saveProject(projectPath, project, &error)) return false;
     const auto original = QJsonDocument::fromJson(readFile(projectPath)).object();
+    const QMap<QString, QStringList> processingIntegers = {
+        {"", {"videoMode", "audioMode"}},
+        {"frameRate", {"sourceMode", "conversionMode", "decimateN"}},
+        {"decompression", {"colorSpace", "componentRange"}},
+        {"decoderError", {"mode"}},
+        {"rawVideo", {"scanlineAlignment"}},
+        {"videoCodec", {"crf", "targetBitrateKbps", "maxBitrateKbps", "keyframeInterval",
+                        "bFrames", "proresProfile", "ffv1Version", "ffv1Coder", "ffv1Slices",
+                        "huffyuvPredictor", "cineformQuality"}},
+        {"audioCodec", {"vbrQuality", "bitrateKbps", "sampleRate", "channels", "bitDepth"}}
+    };
+    for (auto section = processingIntegers.cbegin(); section != processingIntegers.cend(); ++section) {
+        for (const QString& key : section.value()) {
+            for (const QJsonValue& invalid : {QJsonValue(1e100), QJsonValue(3.5), QJsonValue("4"),
+                                             QJsonValue(QJsonValue::Null), QJsonValue(true)}) {
+                auto root = original;
+                auto processing = root.value("processing").toObject();
+                if (section.key().isEmpty()) processing[key] = invalid;
+                else {
+                    auto nested = processing.value(section.key()).toObject();
+                    nested[key] = invalid;
+                    processing[section.key()] = nested;
+                }
+                root["processing"] = processing;
+                VDQtProjectState retained = project;
+                retained.position = 7;
+                if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+                    || !check(!VDQtProjectFile::loadProject(projectPath, &retained, &error)
+                               && !error.isEmpty() && retained.position == 7,
+                               "present malformed processing integers cannot become defaults")) {
+                    std::cerr << section.key().toStdString() << '.' << key.toStdString() << '\n';
+                    return false;
+                }
+            }
+        }
+    }
+    for (const QString& key : {QString("customSourceFps"), QString("convertFps")}) {
+        auto root = original;
+        auto processing = root.value("processing").toObject();
+        auto rate = processing.value("frameRate").toObject();
+        rate[key] = "24";
+        processing["frameRate"] = rate;
+        root["processing"] = processing;
+        if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+            || !check(!VDQtProjectFile::loadProject(projectPath, &project, &error),
+                       "present nonnumeric frame rates cannot become automatic defaults")) return false;
+    }
+    for (const QString& key : {QString("imageSequenceFps"), QString("rawFrameRate")}) {
+        for (const QJsonValue& invalid : {QJsonValue("24"), QJsonValue(QJsonValue::Null), QJsonValue(true)}) {
+            auto root = original;
+            root[key] = invalid;
+            if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+                || !check(!VDQtProjectFile::loadProject(projectPath, &project, &error),
+                           "present nonnumeric source rates cannot become defaults")) return false;
+        }
+    }
+    auto legacyDefaults = original;
+    legacyDefaults["processing"] = QJsonObject();
+    if (!fixtures.writeText(projectPath, QJsonDocument(legacyDefaults).toJson())
+        || !check(VDQtProjectFile::loadProject(projectPath, &project, &error)
+                  && project.processing.videoCodec.crf == VDVideoCodecParams().crf
+                  && project.processing.frameRate.decimateN == 2,
+                  "omitted legacy processing fields still use established defaults")) return false;
     for (const QString& key : {QString("position"), QString("selectionStart"), QString("selectionEnd"),
                               QString("sourceFrameCount"), QString("zoomStart"), QString("zoomEnd"),
                               QString("rawByteOffset")}) {
@@ -1578,6 +1641,35 @@ bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
     job.options.outputPath = fixtures.directory.filePath("numeric-output.mkv");
     if (!VDQtProjectFile::saveJobQueue(jobPath, {job}, &error)) return false;
     const auto originalQueue = QJsonDocument::fromJson(readFile(jobPath)).object();
+    for (const QString& key : {QString("progress"), QString("imageSequenceFps"),
+                              QString("rawFrameRate"), QString("customFps")}) {
+        auto queueRoot = originalQueue;
+        auto saved = queueRoot.value("jobs").toArray().first().toObject();
+        if (key == "customFps") {
+            auto options = saved.value("options").toObject();
+            options[key] = "24";
+            saved["options"] = options;
+        } else saved[key] = "24";
+        queueRoot["jobs"] = QJsonArray{saved};
+        QList<VDQtJobState> retained{job};
+        if (!fixtures.writeText(jobPath, QJsonDocument(queueRoot).toJson())
+            || !check(!VDQtProjectFile::loadJobQueue(jobPath, &retained, &error)
+                      && retained.size() == 1 && retained.first().id == job.id,
+                      "nonnumeric queued rates/progress cannot become defaults")) return false;
+    }
+    for (const QString& key : {QString("operation"), QString("status")}) {
+        for (const QJsonValue& invalid : {QJsonValue(1e100), QJsonValue(3.5), QJsonValue("0")}) {
+            auto queueRoot = originalQueue;
+            auto saved = queueRoot.value("jobs").toArray().first().toObject();
+            saved[key] = invalid;
+            queueRoot["jobs"] = QJsonArray{saved};
+            QList<VDQtJobState> retained{job};
+            if (!fixtures.writeText(jobPath, QJsonDocument(queueRoot).toJson())
+                || !check(!VDQtProjectFile::loadJobQueue(jobPath, &retained, &error)
+                          && retained.size() == 1 && retained.first().id == job.id,
+                          "malformed queued enums cannot become another operation/status")) return false;
+        }
+    }
     for (const QString& key : {QString("rawByteOffset"), QString("startFrame"), QString("endFrame")}) {
         auto queueRoot = originalQueue;
         auto saved = queueRoot.value("jobs").toArray().first().toObject();

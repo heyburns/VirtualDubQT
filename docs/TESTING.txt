@@ -1134,3 +1134,20 @@ This measures restart overhead, not a sevenfold overall playback improvement.
 Full Release 59/59 and ASan/UBSan 55/55 passed, plus the regular application's
 independent MP4/native-AVS decode/export smoke. Hardware/plugin and progressive
 ProRes slowdown coverage remains as described above.
+
+Typed saved processing/queue numbers (M21 follow-up)
+----------------------------------------------------
+
+The extended numeric regression reproduced a malformed saved video mode loading
+as a valid default. All processing integer selectors and codec integer overlays
+now check type, integrality and representability before conversion; enum/range
+validation remains authoritative. Floating-point source/processing/job rates and
+queue progress require actual finite JSON numbers. Present invalid values are
+errors, while absent older fields still receive their established defaults.
+Job operation/status and document/filter type selectors follow the same rule.
+
+The regression covers every saved processing integer with huge, fractional,
+string, null and boolean values, malformed source/output rates and job enums,
+atomic destination preservation, and omitted legacy fields. After the final
+strengthened checks, full Release 59/59 and ASan/UBSan 55/55 passed, plus the
+regular application's independent MP4/native-AVS decode/export smoke.

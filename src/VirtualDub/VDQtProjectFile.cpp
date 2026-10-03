@@ -15,6 +15,7 @@
 #include <QUuid>
 
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 
 namespace {
@@ -61,6 +62,33 @@ bool readInteger(const QJsonObject& object, const char *key, Integer *destinatio
                  QString *errorMessage) {
     return readIntegerValue(object.value(QLatin1String(key)), QLatin1String(key),
                             destination, minimum, maximum, fallback, errorMessage);
+}
+
+// Codec-specific semantic limits are checked below or by the encoder policy.
+// This common overlay never substitutes a default for a present malformed int.
+template<class Config>
+bool readIntegerMembers(const QJsonObject& object, Config *destination,
+                        std::initializer_list<std::pair<const char *, int Config::*>> fields,
+                        QString *errorMessage) {
+    for (const auto& field : fields) {
+        int& value = destination->*(field.second);
+        if (!readInteger(object, field.first, &value, std::numeric_limits<int>::min(),
+                         std::numeric_limits<int>::max(), value, errorMessage)) return false;
+    }
+    return true;
+}
+
+bool readReal(const QJsonObject& object, const char *key, double *destination,
+              double minimum, double maximum, double fallback, QString *errorMessage) {
+    const auto value = object.value(QLatin1String(key));
+    const double number = value.isUndefined() ? fallback : value.toDouble();
+    if ((!value.isUndefined() && !value.isDouble()) || !std::isfinite(number)
+        || number < minimum || number > maximum) {
+        setError(errorMessage, QStringLiteral("The saved number '%1' is invalid.").arg(QLatin1String(key)));
+        return false;
+    }
+    *destination = number;
+    return true;
 }
 
 bool parseTimelineIntent(const QJsonObject& object, int version,
@@ -117,29 +145,32 @@ QJsonObject videoCodecToJson(const VDVideoCodecParams& value) {
     return object;
 }
 
-VDVideoCodecParams videoCodecFromJson(const QJsonObject& object) {
+bool videoCodecFromJson(const QJsonObject& object, VDVideoCodecParams *destination,
+                        QString *errorMessage) {
     VDVideoCodecParams value;
     value.codecId = object.value("codecId").toString(value.codecId);
     value.rateMode = object.value("rateMode").toString(value.rateMode);
-    value.crf = object.value("crf").toInt(value.crf);
-    value.targetBitrateKbps = object.value("targetBitrateKbps").toInt(value.targetBitrateKbps);
-    value.maxBitrateKbps = object.value("maxBitrateKbps").toInt(value.maxBitrateKbps);
+    if (!readIntegerMembers<VDVideoCodecParams>(object, &value, {
+            {"crf", &VDVideoCodecParams::crf},
+            {"targetBitrateKbps", &VDVideoCodecParams::targetBitrateKbps},
+            {"maxBitrateKbps", &VDVideoCodecParams::maxBitrateKbps},
+            {"keyframeInterval", &VDVideoCodecParams::keyframeInterval},
+            {"bFrames", &VDVideoCodecParams::bFrames},
+            {"proresProfile", &VDVideoCodecParams::proresProfile},
+            {"ffv1Version", &VDVideoCodecParams::ffv1Version},
+            {"ffv1Coder", &VDVideoCodecParams::ffv1Coder},
+            {"ffv1Slices", &VDVideoCodecParams::ffv1Slices},
+            {"huffyuvPredictor", &VDVideoCodecParams::huffyuvPredictor},
+            {"cineformQuality", &VDVideoCodecParams::cineformQuality}}, errorMessage)) return false;
     value.twoPass = object.value("twoPass").toBool(value.twoPass);
     value.preset = object.value("preset").toString(value.preset);
     value.tune = object.value("tune").toString(value.tune);
     value.profile = object.value("profile").toString(value.profile);
     value.pixFmt = object.value("pixelFormat").toString(value.pixFmt);
     value.colorMatrix = object.value("colorMatrix").toString(value.colorMatrix);
-    value.keyframeInterval = object.value("keyframeInterval").toInt(value.keyframeInterval);
-    value.bFrames = object.value("bFrames").toInt(value.bFrames);
-    value.proresProfile = object.value("proresProfile").toInt(value.proresProfile);
     value.proresVendor = object.value("proresVendor").toString(value.proresVendor);
-    value.ffv1Version = object.value("ffv1Version").toInt(value.ffv1Version);
-    value.ffv1Coder = object.value("ffv1Coder").toInt(value.ffv1Coder);
-    value.ffv1Slices = object.value("ffv1Slices").toInt(value.ffv1Slices);
-    value.huffyuvPredictor = object.value("huffyuvPredictor").toInt(value.huffyuvPredictor);
-    value.cineformQuality = object.value("cineformQuality").toInt(value.cineformQuality);
-    return value;
+    *destination = value;
+    return true;
 }
 
 QJsonObject audioCodecToJson(const VDAudioCodecParams& value) {
@@ -154,16 +185,19 @@ QJsonObject audioCodecToJson(const VDAudioCodecParams& value) {
     return object;
 }
 
-VDAudioCodecParams audioCodecFromJson(const QJsonObject& object) {
+bool audioCodecFromJson(const QJsonObject& object, VDAudioCodecParams *destination,
+                        QString *errorMessage) {
     VDAudioCodecParams value;
     value.codecId = object.value("codecId").toString(value.codecId);
     value.rateMode = object.value("rateMode").toString(value.rateMode);
-    value.vbrQuality = object.value("vbrQuality").toInt(value.vbrQuality);
-    value.bitrateKbps = object.value("bitrateKbps").toInt(value.bitrateKbps);
-    value.sampleRate = object.value("sampleRate").toInt(value.sampleRate);
-    value.channels = object.value("channels").toInt(value.channels);
-    value.bitDepth = object.value("bitDepth").toInt(value.bitDepth);
-    return value;
+    if (!readIntegerMembers<VDAudioCodecParams>(object, &value, {
+            {"vbrQuality", &VDAudioCodecParams::vbrQuality},
+            {"bitrateKbps", &VDAudioCodecParams::bitrateKbps},
+            {"sampleRate", &VDAudioCodecParams::sampleRate},
+            {"channels", &VDAudioCodecParams::channels},
+            {"bitDepth", &VDAudioCodecParams::bitDepth}}, errorMessage)) return false;
+    *destination = value;
+    return true;
 }
 
 QJsonObject processingToJson(const VDQtProcessingState& state) {
@@ -264,57 +298,32 @@ bool parseProcessing(const QJsonObject& object,
     // operation transactional, this applies current defaults to keys absent in
     // older documents before their explicitly stored values are overlaid.
     VDQtProcessingState result;
-    result.videoMode = object.value("videoMode").toInt(result.videoMode);
-    result.audioMode = object.value("audioMode").toInt(result.audioMode);
+    if (!readInteger(object, "videoMode", &result.videoMode, VideoMode_DirectStreamCopy,
+                     VideoMode_FullProcessing, result.videoMode, errorMessage)
+        || !readInteger(object, "audioMode", &result.audioMode, AudioMode_DirectStreamCopy,
+                        AudioMode_FullProcessing, result.audioMode, errorMessage)) return false;
     result.smartRendering = object.value("smartRendering").toBool(false);
     result.preserveEmptyFrames = object.value("preserveEmptyFrames").toBool(true);
-    if (result.videoMode < VideoMode_DirectStreamCopy
-        || result.videoMode > VideoMode_FullProcessing
-        || result.audioMode < AudioMode_DirectStreamCopy
-        || result.audioMode > AudioMode_FullProcessing) {
-        setError(errorMessage, QStringLiteral("The processing file contains an invalid audio/video mode."));
-        return false;
-    }
-
     const QJsonObject frameRate = object.value("frameRate").toObject();
-    result.frameRate.sourceMode = frameRate.value("sourceMode").toInt();
-    result.frameRate.customSourceFps = frameRate.value("customSourceFps").toDouble();
-    result.frameRate.convMode = frameRate.value("conversionMode").toInt();
-    result.frameRate.decimateN = frameRate.value("decimateN").toInt(2);
-    result.frameRate.convertFps = frameRate.value("convertFps").toDouble();
-    if (result.frameRate.sourceMode < 0 || result.frameRate.sourceMode > 2
-        || result.frameRate.convMode < 0 || result.frameRate.convMode > 4
-        || result.frameRate.decimateN < 1 || result.frameRate.decimateN > 1000000
-        || !std::isfinite(result.frameRate.customSourceFps)
-        || !std::isfinite(result.frameRate.convertFps)
-        || result.frameRate.customSourceFps < 0.0
-        || result.frameRate.convertFps < 0.0
-        || result.frameRate.customSourceFps > 10000.0
-        || result.frameRate.convertFps > 10000.0) {
-        setError(errorMessage, QStringLiteral("The processing file contains invalid frame-rate settings."));
-        return false;
-    }
+    if (!readInteger(frameRate, "sourceMode", &result.frameRate.sourceMode, 0, 2, 0, errorMessage)
+        || !readInteger(frameRate, "conversionMode", &result.frameRate.convMode, 0, 4, 0, errorMessage)
+        || !readInteger(frameRate, "decimateN", &result.frameRate.decimateN, 1, 1000000, 2, errorMessage)
+        || !readReal(frameRate, "customSourceFps", &result.frameRate.customSourceFps, 0, 10000, 0, errorMessage)
+        || !readReal(frameRate, "convertFps", &result.frameRate.convertFps, 0, 10000, 0, errorMessage)) return false;
 
     const QJsonObject decompression = object.value("decompression").toObject();
     result.decompression.formatName =
         decompression.value("formatName").toString(QStringLiteral("Autoselect"));
-    result.decompression.colorSpace = decompression.value("colorSpace").toInt();
-    result.decompression.componentRange = decompression.value("componentRange").toInt();
     const QJsonObject decoderError = object.value("decoderError").toObject();
-    result.decoderErrorMode.errorMode = decoderError.value("mode").toInt();
-    if (result.decompression.colorSpace < 0 || result.decompression.colorSpace > 2
-        || result.decompression.componentRange < 0
-        || result.decompression.componentRange > 2
-        || result.decoderErrorMode.errorMode < 0
-        || result.decoderErrorMode.errorMode > 2) {
-        setError(errorMessage, QStringLiteral("The processing file contains invalid decoder settings."));
-        return false;
-    }
+    if (!readInteger(decompression, "colorSpace", &result.decompression.colorSpace, 0, 2, 0, errorMessage)
+        || !readInteger(decompression, "componentRange", &result.decompression.componentRange, 0, 2, 0, errorMessage)
+        || !readInteger(decoderError, "mode", &result.decoderErrorMode.errorMode, 0, 2, 0, errorMessage)) return false;
 
     const QJsonObject rawVideo = object.value("rawVideo").toObject();
     result.rawVideo.pixelFormat =
         rawVideo.value("pixelFormat").toString(QStringLiteral("yuv420p"));
-    result.rawVideo.scanlineAlignment = rawVideo.value("scanlineAlignment").toInt(4);
+    if (!readInteger(rawVideo, "scanlineAlignment", &result.rawVideo.scanlineAlignment,
+                     1, 64, 4, errorMessage)) return false;
     result.rawVideo.swapChromaPlanes = rawVideo.value("swapChromaPlanes").toBool(true);
     result.rawVideo.bottomUp = rawVideo.value("bottomUp").toBool(false);
     result.rawVideo.colorMatrix =
@@ -328,8 +337,8 @@ bool parseProcessing(const QJsonObject& object,
         return false;
     }
 
-    result.videoCodec = videoCodecFromJson(object.value("videoCodec").toObject());
-    result.audioCodec = audioCodecFromJson(object.value("audioCodec").toObject());
+    if (!videoCodecFromJson(object.value("videoCodec").toObject(), &result.videoCodec, errorMessage)
+        || !audioCodecFromJson(object.value("audioCodec").toObject(), &result.audioCodec, errorMessage)) return false;
     if (result.videoCodec.codecId.isEmpty() || result.videoCodec.codecId.size() > 128
         || result.audioCodec.codecId.isEmpty() || result.audioCodec.codecId.size() > 128
         || result.videoCodec.crf < 0 || result.videoCodec.crf > 100
@@ -356,12 +365,9 @@ bool parseProcessing(const QJsonObject& object,
             return false;
         }
         const QJsonObject filterObject = value.toObject();
-        const int type = filterObject.value("type").toInt(-1);
-        if (type < static_cast<int>(VDFilterType::SixAxis)
-            || type >= static_cast<int>(VDFilterType::Count)) {
-            setError(errorMessage, QStringLiteral("A filter entry has an unknown type."));
-            return false;
-        }
+        int type = -1;
+        if (!readInteger(filterObject, "type", &type, static_cast<int>(VDFilterType::SixAxis),
+                         static_cast<int>(VDFilterType::Count) - 1, -1, errorMessage)) return false;
         VDFilterInstance filter;
         filter.id = filterObject.value("id").toString();
         filter.name = filterObject.value("name").toString();
@@ -428,11 +434,9 @@ bool parseProcessing(const QJsonObject& object,
             return false;
         }
         const QJsonObject filterObject = value.toObject();
-        const int type = filterObject.value("type").toInt(-1);
-        if (type < 0 || type >= static_cast<int>(VDAudioFilterType::Count)) {
-            setError(errorMessage, QStringLiteral("An audio filter entry has an unknown type."));
-            return false;
-        }
+        int type = -1;
+        if (!readInteger(filterObject, "type", &type, 0,
+                         static_cast<int>(VDAudioFilterType::Count) - 1, -1, errorMessage)) return false;
         VDAudioFilterInstance filter;
         filter.id = filterObject.value("id").toString();
         filter.name = filterObject.value("name").toString();
@@ -525,10 +529,10 @@ bool readDocument(const QString& path,
         return false;
     }
     const QJsonObject object = document.object();
-    const int version = object.value("version").toInt();
-    if (object.value("kind").toString() != expectedKind
-        || version < kOldestSupportedDocumentVersion
-        || version > kDocumentVersion) {
+    int version = 0;
+    if (!readInteger(object, "version", &version, kOldestSupportedDocumentVersion,
+                     kDocumentVersion, 0, errorMessage)) return false;
+    if (object.value("kind").toString() != expectedKind) {
         setError(errorMessage, QStringLiteral("This file has an unsupported type or version."));
         return false;
     }
@@ -676,10 +680,10 @@ bool VDQtProjectFile::loadProject(
         result.sourcePaths.append(QDir::cleanPath(sourcePath));
     }
     result.sourcePath = result.sourcePaths.first();
-    result.imageSequenceFps = root.value("imageSequenceFps").toDouble(0.0);
     result.rawPixelFormat = root.value("rawPixelFormat").toString();
-    result.rawFrameRate = root.value("rawFrameRate").toDouble(0.0);
-    if (!readInteger(root, "rawWidth", &result.rawWidth, 0, 65536, 0, errorMessage)
+    if (!readReal(root, "imageSequenceFps", &result.imageSequenceFps, 0, 10000, 0, errorMessage)
+        || !readReal(root, "rawFrameRate", &result.rawFrameRate, 0, 10000, 0, errorMessage)
+        || !readInteger(root, "rawWidth", &result.rawWidth, 0, 65536, 0, errorMessage)
         || !readInteger(root, "rawHeight", &result.rawHeight, 0, 65536, 0, errorMessage)
         || !readInteger(root, "rawByteOffset", &result.rawByteOffset, 0,
                         std::numeric_limits<qint64>::max(), 0, errorMessage)) return false;
@@ -977,18 +981,13 @@ bool VDQtProjectFile::loadJobQueue(
         if (job.id.isEmpty())
             job.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         job.name = object.value("name").toString();
-        const int operation = object.value("operation").toInt(
-            static_cast<int>(VDQtJobOperation::VideoExport));
-        const int serializedStatus = object.value("status").toInt(
-            static_cast<int>(VDQtJobStatus::Pending));
-        if (operation < static_cast<int>(VDQtJobOperation::VideoExport)
-            || operation > static_cast<int>(VDQtJobOperation::VideoAnalysis)
-            || serializedStatus < static_cast<int>(VDQtJobStatus::Pending)
-            || serializedStatus > static_cast<int>(VDQtJobStatus::Interrupted)) {
-            setError(errorMessage,
-                     QStringLiteral("A queued job has an invalid operation or status."));
-            return false;
-        }
+        int operation = 0, serializedStatus = 0;
+        if (!readInteger(object, "operation", &operation, static_cast<int>(VDQtJobOperation::VideoExport),
+                         static_cast<int>(VDQtJobOperation::VideoAnalysis),
+                         static_cast<int>(VDQtJobOperation::VideoExport), errorMessage)
+            || !readInteger(object, "status", &serializedStatus, static_cast<int>(VDQtJobStatus::Pending),
+                            static_cast<int>(VDQtJobStatus::Interrupted),
+                            static_cast<int>(VDQtJobStatus::Pending), errorMessage)) return false;
         job.operation = static_cast<VDQtJobOperation>(operation);
         job.status = static_cast<VDQtJobStatus>(serializedStatus);
         if (job.status == VDQtJobStatus::Starting
@@ -1000,7 +999,7 @@ bool VDQtProjectFile::loadJobQueue(
         } else {
             job.error = object.value("error").toString();
         }
-        job.progress = object.value("progress").toDouble(0.0);
+        if (!readReal(object, "progress", &job.progress, 0, 1, 0, errorMessage)) return false;
         job.replaceExisting = object.value("replaceExisting").toBool(false);
         job.startedAtUtc = QDateTime::fromString(
             object.value("startedAtUtc").toString(), Qt::ISODateWithMs);
@@ -1036,11 +1035,11 @@ bool VDQtProjectFile::loadJobQueue(
             job.sourcePaths.append(QDir::cleanPath(source));
         }
         job.audioSourcePath = object.value("audioSourcePath").toString();
-        job.imageSequenceFps = object.value("imageSequenceFps").toDouble(0.0);
         job.rawPixelFormat = object.value("rawPixelFormat").toString();
-        job.rawFrameRate = object.value("rawFrameRate").toDouble(0.0);
         constexpr qint64 maximumFrame = std::numeric_limits<int>::max();
-        if (!readInteger(object, "rawWidth", &job.rawWidth, 0, 65536, 0, errorMessage)
+        if (!readReal(object, "imageSequenceFps", &job.imageSequenceFps, 0, 10000, 0, errorMessage)
+            || !readReal(object, "rawFrameRate", &job.rawFrameRate, 0, 10000, 0, errorMessage)
+            || !readInteger(object, "rawWidth", &job.rawWidth, 0, 65536, 0, errorMessage)
             || !readInteger(object, "rawHeight", &job.rawHeight, 0, 65536, 0, errorMessage)
             || !readInteger(object, "rawByteOffset", &job.rawByteOffset, 0,
                             std::numeric_limits<qint64>::max(), 0, errorMessage)
@@ -1080,7 +1079,7 @@ bool VDQtProjectFile::loadJobQueue(
                             VideoMode_DirectStreamCopy, VideoMode_FullProcessing, VideoMode_FullProcessing, errorMessage)
             || !readInteger(options, "audioMode", &job.options.audioMode,
                             AudioMode_DirectStreamCopy, AudioMode_FullProcessing, AudioMode_DirectStreamCopy, errorMessage)) return false;
-        job.options.customFps = options.value("customFps").toDouble();
+        if (!readReal(options, "customFps", &job.options.customFps, 0, 10000, 0, errorMessage)) return false;
         job.options.convertFpsPreserveDuration =
             options.value("convertFpsPreserveDuration").toBool(false);
         job.options.containerType = options.value("containerType").toString();

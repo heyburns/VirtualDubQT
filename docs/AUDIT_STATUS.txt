@@ -76,7 +76,9 @@ Remaining execution sequence
 [ ] M21: safe numeric conversion throughout execution, saved inputs and runtime calculations.
     Project/job positions, segments and raw offsets now reject unsafe casts,
     fractions and wrong types before conversion. Script integer domains now
-    preflight before execution; remaining packed-color/runtime math is still open.
+    preflight before execution. Processing/codec integer selectors and saved
+    source/output rates reject present malformed values instead of defaulting;
+    remaining packed-color/runtime math is still open.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [x] Batch naming: preserve filenames across analysis/export operation changes.
 [x] M07: timed capture stops independently of preview output (hardware verification pending).
