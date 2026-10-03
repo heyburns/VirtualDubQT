@@ -194,6 +194,13 @@ pipeline's instances; identical IDs in another preview/export pipeline remain
 independent. Destination image storage is detached before parallel row tasks
 start, and every task completes before its image owner can be released.
 
+Field Delay/Interlace history retains the incoming stage frame, not an output
+already containing a copied old field. Recursive blend/smoother history instead
+retains its output intentionally. Sequential context controls whether history is
+usable after a seek. At each stage boundary, channel layout and alpha are normalized
+to straight RGB888/RGBA8888/RGBA64; image depth alone cannot identify transformed
+ARGB/premultiplied storage safely.
+
 `processFrameSequence()` is the authoritative API. Rate-changing filters such as
 bob deinterlacing may emit multiple temporal phases for one source image.
 `processFrame()` exists for older single-image callers and returns only phase

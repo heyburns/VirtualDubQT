@@ -693,6 +693,17 @@ QImage VDQtFilterSystem::processFrameForPhase(
             if (result.isNull()) return {};
         }
 
+        // QImage transforms/painters may return ARGB32 or premultiplied layouts
+        // without changing depth. Raw channel kernels require straight RGBA,
+        // not merely "four bytes per pixel". Preserve high-depth precision.
+        const QImage::Format workingFormat = result.depth() > 32
+            ? QImage::Format_RGBA64
+            : result.hasAlphaChannel() ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+        if (result.format() != workingFormat) {
+            result = result.convertToFormat(workingFormat);
+            if (result.isNull()) return {};
+        }
+
         const int opacityPointCount = std::clamp(
             static_cast<int>(filter.params.value(
                 QStringLiteral("_sylia.opacity.count"), 0.0)), 0, 4096);
@@ -906,6 +917,12 @@ QImage VDQtFilterSystem::processFrameForPhase(
         case VDFilterType::Interpolate:
         case VDFilterType::MotionBlur:
         case VDFilterType::TemporalSmoother: {
+            // Field weaving needs the preceding *incoming stage frame*. Saving
+            // its already delayed output feeds the old field back indefinitely.
+            // Recursive blend/smoother history intentionally remains output-based.
+            const bool incomingHistory = filter.type == VDFilterType::FieldDelay
+                || filter.type == VDFilterType::Interlace;
+            const QImage incomingFieldFrame = incomingHistory ? result : QImage();
             const QString stateKey = filter.id + QLatin1Char(':')
                 + QString::number(bobPhaseMask);
             TemporalState& temporal = mTemporalStates[stateKey];
@@ -974,7 +991,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
                     }
                 }
             }
-            temporal.previousFrame = result;
+            temporal.previousFrame = incomingHistory ? incomingFieldFrame : result;
             temporal.lastFrameNumber = context.frameNumber >= 0
                 ? context.frameNumber : temporal.lastFrameNumber + 1;
             break;

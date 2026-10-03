@@ -623,3 +623,26 @@ The normal source-protection audit recognizes the existing safe framerate option
 Validation: focused Release and sanitizer source/project/append/queue/decoder/CLI
 checks passed 8/8 each. The regular binary rebuilt and passed MP4/native-AVS export
 smoke. No unrelated user images/settings are used.
+
+Incoming field history and transform layouts (H02/M01)
+----------------------------------------------------
+
+The maintained field test failed before repair because one parity retained its
+first red level indefinitely. Field Delay and Interlace now save the incoming
+stage image, not an output containing the already delayed field. Recursive
+blending/smoothing history remains output-based. Four varying inputs, both field
+parities, RGB/RGBA/RGBA64, odd dimensions, alpha and seek discontinuities are
+checked without modifying retained caller images. Focused Release and sanitizer
+controller/field/temporal-memory/stabilization/media tests passed 6/6 each after
+this fix, followed by regular-binary MP4/native-AVS smoke.
+
+The separate Rotate2 -> Grayscale reproducer also failed before repair: QImage
+rotation can return premultiplied ARGB rather than the raw RGBA channel layout
+assumed by the next kernel. Every enabled stage now normalizes actual layout
+and alpha representation while retaining 16-bit precision. Tests compare the
+combined chain against separately normalized processing in RGB/RGBA/RGBA64.
+Equivalent high-depth algorithms (M10) and original temporal/rate semantics
+(M19/P05) remain separate work; these fixes do not claim full Windows parity.
+
+Post-layout validation: full Release 41/41 and sanitizer 37/37 passed; the regular
+binary rebuilt and passed maintained MP4/native-AVS export smoke.
