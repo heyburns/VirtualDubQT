@@ -1524,6 +1524,79 @@ bool emptyTimeline(VDQtTestFixtures& fixtures) {
                  "a new-format untouched estimate reopens as source identity, not a fixed-length edit");
 }
 
+bool jsonIntegerInputs(VDQtTestFixtures& fixtures) {
+    const QString projectPath = fixtures.directory.filePath("numeric-project.vdqproject");
+    const QString jobPath = fixtures.directory.filePath("numeric-jobs.vdqjobs");
+    VDQtProjectState project;
+    project.sourcePath = fixtures.mp4;
+    project.sourcePaths = {fixtures.mp4};
+    project.sourceFrameCount = 48;
+    project.sourceFrameCountExact = true;
+    project.audioDisabled = true;
+    QString error;
+    if (!VDQtProjectFile::saveProject(projectPath, project, &error)) return false;
+    const auto original = QJsonDocument::fromJson(readFile(projectPath)).object();
+    for (const QString& key : {QString("position"), QString("selectionStart"), QString("selectionEnd"),
+                              QString("sourceFrameCount"), QString("zoomStart"), QString("zoomEnd"),
+                              QString("rawByteOffset")}) {
+        for (const QJsonValue& invalid : {QJsonValue(1e100), QJsonValue(3.5), QJsonValue("4")}) {
+            auto root = original;
+            root[key] = invalid;
+            if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())) return false;
+            VDQtProjectState retained = project;
+            retained.position = 7;
+            if (!check(!VDQtProjectFile::loadProject(projectPath, &retained, &error)
+                       && !error.isEmpty() && retained.position == 7,
+                       "saved project integer fields reject overflow, fractions and wrong types atomically")) {
+                std::cerr << key.toStdString() << '\n'; return false;
+            }
+        }
+    }
+    auto root = original;
+    root["rawByteOffset"] = std::ldexp(1.0, 63);
+    if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+        || !check(!VDQtProjectFile::loadProject(projectPath, &project, &error),
+                  "rounded 2^63 cannot pass the signed raw-offset upper boundary")) return false;
+    root["rawByteOffset"] = std::nextafter(std::ldexp(1.0, 63), 0.0);
+    if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+        || !check(VDQtProjectFile::loadProject(projectPath, &project, &error)
+                  && project.rawByteOffset > 0,
+                  "the nearest representable integer below 2^63 remains valid")) return false;
+    for (const QString& key : {QString("sourceStartFrame"), QString("frameCount")}) {
+        root = original;
+        QJsonObject segment{{"sourceStartFrame", 0}, {"frameCount", 5}, {"masked", false}};
+        segment[key] = 1e100;
+        root["timelineExplicit"] = true;
+        root["timelineSegments"] = QJsonArray{segment};
+        if (!fixtures.writeText(projectPath, QJsonDocument(root).toJson())
+            || !check(!VDQtProjectFile::loadProject(projectPath, &project, &error),
+                      "segment integers are checked before conversion and addition")) return false;
+    }
+    VDQtJobState job;
+    job.id = "retained-job";
+    job.sourcePaths = {fixtures.mp4};
+    job.options.outputPath = fixtures.directory.filePath("numeric-output.mkv");
+    if (!VDQtProjectFile::saveJobQueue(jobPath, {job}, &error)) return false;
+    const auto originalQueue = QJsonDocument::fromJson(readFile(jobPath)).object();
+    for (const QString& key : {QString("rawByteOffset"), QString("startFrame"), QString("endFrame")}) {
+        auto queueRoot = originalQueue;
+        auto saved = queueRoot.value("jobs").toArray().first().toObject();
+        if (key == "rawByteOffset") saved[key] = std::ldexp(1.0, 63);
+        else {
+            auto options = saved.value("options").toObject();
+            options[key] = 1e100;
+            saved["options"] = options;
+        }
+        queueRoot["jobs"] = QJsonArray{saved};
+        QList<VDQtJobState> retained{job};
+        if (!fixtures.writeText(jobPath, QJsonDocument(queueRoot).toJson())
+            || !check(!VDQtProjectFile::loadJobQueue(jobPath, &retained, &error)
+                      && retained.size() == 1 && retained.first().id == job.id,
+                      "queued integer inputs reject unsafe conversion without replacing loaded jobs")) return false;
+    }
+    return true;
+}
+
 bool sourceProtection(VDQtTestFixtures& fixtures) {
     const QString directory = fixtures.directory.path();
     const QString list = fixtures.directory.filePath("list.txt");
@@ -1640,6 +1713,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "recovery") return recoveryRetention(fixtures);
     if (scenario == "edit_preview") return editPreview(fixtures);
     if (scenario == "project_validation") return projectValidation(fixtures);
+    if (scenario == "numeric_json") return jsonIntegerInputs(fixtures);
     if (scenario == "append_state") return appendState(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);

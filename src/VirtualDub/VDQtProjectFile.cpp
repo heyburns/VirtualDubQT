@@ -32,6 +32,36 @@ void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
 }
 
+// JSON numbers are doubles. Validate before converting, not after: INT64_MAX
+// rounds to 2^63 as a double, so an inclusive double(max) check admits undefined
+// behavior. Missing legacy fields retain their defaults; present wrong types,
+// fractional values and unrepresentable integers must never become defaults.
+template<class Integer>
+bool readIntegerValue(const QJsonValue& value, const QString& name,
+                      Integer *destination, qint64 minimum, qint64 maximum,
+                      qint64 fallback, QString *errorMessage) {
+    const double number = value.isUndefined() ? static_cast<double>(fallback)
+                                              : value.toDouble();
+    if ((!value.isUndefined() && !value.isDouble())
+        || !std::isfinite(number) || std::trunc(number) != number
+        || number >= std::ldexp(1.0, 63)
+        || static_cast<long double>(number) < static_cast<long double>(minimum)
+        || static_cast<long double>(number) > static_cast<long double>(maximum)) {
+        setError(errorMessage, QStringLiteral("The saved integer '%1' is invalid.").arg(name));
+        return false;
+    }
+    *destination = static_cast<Integer>(number);
+    return true;
+}
+
+template<class Integer>
+bool readInteger(const QJsonObject& object, const char *key, Integer *destination,
+                 qint64 minimum, qint64 maximum, qint64 fallback,
+                 QString *errorMessage) {
+    return readIntegerValue(object.value(QLatin1String(key)), QLatin1String(key),
+                            destination, minimum, maximum, fallback, errorMessage);
+}
+
 bool parseTimelineIntent(const QJsonObject& object, int version,
                          bool *explicitTimeline, QString *errorMessage) {
     const QJsonValue segments = object.value("timelineSegments");
@@ -647,20 +677,11 @@ bool VDQtProjectFile::loadProject(
     result.sourcePath = result.sourcePaths.first();
     result.imageSequenceFps = root.value("imageSequenceFps").toDouble(0.0);
     result.rawPixelFormat = root.value("rawPixelFormat").toString();
-    result.rawWidth = root.value("rawWidth").toInt(0);
-    result.rawHeight = root.value("rawHeight").toInt(0);
     result.rawFrameRate = root.value("rawFrameRate").toDouble(0.0);
-    const double serializedRawByteOffset =
-        root.value("rawByteOffset").toDouble(0.0);
-    if (!std::isfinite(serializedRawByteOffset)
-        || serializedRawByteOffset < 0.0
-        || serializedRawByteOffset
-            > static_cast<double>(std::numeric_limits<qint64>::max())) {
-        setError(errorMessage,
-                 QStringLiteral("The project contains an invalid raw-video byte offset."));
-        return false;
-    }
-    result.rawByteOffset = static_cast<qint64>(serializedRawByteOffset);
+    if (!readInteger(root, "rawWidth", &result.rawWidth, 0, 65536, 0, errorMessage)
+        || !readInteger(root, "rawHeight", &result.rawHeight, 0, 65536, 0, errorMessage)
+        || !readInteger(root, "rawByteOffset", &result.rawByteOffset, 0,
+                        std::numeric_limits<qint64>::max(), 0, errorMessage)) return false;
     result.audioSourcePath = root.value("audioSourcePath").toString();
     if (!result.audioSourcePath.isEmpty()
         && !QFileInfo(result.audioSourcePath).isAbsolute()) {
@@ -669,12 +690,16 @@ bool VDQtProjectFile::loadProject(
     }
     if (!result.audioSourcePath.isEmpty())
         result.audioSourcePath = QDir::cleanPath(result.audioSourcePath);
-    result.audioStreamIndex = root.value("audioStreamIndex").toInt(-1);
     result.audioDisabled = root.value("audioDisabled").toBool(false);
-    result.position = static_cast<qint64>(root.value("position").toDouble());
     result.hasSelection = root.value("hasSelection").toBool(false);
-    result.selectionStart = static_cast<qint64>(root.value("selectionStart").toDouble());
-    result.selectionEnd = static_cast<qint64>(root.value("selectionEnd").toDouble());
+    constexpr qint64 maximumFrame = std::numeric_limits<int>::max();
+    if (!readInteger(root, "audioStreamIndex", &result.audioStreamIndex, -1, maximumFrame, -1, errorMessage)
+        || !readInteger(root, "position", &result.position, 0, maximumFrame, 0, errorMessage)
+        || !readInteger(root, "selectionStart", &result.selectionStart, 0, maximumFrame, 0, errorMessage)
+        || !readInteger(root, "selectionEnd", &result.selectionEnd, 0, maximumFrame, 0, errorMessage)
+        || !readInteger(root, "sourceFrameCount", &result.sourceFrameCount, 0, maximumFrame, 0, errorMessage)
+        || !readInteger(root, "zoomStart", &result.zoomStart, 0, maximumFrame, 0, errorMessage)
+        || !readInteger(root, "zoomEnd", &result.zoomEnd, 0, maximumFrame, 0, errorMessage)) return false;
     const QJsonArray markers = root.value("markers").toArray();
     if (markers.size() > 100000) {
         setError(errorMessage,
@@ -682,20 +707,12 @@ bool VDQtProjectFile::loadProject(
         return false;
     }
     for (const QJsonValue& markerValue : markers) {
-        const double serialized = markerValue.toDouble(-1.0);
-        if (!std::isfinite(serialized) || serialized < 0.0
-            || serialized > std::numeric_limits<int>::max()) {
-            setError(errorMessage,
-                     QStringLiteral("The project contains an invalid timeline marker."));
-            return false;
-        }
-        result.markers.append(static_cast<qint64>(serialized));
+        qint64 marker;
+        if (!readIntegerValue(markerValue, QStringLiteral("marker"), &marker,
+                              0, maximumFrame, -1, errorMessage)) return false;
+        result.markers.append(marker);
     }
-    result.sourceFrameCount = static_cast<qint64>(
-        root.value("sourceFrameCount").toDouble());
     result.zoomEnabled = root.value("zoomEnabled").toBool(false);
-    result.zoomStart = static_cast<qint64>(root.value("zoomStart").toDouble());
-    result.zoomEnd = static_cast<qint64>(root.value("zoomEnd").toDouble());
     if (result.position < 0 || result.selectionStart < 0
         || result.selectionEnd < result.selectionStart
         || result.audioStreamIndex < -1
@@ -735,10 +752,10 @@ bool VDQtProjectFile::loadProject(
         }
         const QJsonObject segmentObject = segmentValue.toObject();
         VDQtTimelineSegment segment;
-        segment.sourceStartFrame = static_cast<qint64>(
-            segmentObject.value("sourceStartFrame").toDouble(-1));
-        segment.frameCount = static_cast<qint64>(
-            segmentObject.value("frameCount").toDouble(-1));
+        if (!readInteger(segmentObject, "sourceStartFrame", &segment.sourceStartFrame,
+                         0, maximumFrame, -1, errorMessage)
+            || !readInteger(segmentObject, "frameCount", &segment.frameCount,
+                            1, maximumFrame, -1, errorMessage)) return false;
         segment.masked = segmentObject.value("masked").toBool(false);
         if (segment.sourceStartFrame < 0 || segment.frameCount <= 0
             || segment.sourceStartFrame > std::numeric_limits<int>::max()
@@ -1020,20 +1037,16 @@ bool VDQtProjectFile::loadJobQueue(
         job.audioSourcePath = object.value("audioSourcePath").toString();
         job.imageSequenceFps = object.value("imageSequenceFps").toDouble(0.0);
         job.rawPixelFormat = object.value("rawPixelFormat").toString();
-        job.rawWidth = object.value("rawWidth").toInt(0);
-        job.rawHeight = object.value("rawHeight").toInt(0);
         job.rawFrameRate = object.value("rawFrameRate").toDouble(0.0);
-        const double serializedRawByteOffset =
-            object.value("rawByteOffset").toDouble(0.0);
-        if (!std::isfinite(serializedRawByteOffset)
-            || serializedRawByteOffset < 0.0
-            || serializedRawByteOffset
-                > static_cast<double>(std::numeric_limits<qint64>::max())) {
-            setError(errorMessage,
-                     QStringLiteral("A queued raw-video byte offset is invalid."));
-            return false;
-        }
-        job.rawByteOffset = static_cast<qint64>(serializedRawByteOffset);
+        constexpr qint64 maximumFrame = std::numeric_limits<int>::max();
+        if (!readInteger(object, "rawWidth", &job.rawWidth, 0, 65536, 0, errorMessage)
+            || !readInteger(object, "rawHeight", &job.rawHeight, 0, 65536, 0, errorMessage)
+            || !readInteger(object, "rawByteOffset", &job.rawByteOffset, 0,
+                            std::numeric_limits<qint64>::max(), 0, errorMessage)
+            || !readInteger(object, "audioStreamIndex", &job.audioStreamIndex, -1, maximumFrame, -1, errorMessage)
+            || !readInteger(object, "imageQuality", &job.imageQuality, -1, 100, -1, errorMessage)
+            || !readInteger(object, "imageMinimumDigits", &job.imageMinimumDigits, 1, 12, 6, errorMessage)
+            || !readInteger(object, "imageStartIndex", &job.imageStartIndex, 0, maximumFrame, 0, errorMessage)) return false;
         if (!job.audioSourcePath.isEmpty()
             && !QFileInfo(job.audioSourcePath).isAbsolute()) {
             job.audioSourcePath = documentDirectory.absoluteFilePath(
@@ -1041,13 +1054,9 @@ bool VDQtProjectFile::loadJobQueue(
         }
         if (!job.audioSourcePath.isEmpty())
             job.audioSourcePath = QDir::cleanPath(job.audioSourcePath);
-        job.audioStreamIndex = object.value("audioStreamIndex").toInt(-1);
         job.audioDisabled = object.value("audioDisabled").toBool(false);
         job.imageExtension = object.value("imageExtension").toString(
             QStringLiteral("png"));
-        job.imageQuality = object.value("imageQuality").toInt(-1);
-        job.imageMinimumDigits = object.value("imageMinimumDigits").toInt(6);
-        job.imageStartIndex = object.value("imageStartIndex").toInt(0);
         QString outputPath = object.value("outputPath").toString();
         if ((outputPath.isEmpty()
              && job.operation != VDQtJobOperation::VideoAnalysis)
@@ -1063,14 +1072,16 @@ bool VDQtProjectFile::loadJobQueue(
         job.options.inputPath = job.sourcePaths.first();
         job.options.outputPath = outputPath.isEmpty()
             ? QString() : QDir::cleanPath(outputPath);
-        job.options.startFrame = options.value("startFrame").toInt();
-        job.options.endFrame = options.value("endFrame").toInt(-1);
+        if (!readInteger(options, "startFrame", &job.options.startFrame, 0, maximumFrame, 0, errorMessage)
+            || !readInteger(options, "endFrame", &job.options.endFrame, -1, maximumFrame, -1, errorMessage)
+            || !readInteger(options, "decimateFactor", &job.options.decimateFactor, 1, 1000000, 1, errorMessage)
+            || !readInteger(options, "videoMode", &job.options.videoMode,
+                            VideoMode_DirectStreamCopy, VideoMode_FullProcessing, VideoMode_FullProcessing, errorMessage)
+            || !readInteger(options, "audioMode", &job.options.audioMode,
+                            AudioMode_DirectStreamCopy, AudioMode_FullProcessing, AudioMode_DirectStreamCopy, errorMessage)) return false;
         job.options.customFps = options.value("customFps").toDouble();
         job.options.convertFpsPreserveDuration =
             options.value("convertFpsPreserveDuration").toBool(false);
-        job.options.decimateFactor = options.value("decimateFactor").toInt(1);
-        job.options.videoMode = options.value("videoMode").toInt(VideoMode_FullProcessing);
-        job.options.audioMode = options.value("audioMode").toInt(AudioMode_DirectStreamCopy);
         job.options.containerType = options.value("containerType").toString();
         job.options.fastStart = options.value("fastStart").toBool(false);
         job.options.includeAudio = options.value("includeAudio").toBool(true);
@@ -1091,10 +1102,15 @@ bool VDQtProjectFile::loadJobQueue(
         for (const QJsonValue& segmentValue : timelineSegments) {
             const QJsonObject segmentObject = segmentValue.toObject();
             VDQtTimelineSegment segment;
-            segment.sourceStartFrame = static_cast<qint64>(
-                segmentObject.value("sourceStartFrame").toDouble(-1));
-            segment.frameCount = static_cast<qint64>(
-                segmentObject.value("frameCount").toDouble(-1));
+            if (!segmentValue.isObject()
+                || !readInteger(segmentObject, "sourceStartFrame", &segment.sourceStartFrame,
+                                0, maximumFrame, -1, errorMessage)
+                || !readInteger(segmentObject, "frameCount", &segment.frameCount,
+                                1, maximumFrame, -1, errorMessage)) {
+                if (!segmentValue.isObject())
+                    setError(errorMessage, QStringLiteral("A queued timeline segment is malformed."));
+                return false;
+            }
             segment.masked = segmentObject.value("masked").toBool(false);
             if (!segmentValue.isObject() || segment.sourceStartFrame < 0
                 || segment.frameCount <= 0

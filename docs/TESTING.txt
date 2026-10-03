@@ -944,3 +944,21 @@ across masks and real sink behavior remain hardware gates.
 Validation: focused Release 7/7 and ASan/UBSan 7/7 passed (timeline, clock,
 controller, masked VFR context, edit preview, stabilization and media smoke).
 The rebuilt regular binary independently passed MP4/native-AVS export smoke.
+
+Checked saved integer inputs (M21 substep)
+-----------------------------------------
+
+The new numeric_json regression failed in Release and ASan/UBSan reproduced
+conversion of 1e100 to qint64 in project loading. Saved positions, markers,
+segment lengths/starts, dimensions, raw offsets and queued export integer
+options now check type, integrality and representability before conversion.
+Missing legacy fields still use documented defaults; present invalid values do
+not silently become defaults. The signed raw-offset boundary uses an exclusive
+2^63 check, because double(INT64_MAX) itself rounds to that invalid boundary.
+
+Tests exercise oversized, fractional and wrong-type fields, segment arithmetic,
+the nearest representable valid offset below 2^63 and preservation of caller
+state/jobs after rejection. Focused Release 5/5 and ASan/UBSan 5/5 passed,
+including project, queue, stabilization and actual-app smoke. The rebuilt
+regular binary independently passed MP4/native-AVS decode/export smoke.
+Script execution and runtime numeric calculations remain separate M21 work.
