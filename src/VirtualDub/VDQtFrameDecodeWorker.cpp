@@ -156,9 +156,14 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
             return;
         }
 
-        QImage inputImage = decoder->getFrameImage(frameIndex, preserveSequentialDecode);
+        const auto stillRequested = [this, generation] {
+            QMutexLocker lock(&mRequestMutex);
+            return generation == mLatestGeneration;
+        };
+        QImage inputImage = decoder->getFrameImage(
+            frameIndex, preserveSequentialDecode, stillRequested);
         QList<QImage> outputImages;
-        if (!inputImage.isNull() && renderFilteredOutput) {
+        if (!inputImage.isNull() && renderFilteredOutput && stillRequested()) {
             VDFilterFrameContext context;
             context.frameNumber = frameIndex;
             context.timestampSeconds =
@@ -168,9 +173,9 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
                 outputImages.clear();
         }
 
-        // Generation equality is checked only after all expensive work. A stale
-        // decode may warm decoder/filter caches, but it must never repaint the
-        // display or move the playhead backward.
+        // Packet/frame decoding is cancellable as newer generations arrive.
+        // Check again after filtering: an individual plugin/filter call is not
+        // preemptible, and no stale result may repaint or move the playhead.
         bool currentResult = false;
         {
             QMutexLocker lock(&mRequestMutex);

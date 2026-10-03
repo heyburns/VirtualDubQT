@@ -1160,10 +1160,14 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     if (!mFrameIndex.isEmpty()) {
         const int indexedCount = boundedFrameCount(mFrameIndex.size());
         int candidate = std::min(frameIndex, indexedCount - 1);
-        while (candidate > 0 && (!mFrameIndex[candidate].keyFrame || mFrameIndex[candidate].timestamp == AV_NOPTS_VALUE)) {
+        // A repeated timestamp cannot identify which presentation ordinal a
+        // demuxer will seek to. Use only unambiguous, verified keyframe anchors;
+        // ambiguous or timestamp-less streams are counted from stream start.
+        while (candidate > 0 && (!mFrameIndex[candidate].keyFrame
+            || mFrameIndex[candidate].timestamp == AV_NOPTS_VALUE
+            || findIndexedFrameByTimestamp(mFrameIndex[candidate].timestamp, candidate, true) != candidate)) {
             --candidate;
         }
-        // Only use the anchor if it is a known keyframe close to the target
         if (candidate > 0 && mFrameIndex[candidate].timestamp != AV_NOPTS_VALUE) {
             anchorIndex = candidate;
             targetTimestamp = mFrameIndex[candidate].timestamp;
@@ -1171,16 +1175,8 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     }
 
     if (targetTimestamp == AV_NOPTS_VALUE) {
-        if (mFps > 0.0) {
-            const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
-            const double targetSec = frameIndex / mFps;
-            targetTimestamp = static_cast<int64_t>(targetSec / av_q2d(timeBase));
-            if (mStreamStartTimestamp != AV_NOPTS_VALUE) {
-                targetTimestamp += mStreamStartTimestamp;
-            }
-        } else {
-            targetTimestamp = 0;
-        }
+        ++mSeekCount;
+        return resetDecoderToStart();
     }
 
     int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
@@ -1199,27 +1195,34 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
-    mIndexTraversalContiguous = anchorIndex >= 0;
+    mIndexTraversalContiguous = true;
     mDiscardUntilKeyFrame = false;
-    mCurrentFrameIndex = (anchorIndex >= 0) ? (anchorIndex - 1) : -1;
-    mNextDecodeFrameIndex = (anchorIndex >= 0) ? anchorIndex : frameIndex;
-    mPendingSeekTargetTimestamp = (anchorIndex >= 0) ? AV_NOPTS_VALUE : targetTimestamp;
+    mCurrentFrameIndex = anchorIndex - 1;
+    mNextDecodeFrameIndex = anchorIndex;
+    mPendingSeekTargetTimestamp = targetTimestamp;
     ++mSeekCount;
     return true;
 }
 
-bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors) {
+bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors,
+                                      const std::function<bool()>& shouldContinue) {
     if (!mCodecCtx || !mFormatCtx || !mFrame || !mPacket) return false;
 
     auto recordDecodeError = [&](const QString& operation, int error) {
         // Skipped/failed packets cannot verify a complete ordinal traversal.
         mIndexTraversalContiguous = false;
+        mFrameIndexComplete = false;
         if (decodeErrors) ++*decodeErrors;
         mLastError = avOperationError(operation, error);
         qWarning() << "[VDQtVideoDecoder]" << mLastError;
     };
 
     for (;;) {
+        if (shouldContinue && !shouldContinue()) {
+            mDecodeCancelled = true;
+            mLastDecodeReachedEof = false;
+            return false;
+        }
         const int receiveResult = avcodec_receive_frame(mCodecCtx, mFrame);
         if (receiveResult == 0) {
             mLastDecodeReachedEof = false;
@@ -1329,7 +1332,7 @@ void VDQtVideoDecoder::registerIndexedTimestamp(int64_t timestamp, int frameInde
     if (at == ordinals.end() || *at != frameIndex) ordinals.insert(at, frameIndex);
 }
 
-int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint) {
+int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint, bool requireUnique) {
     if (timestamp == AV_NOPTS_VALUE || mFrameIndex.isEmpty()) return -1;
 
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
@@ -1347,6 +1350,7 @@ int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint) {
     const auto found = mFrameTimestampLookup.constFind(timestamp);
     if (found == mFrameTimestampLookup.cend()) return -1;
     const auto& ordinals = found.value();
+    if (requireUnique && ordinals.size() != 1) return -1;
     const auto after = std::lower_bound(ordinals.cbegin(), ordinals.cend(), hint,
         [this](int ordinal, int target) { ++mIndexLookupWorkCount; return ordinal < target; });
     if (after == ordinals.cend()) return ordinals.back();
@@ -1368,7 +1372,14 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     // Two sequential decoded frames with equal timestamps must remain distinct.
     if (!nextPrefixFrame && !expectedTimestamp) {
         const int indexedMatch = findIndexedFrameByTimestamp(timestamp, frameIndex);
-        if (indexedMatch >= 0) frameIndex = indexedMatch;
+        if (indexedMatch < 0) {
+            // Never label an unrecognized picture with the requested ordinal.
+            // The caller can retry by counting from the beginning.
+            mIndexTraversalContiguous = false;
+            mLastError = QStringLiteral("Decoded picture does not match the verified frame index.");
+            return -1;
+        }
+        frameIndex = indexedMatch;
     }
 
     if (frameIndex != mNextDecodeFrameIndex || frameIndex > indexedCount)
@@ -1425,8 +1436,11 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     mFrameIndexComplete = true;
 }
 
-QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode) {
+QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode,
+                                      std::function<bool()> shouldContinue) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    mDecodeCancelled = false;
+    if (shouldContinue && !shouldContinue()) return QImage();
     if (!mIsOpen || frameIndex < 0) return QImage();
 
     if (mFrameCountStatus == FrameCountStatus::Exact
@@ -1438,6 +1452,7 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
 
     if (mIsAvsNative) {
         QImage image = renderAvsFrame(frameIndex);
+        if (shouldContinue && !shouldContinue()) return QImage();
         if (!image.isNull()) cacheFrame(frameIndex, image);
         return image;
     }
@@ -1449,10 +1464,21 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
     const bool sequentialRequest = !mLastDecodeReachedEof
         && (frameIndex == mCurrentFrameIndex + 1
             || (preserveSequentialDecode && frameIndex > mCurrentFrameIndex));
-    if (!sequentialRequest && !seekToFrame(frameIndex)) return QImage();
+    if (!sequentialRequest) {
+        // Frame number / average FPS is not an ordinal for variable-rate media.
+        // Index once before random seeking; sequential playback stays lazy.
+        // Subsequent seeks/exports reuse this source-owned presentation index.
+        if (frameIndex > 0 && !hasCompleteFrameIndex()) {
+            const auto scan = ensureFrameIndex(nullptr, shouldContinue);
+            if (scan.cancelled || !scan.errorMessage.isEmpty()) return QImage();
+            if (frameIndex >= mFrameCount) return QImage();
+        }
+        if (!seekToFrame(frameIndex)) return QImage();
+    }
 
+    bool retriedFromStart = false;
     for (;;) {
-        if (!decodeNextFrame()) return QImage();
+        if (!decodeNextFrame(nullptr, shouldContinue)) return QImage();
 
         int64_t timestamp = mFrame->best_effort_timestamp;
         if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
@@ -1466,6 +1492,16 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
         mPendingSeekTargetTimestamp = AV_NOPTS_VALUE;
 
         const int decodedIndex = registerDecodedFrame();
+        if (decodedIndex < 0 || decodedIndex > frameIndex) {
+            // Some demuxers land after the requested anchor. A verified index
+            // must not turn that into a wrong frameReady(requestedFrame).
+            if (!retriedFromStart && resetDecoderToStart()) {
+                retriedFromStart = true;
+                continue;
+            }
+            mLastError = QStringLiteral("Could not establish the requested presentation frame.");
+            return QImage();
+        }
         if (decodedIndex < frameIndex) continue;
 
         QImage image = convertDecodedFrameToImage();
@@ -1637,8 +1673,14 @@ void VDQtVideoDecoder::setErrorMode(int errorMode) {
 }
 
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
-    std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
+    std::function<bool(int currentFrame, int totalFrames)> progressCallback,
+    std::function<bool()> shouldContinue) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (shouldContinue && !shouldContinue()) {
+        VDScanResult result;
+        result.cancelled = true;
+        return result;
+    }
     if (hasCompleteFrameIndex()) {
         VDScanResult result;
         result.totalFrames = mFrameCount;
@@ -1646,7 +1688,7 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
             result.cancelled = true;
         return result;
     }
-    VDScanResult result = scanVideoStream(progressCallback);
+    VDScanResult result = scanVideoStream(progressCallback, shouldContinue);
     if (!result.cancelled && result.errorMessage.isEmpty() && !hasCompleteFrameIndex()) {
         result.errorMessage = mLastError.isEmpty()
             ? QStringLiteral("Could not verify a complete presentation-order frame index.")
@@ -1655,9 +1697,16 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
     return result;
 }
 
-VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback) {
+VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
+    std::function<bool(int currentFrame, int totalFrames)> progressCallback,
+    std::function<bool()> shouldContinue) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     VDScanResult res;
+    mDecodeCancelled = false;
+    if (shouldContinue && !shouldContinue()) {
+        res.cancelled = true;
+        return res;
+    }
     if (!mIsOpen) {
         res.errorMessage = "No video stream is currently loaded.";
         return res;
@@ -1667,7 +1716,8 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
 
     if (mIsAvsNative && mAvsClip) {
         for (int i = 0; i < mFrameCount; ++i) {
-            if (progressCallback && !progressCallback(i + 1, mFrameCount)) {
+            if ((shouldContinue && !shouldContinue())
+                || (progressCallback && !progressCallback(i + 1, mFrameCount))) {
                 res.cancelled = true;
                 break;
             }
@@ -1706,15 +1756,20 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(std::function<b
     int decodedCount = 0;
     for (;;) {
         int decodeErrors = 0;
-        if (!decodeNextFrame(&decodeErrors)) {
+        if (!decodeNextFrame(&decodeErrors, shouldContinue)) {
             res.badFrames += decodeErrors;
             res.maskedFrames += decodeErrors;
+            res.cancelled = mDecodeCancelled;
             break;
         }
 
         res.badFrames += decodeErrors;
         res.maskedFrames += decodeErrors;
         const int decodedIndex = registerDecodedFrame();
+        if (decodedIndex < 0) {
+            res.errorMessage = mLastError;
+            break;
+        }
         decodedCount = decodedIndex + 1;
         if (mFrame->flags & AV_FRAME_FLAG_KEY) ++res.keyFrames;
         if (mFrame->flags & AV_FRAME_FLAG_CORRUPT) {

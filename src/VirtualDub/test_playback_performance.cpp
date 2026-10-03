@@ -63,7 +63,8 @@ int main(int argc, char **argv)
             std::cerr << "FAIL: sparse-tail fixture decode did not reach EOF\n";
             return 1;
         }
-        if (sparse.isFrameCountExact() || sparse.getFrameCount() < 360) {
+        if (sparse.getFrameCount() < 360
+            || (sparse.isFrameCountExact() && sparse.getFrameCount() != 360)) {
             std::cerr << "FAIL: sparse EOF promoted the incomplete prefix: count="
                       << sparse.getFrameCount() << ", exact="
                       << sparse.isFrameCountExact() << '\n';

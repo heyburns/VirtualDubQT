@@ -59,9 +59,36 @@ bool sequentialScaling(VDQtTestFixtures& fixtures) {
                && decoder.getDecodedFrameCount() >= frames,
                "new error policy receives its own verified index")) return false;
     decoder.close();
-    return check(!decoder.hasCompleteFrameIndex() && decoder.openFile(input)
-                 && !decoder.hasCompleteFrameIndex(),
-                 "closing/reopening even the same path cannot reuse stale session index state");
+    if (!check(!decoder.hasCompleteFrameIndex() && decoder.openFile(input)
+               && !decoder.hasCompleteFrameIndex(),
+               "closing/reopening even the same path cannot reuse stale session index state")) return false;
+    int checks = 0;
+    decoder.resetPerformanceCounters();
+    if (!check(decoder.getFrameImage(6000, false, [&] { return ++checks < 100; }).isNull()
+               && decoder.getDecodedFrameCount() < 200 && !decoder.hasCompleteFrameIndex()
+               && !decoder.reachedEndOfStream(),
+               "obsolete cold seek cancels indexing promptly without false EOF/completeness")) return false;
+    if (!check(!decoder.getFrameImage(0).isNull()
+               && decoder.ensureFrameIndex().totalFrames == frames,
+               "cancelled cold seek leaves the decoder reusable")) return false;
+    decoder.clearCache();
+    decoder.resetPerformanceCounters();
+    for (int frame : {6000, 7199, 4200, 11}) {
+        if (!check(!decoder.getFrameImage(frame).isNull(),
+                   "verified long-source random seek succeeds")) return false;
+        std::cout << "Indexed seek " << frame << ": cumulative decodes="
+                  << decoder.getDecodedFrameCount() << '\n';
+    }
+    if (!check(decoder.getDecodedFrameCount() < 256,
+               "repeated indexed all-keyframe seeks do not walk the entire prefix")) return false;
+    decoder.clearCache();
+    if (!check(!decoder.getFrameImage(0).isNull(), "prepare cancellable sequential traversal")) return false;
+    checks = 0;
+    decoder.resetPerformanceCounters();
+    return check(decoder.getFrameImage(7000, true, [&] { return ++checks < 100; }).isNull()
+                 && decoder.getDecodedFrameCount() < 200 && !decoder.reachedEndOfStream()
+                 && !decoder.getFrameImage(0).isNull(),
+                 "obsolete long sequential decode cancels between packets and recovers");
 }
 
 bool duplicateTimestamps(VDQtTestFixtures& fixtures) {
@@ -90,8 +117,8 @@ bool duplicateTimestamps(VDQtTestFixtures& fixtures) {
         }
         return true;
     };
-    // An approximately labeled sparse picture must not fill the next prefix
-    // slot and then be mistaken for verified presentation-order knowledge.
+    // Random seeks must preserve duplicate-PTS identity, not merely keep a
+    // later sequential scan safe from approximately labeled observations.
     VDQtVideoDecoder sparse;
     if (!sparse.openFile(input) || sparse.getFrameImage(0).isNull()
         || sparse.getFrameImage(20).isNull() || sparse.getFrameImage(1).isNull()) return false;
@@ -109,6 +136,12 @@ bool duplicateTimestamps(VDQtTestFixtures& fixtures) {
     if (!check(scan.totalFrames == frames && decoder.isFrameCountExact()
                && scan.errorMessage.isEmpty(),
                "a full scan retains every distinct frame with duplicate timestamps")) return false;
+    for (int frame : {20, 1, 47, 0, 32, 21}) {
+        decoder.clearCache();
+        if (!check(matchesPicture(decoder.getFrameImage(frame), frame),
+                   "random duplicate-PTS seek returns the requested picture, not its PTS sibling")) return false;
+    }
+    decoder.clearCache();
     bool observedDuplicate = false;
     for (int frame = 0; frame < frames; ++frame) {
         if (!check(matchesPicture(decoder.getFrameImage(frame, true), frame),
@@ -118,6 +151,32 @@ bool duplicateTimestamps(VDQtTestFixtures& fixtures) {
     }
     return check(observedDuplicate, "the fixture really has duplicate presentation timestamps");
 }
+
+bool exactVfrOrdinals(VDQtTestFixtures& fixtures) {
+    const QString input = fixtures.directory.filePath("exact-vfr.mkv");
+    constexpr int frames = 300;
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=30",
+                          "-frames:v", QString::number(frames), "-vf",
+                          "setpts='if(lt(N,150),N/(10*TB),(15+(N-150)/30)/TB)'",
+                          "-fps_mode", "passthrough", "-c:v", "ffv1", "-pix_fmt", "bgr0",
+                          "-threads", "1", "-an", input})) return false;
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(input) || reference.scanVideoStream().totalFrames != frames) return false;
+    const QImage expected = reference.getFrameImage(150);
+    VDQtVideoDecoder fresh;
+    if (!fresh.openFile(input) || fresh.getFrameImage(0).isNull()) return false;
+    const QImage firstSeek = fresh.getFrameImage(150);
+    if (!check(!expected.isNull() && firstSeek == expected,
+               "a cold VFR ordinal seek matches its verified presentation frame")) {
+        std::cerr << "Cold ordinal 150 timestamp=" << fresh.getFrameTimestampSeconds(150)
+                  << ", verified=" << reference.getFrameTimestampSeconds(150) << '\n';
+        return false;
+    }
+    if (!check(fresh.scanVideoStream().totalFrames == frames,
+               "VFR health scan retains the complete source")) return false;
+    return check(fresh.getFrameImage(150) == firstSeek,
+                 "indexing cannot change the picture assigned to an ordinal");
+}
 }
 
 int main(int argc, char **argv) {
@@ -125,7 +184,8 @@ int main(int argc, char **argv) {
     VDQtTestFixtures fixtures;
     const bool scaling = sequentialScaling(fixtures);
     const bool duplicates = duplicateTimestamps(fixtures);
-    if (!scaling || !duplicates) {
+    const bool ordinals = exactVfrOrdinals(fixtures);
+    if (!scaling || !duplicates || !ordinals) {
         if (!fixtures.error.isEmpty()) std::cerr << fixtures.error.toStdString() << '\n';
         return 1;
     }

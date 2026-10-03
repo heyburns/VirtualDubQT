@@ -28,8 +28,12 @@ Remaining execution sequence
 [x] S09: preserve and roll back complete Append
     state, audio choices, markers, zoom, selection, edits and source intent.
 [x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
-[ ] H04/H05/M16: exact cancellable seeks, efficient and shared indexes,
-    variable-rate frame identity and shared keyframe/navigation knowledge.
+[x] H05: exact random frame identity, including variable-rate and duplicate-PTS media.
+[x] H04: packet/frame cancellation of obsolete seeks and nearby verified anchors.
+    The first uncached random seek can require one full index; further refinement
+    should retain cancelled indexing progress. Individual AVS/I/O calls are not preemptible.
+[ ] M16: share verified indexes with editor/export/audio and keyframe controls;
+    correct variable-rate jump-to-time and edited timeline time.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
     hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;

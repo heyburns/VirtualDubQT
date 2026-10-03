@@ -99,7 +99,11 @@ public:
     // preserveSequentialDecode is used by playback: a late presentation may
     // skip image conversion, but dependency frames are still decoded in order
     // instead of turning every dropped display frame into a random seek.
-    QImage getFrameImage(int frameIndex, bool preserveSequentialDecode = false);
+    // shouldContinue is checked between packets/frames. It must not enter this
+    // decoder or pump GUI events; false abandons an obsolete worker request.
+    // An individual demux read or third-party AVS call cannot be preempted.
+    QImage getFrameImage(int frameIndex, bool preserveSequentialDecode = false,
+                         std::function<bool()> shouldContinue = nullptr);
     void clearCache();
     qsizetype getCachedFrameCount() const { return mFrameCache.size(); }
     qsizetype getCachedFrameCostKiB() const { return mFrameCache.totalCost(); }
@@ -129,11 +133,13 @@ public:
         QString errorMessage;
     };
 
-    VDScanResult scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr);
+    VDScanResult scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr,
+                                std::function<bool()> shouldContinue = nullptr);
     // Navigation/export need the verified index, not a fresh health analysis.
     // Reuse a complete source-owned index; cached results report length only.
     // scanVideoStream() remains the explicit, always-fresh error scan.
-    VDScanResult ensureFrameIndex(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr);
+    VDScanResult ensureFrameIndex(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr,
+                                 std::function<bool()> shouldContinue = nullptr);
 
     void setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange);
     QString getForcedFormatName() const { return mForcedFormatName; }
@@ -160,10 +166,11 @@ private:
     bool ensureConversionResources(const AVFrame *sourceFrame);
     bool seekToFrame(int frameIndex);
     bool resetDecoderToStart();
-    bool decodeNextFrame(int *decodeErrors = nullptr);
+    bool decodeNextFrame(int *decodeErrors = nullptr,
+                         const std::function<bool()>& shouldContinue = nullptr);
     QImage convertDecodedFrameToImage();
     int registerDecodedFrame();
-    int findIndexedFrameByTimestamp(int64_t timestamp, int hint);
+    int findIndexedFrameByTimestamp(int64_t timestamp, int hint, bool requireUnique = false);
     void registerIndexedTimestamp(int64_t timestamp, int frameIndex);
     void updateFrameCountAtEndOfStream();
     void applyErrorMode();
@@ -202,6 +209,7 @@ private:
     bool mDemuxEof;
     bool mDrainSent;
     bool mLastDecodeReachedEof;
+    bool mDecodeCancelled = false;
     bool mIndexTraversalContiguous;
     bool mDiscardUntilKeyFrame;
     quint64 mSeekCount;

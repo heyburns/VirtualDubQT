@@ -519,3 +519,31 @@ Validation: focused Release/sanitizer checks passed 5/5 each, then full Release
 37/37 and sanitizer 33/33 passed. The rebuilt regular binary passed the maintained
 MP4/native-AVS raw-export smoke. Existing physical-device, leak-check and separate
 codec-troubleshooting-suite exclusions still apply.
+
+Exact random seeks and cooperative cancellation (H04/H05)
+--------------------------------------------------------
+
+The cold VFR regression failed before repair: ordinal 150 returned time 5 seconds,
+while a full verified scan identified its actual picture at 15 seconds. Cold and
+indexed seeks now agree. Random duplicate-PTS ordinals also match independent
+FFmpeg RGB pictures, rather than choosing a sibling sharing the same timestamp.
+Ordinals are never invented by dividing frame number by average FPS. Unambiguous
+verified keyframe timestamps are used as anchors; ambiguous timestamps fall back
+to counting from the beginning. Unexpected seek overshoot retries from start,
+never emitting the later picture under the requested frame number.
+
+Packet/frame callbacks cancel obsolete worker generations before a long traversal
+finishes. Tests abandon both cold indexing and long sequential catch-up within
+200 decodes and verify recovery without false EOF/complete-index claims. Individual
+blocking demux reads, AVS GetFrame calls and filter/plugin calls remain non-preemptible.
+On the 7,200-frame NUT fixture, four indexed random seeks required 194 total frame
+decodes, including container preroll, instead of repeated all-prefix traversals.
+
+Sequential playback remains lazy. The first uncached random seek may require one
+full presentation index; subsequent seeks/exports reuse it. Retaining incremental
+index work across cancellations and sharing the verified index with audio/keyframe
+consumers are follow-up work, not claimed resolved by this checkpoint.
+
+Validation: full Release 37/37 and sanitizer 33/33 passed; regular build/VirtualDubQt
+rebuilt and passed the maintained actual-application MP4/native-AVS export smoke.
+Physical-device and codec-suite exclusions apply.
