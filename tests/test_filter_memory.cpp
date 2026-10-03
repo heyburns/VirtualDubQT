@@ -26,22 +26,52 @@ bool require(bool condition, const char* message) {
 QImage scalarReference(const QImage& source, const QImage& previous, VDFilterType type) {
     QImage result = source.copy();
     if (result.depth() > 32) {
-        if (type == VDFilterType::TemporalSmoother && !previous.isNull()) {
+        {
             for (int y = 0; y < source.height(); ++y) {
                 auto *out = reinterpret_cast<QRgba64*>(result.scanLine(y));
                 const auto *in = reinterpret_cast<const QRgba64*>(source.constScanLine(y));
-                const auto *prior = reinterpret_cast<const QRgba64*>(previous.constScanLine(y));
+                const auto *prior = previous.isNull() ? nullptr
+                    : reinterpret_cast<const QRgba64*>(previous.constScanLine(y));
+                const auto *above = reinterpret_cast<const QRgba64*>(
+                    source.constScanLine(std::max(0, y - 1)));
+                const auto *below = reinterpret_cast<const QRgba64*>(
+                    source.constScanLine(std::min(source.height() - 1, y + 1)));
+                const auto rgb = [](const QRgba64& p, int c) -> int {
+                    return c == 0 ? p.red() : c == 1 ? p.green() : p.blue();
+                };
                 for (int x = 0; x < source.width(); ++x) {
-                    const int current[3] = {in[x].red(), in[x].green(), in[x].blue()};
-                    const int old[3] = {prior[x].red(), prior[x].green(), prior[x].blue()};
-                    int maximum = 0;
-                    for (int c = 0; c < 3; ++c)
-                        maximum = std::max(maximum, std::abs(current[c] - old[c]));
-                    if (maximum <= 12 * 257)
-                        out[x] = QRgba64::fromRgba64(
-                            std::lround((current[0] + old[0]) * 0.5),
-                            std::lround((current[1] + old[1]) * 0.5),
-                            std::lround((current[2] + old[2]) * 0.5), in[x].alpha());
+                    int values[3] = {in[x].red(), in[x].green(), in[x].blue()};
+                    if (type == VDFilterType::TemporalSmoother && prior) {
+                        int maximum = 0;
+                        for (int c = 0; c < 3; ++c)
+                            maximum = std::max(maximum, std::abs(values[c] - rgb(prior[x], c)));
+                        if (maximum <= 12 * 257)
+                            for (int c = 0; c < 3; ++c)
+                                values[c] = std::lround((values[c] + rgb(prior[x], c)) * 0.5);
+                    } else if (type == VDFilterType::InverseTelecine && y > 0 && y < source.height() - 1) {
+                        for (int c = 0; c < 3; ++c) {
+                            const int prediction = (rgb(above[x], c) + rgb(below[x], c) + 1) / 2;
+                            if (std::abs(values[c] - prediction) > 12 * 257) values[c] = prediction;
+                        }
+                    } else if (type == VDFilterType::Television) {
+                        int totals[3] = {0, 0, 0};
+                        for (int offset = -2; offset <= 2; ++offset)
+                            for (int c = 0; c < 3; ++c)
+                                totals[c] += rgb(in[std::clamp(x + offset, 0, source.width() - 1)], c);
+                        const int luma = (77 * values[0] + 150 * values[1] + 29 * values[2]) / 256;
+                        const int averageLuma = (77 * totals[0] + 150 * totals[1] + 29 * totals[2]) / 1280;
+                        for (int c = 0; c < 3; ++c)
+                            values[c] = std::clamp(int((luma + totals[c] / 5 - averageLuma)
+                                * ((y & 1) ? 0.92 : 1.0)), 0, 65535);
+                    } else if (type == VDFilterType::WarpSharp) {
+                        for (int c = 0; c < 3; ++c) {
+                            const int average = (rgb(in[std::max(0, x - 1)], c)
+                                + rgb(in[std::min(source.width() - 1, x + 1)], c)
+                                + rgb(above[x], c) + rgb(below[x], c) + 2) / 4;
+                            values[c] = std::clamp(values[c] + (values[c] - average) * 8 / 16, 0, 65535);
+                        }
+                    }
+                    out[x] = QRgba64::fromRgba64(values[0], values[1], values[2], in[x].alpha());
                 }
             }
         }

@@ -1074,6 +1074,28 @@ QImage VDQtFilterSystem::processFrameForPhase(
                         }
                     }
                 });
+            } else {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(std::max(0, height - 2), static_cast<qint64>(width) * height, [=](int row) {
+                    const int y = row + 1;
+                    auto *destination = reinterpret_cast<QRgba64*>(destinationBits + y * destinationStride);
+                    const auto *above = reinterpret_cast<const QRgba64*>(sourceBits + (y - 1) * sourceStride);
+                    const auto *current = reinterpret_cast<const QRgba64*>(sourceBits + y * sourceStride);
+                    const auto *below = reinterpret_cast<const QRgba64*>(sourceBits + (y + 1) * sourceStride);
+                    for (int x = 0; x < width; ++x) {
+                        for (int channel = 0; channel < 3; ++channel) {
+                            const int prediction = (int(rgba64Channel(above[x], channel))
+                                + rgba64Channel(below[x], channel) + 1) / 2;
+                            if (std::abs(int(rgba64Channel(current[x], channel)) - prediction) > threshold * 257)
+                                setRgba64Channel(destination[x], channel, prediction);
+                        }
+                    }
+                });
             }
             break;
         }
@@ -1171,6 +1193,30 @@ QImage VDQtFilterSystem::processFrameForPhase(
                             static_cast<int>((luma + blue / count - averageLuma) * lineScale), 0, 255));
                     }
                 });
+            } else {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
+                    auto *destination = reinterpret_cast<QRgba64*>(destinationBits + y * destinationStride);
+                    const auto *row = reinterpret_cast<const QRgba64*>(sourceBits + y * sourceStride);
+                    for (int x = 0; x < width; ++x) {
+                        int totals[3] = {0, 0, 0};
+                        const int count = radius * 2 + 1;
+                        for (int offset = -radius; offset <= radius; ++offset)
+                            for (int channel = 0; channel < 3; ++channel)
+                                totals[channel] += rgba64Channel(row[std::clamp(x + offset, 0, width - 1)], channel);
+                        const int luma = (77 * row[x].red() + 150 * row[x].green() + 29 * row[x].blue()) / 256;
+                        const int averageLuma = (77 * totals[0] + 150 * totals[1] + 29 * totals[2]) / (256 * count);
+                        const double lineScale = (y & 1) ? 1.0 - scanline : 1.0;
+                        for (int channel = 0; channel < 3; ++channel)
+                            setRgba64Channel(destination[x], channel, std::clamp(
+                                int((luma + totals[channel] / count - averageLuma) * lineScale), 0, 65535));
+                    }
+                });
             }
             break;
         }
@@ -1217,6 +1263,30 @@ QImage VDQtFilterSystem::processFrameForPhase(
                                 + below[x * bytesPerPixel + channel] + 2) / 4;
                             destination[x * bytesPerPixel + channel] = static_cast<uchar>(
                                 std::clamp(center + (center - average) * amount / 16, 0, 255));
+                        }
+                    }
+                });
+            } else {
+                const int width = result.width(), height = result.height();
+                const uchar *sourceBits = source.constBits();
+                const qsizetype sourceStride = source.bytesPerLine();
+                uchar *destinationBits = result.bits();
+                if (!destinationBits) return {};
+                const qsizetype destinationStride = result.bytesPerLine();
+                parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
+                    auto *destination = reinterpret_cast<QRgba64*>(destinationBits + y * destinationStride);
+                    const auto *current = reinterpret_cast<const QRgba64*>(sourceBits + y * sourceStride);
+                    const auto *above = reinterpret_cast<const QRgba64*>(sourceBits + std::max(0, y - 1) * sourceStride);
+                    const auto *below = reinterpret_cast<const QRgba64*>(sourceBits + std::min(height - 1, y + 1) * sourceStride);
+                    for (int x = 0; x < width; ++x) {
+                        const int left = std::max(0, x - 1), right = std::min(width - 1, x + 1);
+                        for (int channel = 0; channel < 3; ++channel) {
+                            const int center = rgba64Channel(current[x], channel);
+                            const int average = (int(rgba64Channel(current[left], channel))
+                                + rgba64Channel(current[right], channel) + rgba64Channel(above[x], channel)
+                                + rgba64Channel(below[x], channel) + 2) / 4;
+                            setRgba64Channel(destination[x], channel,
+                                std::clamp(center + (center - average) * amount / 16, 0, 65535));
                         }
                     }
                 });

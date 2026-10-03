@@ -683,3 +683,18 @@ Validation: focused Release 7/7 and sanitizer 5/5 passed, plus regular-binary
 MP4/native-AVS export smoke. The extra parameter cases rerun the temporal pixel
 test in both configurations. IVTC/TV/Warp Sharp high-depth paths remain next;
 this does not claim the separate original-app temporal algorithm parity work.
+
+High-depth IVTC, TV and Warp Sharp (M10, remaining substeps)
+---------------------------------------------------------
+
+All three independent pixel regressions failed before repair because the RGBA64
+paths returned unchanged images. Parallel 16-bit adaptive vertical interpolation,
+luma/chroma simulation and unsharp kernels now match the existing 8-bit operations,
+with scaled thresholds and 16-bit arithmetic. Source/destination pointers are
+captured after detachment; current alpha and border behavior are preserved.
+Golden references cover odd widths, 1080p/4K, retained outputs, multiple frames,
+duplicate Bob phases and non-8-bit-expanded samples. These are precision repairs,
+not claims that the current IVTC/warp approximations equal the Windows originals.
+
+Validation: full Release 43/43 and sanitizer 39/39 passed. The regular executable
+rebuilt and passed real MP4/native-AVS decode/export smoke after the precision fixes.
