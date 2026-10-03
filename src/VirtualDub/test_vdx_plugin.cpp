@@ -8,6 +8,7 @@
 namespace {
 
 int gLiveInstances = 0;
+int gRunCalls = 0;
 int __cdecl initializeFilter(VDXFilterActivation *, const VDXFilterFunctions *) {
     ++gLiveInstances;
     return 0;
@@ -32,6 +33,7 @@ int __cdecl runFilter(const VDXFilterActivation *activation,
                       const VDXFilterFunctions *) {
     if (!activation || !activation->src.mpPixmap || !activation->dst.mpPixmap)
         return 1;
+    ++gRunCalls;
     const VDXPixmap& source = *activation->src.mpPixmap;
     const VDXPixmap& destination = *activation->dst.mpPixmap;
     for (int y = 0; y < source.h; ++y) {
@@ -79,3 +81,6 @@ void VirtualdubFilterModuleDeinit(VDXFilterModule *,
 // Test-only observability; no production host API or third-party ABI changes.
 extern "C" __attribute__((visibility("default")))
 int VDQtTestLiveInstances() { return gLiveInstances; }
+
+extern "C" __attribute__((visibility("default")))
+int VDQtTestRunCalls() { return gRunCalls; }

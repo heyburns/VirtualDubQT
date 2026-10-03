@@ -49,11 +49,11 @@ Remaining execution sequence
 [x] H10/M25: explicit filter failures, missing assets/plugins and invalid preview.
 [x] S06/M06: consistent source/edited-timeline filter context in all consumers,
     including cumulative VFR time and advancing timing across held masks.
-    Output-phase advancement downstream of Bob remains P05.
+    Output-phase advancement downstream of Bob is tested separately under P05.
 [ ] M18/M26: unique filter IDs and typed finite/range/relationship validation.
 [ ] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
     Private pipeline runtime reset/destruction is already fixed.
-[ ] P05: stage-wise expanded frame sequences, correct histories and memory budgets.
+[x] P05: stage-wise expanded frame sequences, correct histories and memory budgets.
 [ ] M04/M05/S10: usable audio clock, consistent inclusion/disable and silent sources.
 [ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
 [ ] M14/M15: matching audio effects and device-boundary conversion without bypass.

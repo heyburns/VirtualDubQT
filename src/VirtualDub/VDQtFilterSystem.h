@@ -184,9 +184,10 @@ private:
     // Serialized IDs describe configuration, not runtime ownership. Two
     // pipelines with the same chain must never share/clear native instances.
     QString mRuntimeNamespace;
-    // Runs one temporal phase through every enabled filter in chain order.
-    QImage processFrameForPhase(const QImage& inputFrame, quint64 bobPhaseMask,
-                                const VDFilterFrameContext& context);
+    // One stage/phase only; the sequence driver reuses completed upstream work
+    // and advances downstream history in chronological emitted-frame order.
+    QImage processFilterForPhase(QImage inputFrame, quint64 phase,
+                                const VDFilterFrameContext& context, int filterIndex);
 
     struct TemporalState {
         qint64 lastFrameNumber = -1;

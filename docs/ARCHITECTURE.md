@@ -206,6 +206,15 @@ bob deinterlacing may emit multiple temporal phases for one source image.
 `processFrame()` exists for older single-image callers and returns only phase
 zero.
 
+Expansion is stage-wise: each stage consumes the preceding stage's ordered
+sequence, and Bob doubles each item before the next stage sees it. Upstream work
+is not rerun for every final phase. Downstream frame numbers, rate, time and
+duration advance with emitted phases, and each temporal filter keeps the preceding
+emitted image rather than a separate same-phase history. The phase-count cap and
+a conservative 512 MiB budget for retained stage images/temporal history reject
+oversized sequences with an explicit failure. Caller-owned images and individual
+kernel scratch retain separate normal allocation-error handling.
+
 Required effects must not be silently omitted. A failed sequence discards every
 output phase, resets partial runtime history, and records a pipeline-local
 `VDFilterProcessingError` (filter ID/name and actionable message). Preview keeps

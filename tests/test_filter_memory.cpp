@@ -164,18 +164,19 @@ bool runCase(VDFilterType type, QSize size, QImage::Format format, int frames,
             }
         }
         const QImage inputSnapshot = input.copy();
-        const QImage expected = scalarReference(input, previous, type);
+        QList<QImage> expected;
+        for (int phase = 0; phase < (doubled ? 2 : 1); ++phase) {
+            previous = scalarReference(input, previous, type);
+            expected.append(previous);
+        }
         QList<QImage> outputs;
         if (!require(filters.processFrameSequence(input, outputs, {frame, frame / 24.0, 24.0}),
                      "processing succeeds")
             || !require(outputs.size() == (doubled ? 2 : 1), "expected phase count")
-            || !require(std::all_of(outputs.cbegin(), outputs.cend(), [&](const QImage& output) {
-                    return !output.isNull() && output == expected;
-                }), "parallel phase pixels match scalar reference")
+            || !require(outputs == expected, "parallel emitted-phase pixels match the scalar chronological reference")
             || !require(input == inputSnapshot, "caller-owned source stays unchanged")) return false;
         for (int index = 0; index < retained.size(); ++index)
             if (!require(retained.at(index) == snapshots.at(index), "old outputs stay unchanged")) return false;
-        previous = expected;
         retained.append(outputs.first());
         snapshots.append(outputs.first().copy());
     }

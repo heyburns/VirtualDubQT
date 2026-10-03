@@ -72,5 +72,15 @@ int main(int argc, char **argv) {
     if (liveInstances() != 0) {
         std::cerr << "pipeline destruction retained plugin runtime\n"; return 1;
     }
+    const auto runCalls = reinterpret_cast<int (*)()>(module.resolve("VDQtTestRunCalls"));
+    filters.clearFilters();
+    if (!runCalls || !filters.addPluginFilter(found->id)) return 1;
+    filters.addFilter(VDFilterType::BobDoubler);
+    const int callsBefore = runCalls();
+    QList<QImage> phases;
+    if (!filters.processFrameSequence(source, phases, {0, 0, 25})
+        || phases.size() != 2 || runCalls() != callsBefore + 1) {
+        std::cerr << "upstream plugin work was repeated for Bob output phases\n"; return 1;
+    }
     return 0;
 }

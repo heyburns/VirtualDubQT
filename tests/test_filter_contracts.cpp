@@ -73,6 +73,76 @@ bool rotatedLayout() {
     return true;
 }
 
+bool expandedSequence() {
+    for (const auto format : {QImage::Format_RGB888, QImage::Format_RGBA8888, QImage::Format_RGBA64}) {
+        VDQtFilterSystem combined, bobOnly, downstream;
+        combined.addFilter(VDFilterType::BobDoubler);
+        combined.addFilter(VDFilterType::FieldDelay);
+        bobOnly.addFilter(VDFilterType::BobDoubler);
+        downstream.addFilter(VDFilterType::FieldDelay);
+        for (int frame = 0; frame < 4; ++frame) {
+            QImage input(17, 6, format);
+            for (int y = 0; y < input.height(); ++y)
+                for (int x = 0; x < input.width(); ++x)
+                    input.setPixelColor(x, y, QColor((y & 1 ? 120 : 40) + frame * 10, 50, 80, 180));
+            const QImage original = input.copy();
+            QList<QImage> phases, actual;
+            if (!bobOnly.processFrameSequence(input, phases, {frame, frame / 25.0, 25})
+                || !combined.processFrameSequence(input, actual, {frame, frame / 25.0, 25})
+                || phases.size() != 2 || actual.size() != 2) return false;
+            for (int phase = 0; phase < 2; ++phase) {
+                const QImage expected = downstream.processFrame(phases.at(phase),
+                    {frame * 2 + phase, (frame * 2 + phase) / 50.0, 50});
+                if (!check(actual.at(phase) == expected,
+                           "post-Bob field history follows the preceding emitted frame, not the same phase of the previous input")) return false;
+            }
+            if (!check(input == original, "sequence expansion leaves the source unchanged")) return false;
+        }
+    }
+    QImage input(17, 6, QImage::Format_RGB888);
+    for (int y = 0; y < input.height(); ++y)
+        for (int x = 0; x < input.width(); ++x)
+            input.setPixelColor(x, y, QColor(y & 1 ? 120 : 40, 50, 80));
+    VDQtFilterSystem bob, timed, invert, stacked;
+    bob.addFilter(VDFilterType::BobDoubler);
+    timed.addFilter(VDFilterType::BobDoubler);
+    timed.addFilter(VDFilterType::InvertColor);
+    auto params = timed.getActiveChain().last().params;
+    params["_sylia.range.start"] = 1;
+    params["_sylia.range.end"] = 2;
+    timed.updateFilterParams(1, params);
+    invert.addFilter(VDFilterType::InvertColor);
+    stacked.addFilter(VDFilterType::BobDoubler);
+    stacked.addFilter(VDFilterType::BobDoubler);
+    QList<QImage> phases, outputs, expanded;
+    if (!bob.processFrameSequence(input, phases, {0, 0, 25})
+        || !timed.processFrameSequence(input, outputs, {0, 0, 25})
+        || !stacked.processFrameSequence(input, expanded, {0, 0, 25})) return false;
+    if (!check(outputs.size() == 2 && outputs.first() == phases.first()
+               && outputs.last() == invert.processFrame(phases.last()),
+               "downstream timed ranges use emitted frame ordinals")) return false;
+    if (!check(expanded.size() == 4 && expanded.at(0) == phases.first()
+               && expanded.at(1) == phases.first() && expanded.at(2) == phases.last()
+               && expanded.at(3) == phases.last(), "stacked expansion preserves chronological order")) return false;
+    QList<QImage> aliased{input};
+    if (!check(timed.processFrameSequence(aliased.first(), aliased, {0, 0, 25}) && aliased == outputs,
+               "an input owned by the output container stays alive while replacing that container")) return false;
+    VDQtFilterSystem excessive;
+    for (int index = 0; index < 6; ++index) {
+        excessive.addFilter(VDFilterType::BobDoubler);
+        auto duplicate = excessive.getActiveChain().last().params;
+        duplicate["mode"] = 4;
+        excessive.updateFilterParams(index, duplicate);
+    }
+    // Pure duplicate phases share this allocation even in the unfixed code;
+    // the logical sequence exceeds the budget without an expensive OOM test.
+    QImage large(1025, 1025, QImage::Format_RGBA64);
+    large.fill(Qt::black);
+    return check(!excessive.processFrameSequence(large, outputs, {0, 0, 25})
+                 && outputs.isEmpty() && excessive.lastError().contains("budget"),
+                 "expansion enforces a byte budget and returns no partial sequence");
+}
+
 bool requiredEffects() {
     QImage input(17, 9, QImage::Format_RGBA8888);
     input.fill(QColor(100, 80, 60, 150));
@@ -116,5 +186,6 @@ int main(int argc, char **argv) {
     if (args.contains("field")) return fieldHistory() ? 0 : 1;
     if (args.contains("layout")) return rotatedLayout() ? 0 : 1;
     if (args.contains("failure")) return requiredEffects() ? 0 : 1;
-    return fieldHistory() && rotatedLayout() && requiredEffects() ? 0 : 1;
+    if (args.contains("sequence")) return expandedSequence() ? 0 : 1;
+    return fieldHistory() && rotatedLayout() && requiredEffects() && expandedSequence() ? 0 : 1;
 }

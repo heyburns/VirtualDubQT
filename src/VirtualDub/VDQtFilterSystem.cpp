@@ -584,14 +584,9 @@ QImage VDQtFilterSystem::processFrame(const QImage& inputFrame) {
 
 QImage VDQtFilterSystem::processFrame(
     const QImage& inputFrame, const VDFilterFrameContext& context) {
-    mProcessingError = {};
-    QImage output = processFrameForPhase(inputFrame, 0, context);
-    if (output.isNull()) {
-        if (mProcessingError.message.isEmpty())
-            failProcessing(QStringLiteral("The filter chain could not produce an output frame."));
-        resetRuntimeState();
-    }
-    return output;
+    QList<QImage> outputs;
+    return processFrameSequence(inputFrame, outputs, context) && !outputs.isEmpty()
+        ? outputs.first() : QImage();
 }
 
 QImage VDQtFilterSystem::failProcessing(const QString& message, const VDFilterInstance *filter) {
@@ -622,10 +617,13 @@ bool VDQtFilterSystem::processFrameSequence(const QImage& inputFrame, QList<QIma
 bool VDQtFilterSystem::processFrameSequence(
     const QImage& inputFrame, QList<QImage>& outputFrames,
     const VDFilterFrameContext& context) try {
+    // The input reference may name an image in outputFrames itself. Keep its
+    // value alive before clearing that container (an implicit, not pixel copy).
+    QImage stableInput = inputFrame;
     outputFrames.clear();
     mProcessingError = {};
 
-    if (inputFrame.isNull()) {
+    if (stableInput.isNull()) {
         failProcessing(QStringLiteral("There is no input frame to filter."));
         return false;
     }
@@ -636,23 +634,68 @@ bool VDQtFilterSystem::processFrameSequence(
         return false;
     }
 
-    outputFrames.reserve(timing.outputFramesPerInput);
-    for (int phase = 0; phase < timing.outputFramesPerInput; ++phase) {
-        QImage output = processFrameForPhase(
-            inputFrame, static_cast<quint64>(phase), context);
-        if (output.isNull()) {
-            if (mProcessingError.message.isEmpty())
-                failProcessing(QStringLiteral("The filter chain could not produce an output frame."));
-            // Allocation/processing failure is not a successful sequence of
-            // null images. Discard any earlier phases and their temporal state
-            // so a retry cannot reuse a partially advanced filter history.
-            outputFrames.clear();
-            resetRuntimeState();
-            return false;
+    // Bound retained logical image bytes (including temporal history), not just
+    // the phase count. Conservative accounting also covers shared duplicates
+    // that a later stage may detach. Caller-owned images/kernel scratch are
+    // outside this pipeline budget and retain normal allocation-error handling.
+    constexpr qint64 sequenceBudget = qint64{512} * 1024 * 1024;
+    const auto failSequence = [&](const QString& message, const VDFilterInstance *filter = nullptr) {
+        if (mProcessingError.message.isEmpty()) failProcessing(message, filter);
+        outputFrames.clear();
+        resetRuntimeState();
+        return false;
+    };
+    const auto historyBytes = [this] {
+        qint64 bytes = 0;
+        for (const auto& state : std::as_const(mTemporalStates)) bytes += state.previousFrame.sizeInBytes();
+        return bytes;
+    };
+    const double duration = context.inputDurationSeconds > 0 && std::isfinite(context.inputDurationSeconds)
+        ? context.inputDurationSeconds : context.frameRate > 0 && std::isfinite(context.frameRate)
+        ? 1.0 / context.frameRate : 0.0;
+    QList<QImage> current{std::move(stableInput)};
+    for (int filterIndex = 0; filterIndex < mActiveChain.size(); ++filterIndex) {
+        const auto& filter = mActiveChain.at(filterIndex);
+        if (!filter.enabled) continue;
+        const int inputPhases = current.size();
+        if (context.frameNumber >= 0 && context.frameNumber
+            > (std::numeric_limits<qint64>::max() - inputPhases + 1) / inputPhases)
+            return failSequence(QStringLiteral("The expanded frame position is too large."), &filter);
+        const int expansion = filter.type == VDFilterType::BobDoubler ? 2 : 1;
+        QList<QImage> next;
+        next.reserve(inputPhases * expansion);
+        qint64 remainingBytes = 0, nextBytes = 0;
+        for (const QImage& image : std::as_const(current)) remainingBytes += image.sizeInBytes();
+        if (remainingBytes + historyBytes() > sequenceBudget)
+            return failSequence(QStringLiteral("The filter sequence exceeds its 512 MiB image budget."), &filter);
+        for (int inputPhase = 0; inputPhase < inputPhases; ++inputPhase) {
+            VDFilterFrameContext stageContext = context;
+            stageContext.frameNumber = context.frameNumber >= 0 ? context.frameNumber * inputPhases + inputPhase : -1;
+            stageContext.frameRate = context.frameRate * inputPhases;
+            stageContext.inputDurationSeconds = duration / inputPhases;
+            stageContext.timestampSeconds = context.timestampSeconds >= 0
+                ? context.timestampSeconds + inputPhase * stageContext.inputDurationSeconds : -1;
+            stageContext.outputFrameNumber = stageContext.frameNumber;
+            stageContext.outputPhase = inputPhase;
+            stageContext.outputTimestampSeconds = stageContext.timestampSeconds;
+            const qint64 consumedBytes = current.at(inputPhase).sizeInBytes();
+            for (int phase = 0; phase < expansion; ++phase) {
+                // Earlier phases borrow an immutable copy; the final phase
+                // consumes ownership. Ordinary single-phase stages therefore
+                // keep unique buffers without a full-image copy at every stage.
+                QImage incoming = phase + 1 == expansion ? std::move(current[inputPhase]) : current.at(inputPhase);
+                QImage output = processFilterForPhase(std::move(incoming), phase, stageContext, filterIndex);
+                if (output.isNull()) return failSequence(QStringLiteral("The filter chain could not produce an output frame."));
+                nextBytes += output.sizeInBytes();
+                if (remainingBytes + nextBytes + historyBytes() > sequenceBudget)
+                    return failSequence(QStringLiteral("The filter sequence exceeds its 512 MiB image budget."), &filter);
+                next.append(std::move(output));
+            }
+            remainingBytes -= consumedBytes;
         }
-        outputFrames.append(std::move(output));
+        current.swap(next);
     }
-
+    outputFrames.swap(current);
     return true;
 } catch (const std::bad_alloc&) {
     outputFrames.clear();
@@ -661,43 +704,33 @@ bool VDQtFilterSystem::processFrameSequence(
     return false;
 }
 
-QImage VDQtFilterSystem::processFrameForPhase(
-    const QImage& inputFrame, quint64 bobPhaseMask,
-    const VDFilterFrameContext& context) try {
+QImage VDQtFilterSystem::processFilterForPhase(
+    QImage inputFrame, quint64 bobPhaseMask,
+    const VDFilterFrameContext& context, int filterIndex) try {
     if (inputFrame.isNull() || mActiveChain.isEmpty()) return inputFrame;
-
-    // Normalize once at chain entry. 64-bit input remains 16-bit-per-channel;
-    // ordinary input uses packed 8-bit RGB(A) understood by the optimized loops.
-    bool highPrecision = inputFrame.depth() > 32;
-
-    QImage result = highPrecision
-        ? inputFrame.convertToFormat(QImage::Format_RGBA64)
-        : inputFrame;
-    if (!highPrecision) {
-        result = inputFrame.hasAlphaChannel()
-            ? inputFrame.convertToFormat(QImage::Format_RGBA8888)
-            : inputFrame.convertToFormat(QImage::Format_RGB888);
+    const auto& filter = mActiveChain.at(filterIndex);
+    if (!filter.enabled) return inputFrame;
+    const qint64 rangeEnd = static_cast<qint64>(filter.params.value(
+        QStringLiteral("_sylia.range.end"), -1.0));
+    if (rangeEnd >= 0 && context.frameNumber >= 0) {
+        const qint64 rangeStart = static_cast<qint64>(filter.params.value(
+            QStringLiteral("_sylia.range.start"), 0.0));
+        if (context.frameNumber < rangeStart || context.frameNumber >= rangeEnd) return inputFrame;
     }
+
+    // Normalize only when needed, retaining unique intermediate storage. The
+    // caller's original and borrowed earlier Bob phases still detach on write.
+    QImage result = std::move(inputFrame);
+    bool highPrecision = result.depth() > 32;
+    const QImage::Format format = highPrecision ? QImage::Format_RGBA64
+        : result.hasAlphaChannel() ? QImage::Format_RGBA8888 : QImage::Format_RGB888;
+    if (result.format() != format) result = result.convertToFormat(format);
     if (result.isNull()) return {};
-    int bobFilterIndex = 0;
 
     // The chain is interpreted in order. Reserved _sylia.* parameters carry
     // script-only range, clipping, and opacity-curve metadata without widening
     // the public filter ABI or losing round-trip compatibility with VCF files.
-    for (const auto& filter : mActiveChain) {
-        if (!filter.enabled) continue;
-
-        const qint64 rangeEnd = static_cast<qint64>(filter.params.value(
-            QStringLiteral("_sylia.range.end"), -1.0));
-        if (rangeEnd >= 0 && context.frameNumber >= 0) {
-            const qint64 rangeStart = static_cast<qint64>(filter.params.value(
-                QStringLiteral("_sylia.range.start"), 0.0));
-            if (context.frameNumber < rangeStart
-                || context.frameNumber >= rangeEnd) {
-                continue;
-            }
-        }
-
+    {
         const int clipLeft = std::max(0, static_cast<int>(filter.params.value(
             QStringLiteral("_sylia.clip.left"), 0.0)));
         const int clipTop = std::max(0, static_cast<int>(filter.params.value(
@@ -946,8 +979,7 @@ QImage VDQtFilterSystem::processFrameForPhase(
             const bool incomingHistory = filter.type == VDFilterType::FieldDelay
                 || filter.type == VDFilterType::Interlace;
             const QImage incomingFieldFrame = incomingHistory ? result : QImage();
-            const QString stateKey = filter.id + QLatin1Char(':')
-                + QString::number(bobPhaseMask);
+            const QString stateKey = filter.id;
             TemporalState& temporal = mTemporalStates[stateKey];
             const bool sequential = !temporal.previousFrame.isNull()
                 && (context.frameNumber < 0
@@ -1465,9 +1497,8 @@ QImage VDQtFilterSystem::processFrameForPhase(
             int fieldOrder = static_cast<int>(filter.params.value("field_order", 1)); // 0: TFF, 1: BFF
             int mode = static_cast<int>(filter.params.value("mode", 0));
             bool retainedFieldIsOdd = (fieldOrder == 1);
-            if ((bobPhaseMask >> bobFilterIndex) & 1U)
+            if (bobPhaseMask & 1U)
                 retainedFieldIsOdd = !retainedFieldIsOdd;
-            ++bobFilterIndex;
 
             int w = result.width();
             int h = result.height();

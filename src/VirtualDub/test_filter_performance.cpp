@@ -7,8 +7,10 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QTemporaryDir>
+#include <QThreadPool>
 
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <set>
 
@@ -125,6 +127,43 @@ int main(int argc, char **argv) {
     if (!require(millisecondsPerFrame < 750.0,
                  "heavy 1080p filter preview stays below 750 ms/frame"))
         return 1;
+
+    // Duplicate Bob makes these two orders pixel-equivalent. The second runs
+    // heavy stages twice, providing a repeatable comparison for the removed
+    // whole-chain-per-phase work without a historical executable dependency.
+    VDQtFilterSystem beforeBob, afterBob;
+    beforeBob.replaceActiveChainTransient(filters.getActiveChain());
+    beforeBob.addFilter(VDFilterType::BobDoubler);
+    auto duplicate = beforeBob.getActiveChain().last().params;
+    duplicate["mode"] = 4;
+    beforeBob.updateFilterParams(2, duplicate);
+    afterBob.addFilter(VDFilterType::BobDoubler);
+    afterBob.updateFilterParams(0, duplicate);
+    auto afterChain = afterBob.getActiveChain();
+    afterChain.append(filters.getActiveChain());
+    afterBob.replaceActiveChainTransient(afterChain);
+    const int poolThreads = QThreadPool::globalInstance()->maxThreadCount();
+    QThreadPool::globalInstance()->setMaxThreadCount(8);
+    QList<QImage> once, twice;
+    if (!beforeBob.processFrameSequence(source, once, {0, 0, 24})
+        || !afterBob.processFrameSequence(source, twice, {0, 0, 24})
+        || !require(once == twice && once.size() == 2,
+                    "pre/post duplicate-Bob benchmark has identical pixels")) return 1;
+    std::array<double, 5> onceMs{}, twiceMs{};
+    for (int sample = 0; sample < 5; ++sample) {
+        timer.restart();
+        if (!beforeBob.processFrameSequence(source, once, {sample, sample / 24.0, 24})) return 1;
+        onceMs[sample] = timer.nsecsElapsed() / 1000000.0;
+        timer.restart();
+        if (!afterBob.processFrameSequence(source, twice, {sample, sample / 24.0, 24})) return 1;
+        twiceMs[sample] = timer.nsecsElapsed() / 1000000.0;
+        if (!require(once == twice, "expansion work comparison preserves every phase")) return 1;
+    }
+    QThreadPool::globalInstance()->setMaxThreadCount(poolThreads);
+    std::sort(onceMs.begin(), onceMs.end());
+    std::sort(twiceMs.begin(), twiceMs.end());
+    std::cout << "1080p heavy stages once before duplicate-Bob: " << onceMs[2]
+              << " ms/input; twice after Bob: " << twiceMs[2] << " ms/input (same pixels)\n";
 
     VDQtFilterSystem expanded;
     expanded.addFilter(VDFilterType::HSVAdjust);

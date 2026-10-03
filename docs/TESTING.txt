@@ -735,3 +735,39 @@ efficiency and configuration consistency, not a claimed playback speedup.
 
 Validation: full Release 44/44 and sanitizer 40/40 passed after consolidation.
 The regular target rebuilt and passed maintained MP4/native-AVS export smoke.
+
+Stage-wise expanded filtering (P05)
+----------------------------------
+
+The new field-history and native-plugin regressions both failed before repair:
+post-Bob history used the previous input's same phase, and an upstream plugin ran
+twice for one input. Each stage now consumes a chronological sequence. Work before
+Bob executes once; later stages see consecutive emitted frame numbers, actual
+fractional time/duration and the doubled rate. Stacked Bob order is chronological,
+not the previous bit-mask order. Temporal history is per stage rather than per
+phase. The legacy single-image API returns phase zero of this authoritative path.
+
+Tests compare four varying inputs against an independent downstream field pipeline
+in RGB/RGBA/RGBA64, verify timed ranges at emitted ordinals and stacked order, and
+count actual upstream native-plugin callbacks. The large-memory scalar temporal
+reference now advances for each emitted duplicate, instead of requiring both
+phases to have the same recursive smoothing result.
+
+The 512 MiB budget counts retained logical stage images and temporal history,
+conservatively including shared duplicates a later stage may detach. A small
+shared allocation tests oversized expansion without allocating all predicted
+bytes. Failure discards every output and resets partial history. Individual
+kernel scratch and caller images are outside this pipeline budget. Consumed
+intermediates transfer ownership to the last phase; normal single-phase stages
+retain unique storage instead of adding a full-image copy at each boundary.
+
+Additional lifetime review found that inputFrame may alias outputFrames.first().
+The sequence driver now retains that input value before clearing the output list;
+an aliasing regression checks identical results without a dangling image object.
+
+Validation: final Release 45/45 and ASan/UBSan 41/41 passed. The rebuilt regular
+binary passed real MP4/native-AVS decode/export smoke. With all builds/tests idle,
+the 1080p benchmark measured 18.8 ms/input for heavy stages before duplicate-Bob
+versus 46.1 ms/input after Bob, with identical pixels (eight workers, five-run
+medians). This demonstrates avoided repeated work, not a prediction of physical
+playback or the still-unreproduced progressive ProRes slowdown.

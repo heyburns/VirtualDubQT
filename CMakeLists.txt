@@ -286,7 +286,7 @@ if (BUILD_TESTING)
     add_executable(filter_contract_tests tests/test_filter_contracts.cpp)
     target_link_libraries(filter_contract_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(filter_contract_tests)
-    foreach(filter_contract IN ITEMS field layout failure)
+    foreach(filter_contract IN ITEMS field layout failure sequence)
         add_test(NAME filter_contract_${filter_contract}
             COMMAND filter_contract_tests ${filter_contract})
         set_tests_properties(filter_contract_${filter_contract} PROPERTIES
