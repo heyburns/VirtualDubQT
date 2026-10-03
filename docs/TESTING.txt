@@ -137,8 +137,8 @@ an explicit filter snapshot and does not create a playback sink. Closing a
 source releases preview/worker runtime caches while preserving session options.
 
 These checks do not establish the cause of the user's progressive ProRes export
-slowdown or validate arbitrary third-party AVS/VDX plugins. Source-overwrite
-auditing and output-transaction recovery (H08/H09/S02/S12) remain the next batch.
+slowdown or validate arbitrary third-party AVS/VDX plugins. See the following
+checkpoint for H08/H09. Dependency discovery/scaling (S02/S12) remains deferred.
 
 Validation of this checkpoint, 2026-10-02:
   - Release: 20/20 selected checks passed; sanitizer: 16/16 passed.
@@ -151,3 +151,42 @@ Validation of this checkpoint, 2026-10-02:
     The observed progressive 30% throughput loss still was not reproduced.
   - Raw measurements: build-release-checks/isolation-after.json (ignored).
   - The regular build/VirtualDubQt is rebuilt and passes the VCF smoke check.
+
+Numbered output approval and recoverable replacement (H08/H09)
+-------------------------------------------------------------
+
+  ctest --preset release-checks -R 'output_transaction_tests|operation_outputs'
+  ctest --preset sanitizer-checks -R 'output_transaction_tests|operation_outputs'
+
+output_transaction_tests contains 23 disposable-filesystem scenarios: fresh and
+approved output, denied approval, late collisions, changed/replaced files,
+invalid staging, duplicate/hardlinked targets, directory targets, dangling
+symlinks, changed containing directories, backup/commit/removal/restore failures,
+unsupported atomic moves, racing collisions during moves/rollback, exception
+unwinding, and invalid destinations inside staging. Failure injection overrides
+only narrow filesystem methods. No user media or user process is involved.
+
+Recovery tests verify retained backups and recovery maps AFTER destruction of
+the QTemporaryDir that formerly deleted the only surviving originals. A foreign
+file occupying a destination must survive rollback untouched. Successful rollback
+restores originals; successful commit preserves normal permissions and cleanup.
+
+operation_outputs exercises the real controller and dialogs: unattended segmented
+AVI must reject numbered-file collisions even when the selected base name is new;
+Cancel preserves originals; Yes installs decodable segments; changes inside the
+approval dialog invalidate approval. It also checks unattended script images,
+denied/approved queued image replacement, and a file appearing during rendering.
+
+The common transaction is used for AVI segments, all three image-sequence entry
+points, and split capture. Physical capture remains untested without a device.
+Single-file atomic replacement does not use these multi-file backups. This batch
+does not repair dependency discovery for misnamed/nested manifests (S02), repeated
+source-audit work (S12), or the unreproduced progressive AVS/ProRes slowdown.
+
+Validation of this checkpoint, 2026-10-02:
+  - Release: 22/22 selected checks passed; sanitizer: 18/18 passed.
+  - All 23 filesystem scenarios pass in both builds, as do real-controller
+    approval, cancellation, concurrent-change, and queued-image checks.
+  - Physical audio/capture devices are not exercised. Allocator-limit tests run
+    only in Release; the separate codec troubleshooting suite remains excluded.
+  - build/VirtualDubQt is rebuilt and passes the generated VCF smoke check.

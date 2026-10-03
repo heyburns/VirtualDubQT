@@ -283,6 +283,118 @@ bool queueIsolation(VDQtTestFixtures& fixtures) {
                     && window.openVideoFile(fixtures.avs),
                  "abort stays available and operation ownership is released");
 }
+
+bool outputFamilies(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    VDQtFilterSystem::instance().clearFilters();
+    VDQtCodecEngine::instance().setVideoParams(
+        VDQtCodecEngine::getDefaultVideoParamsForCodec("ffv1"));
+    const QString directory = fixtures.directory.path();
+    const QString first = fixtures.directory.filePath("segments.00.avi");
+    const QString second = fixtures.directory.filePath("segments.01.avi");
+    if (!fixtures.writeText(first, "original0") || !fixtures.writeText(second, "original1")) return false;
+    const QString segmented = "VirtualDub.video.SetMode(3); VirtualDub.audio.SetSource(0); "
+        "VirtualDub.video.SetRangeFrames(0,4); VirtualDub.SaveSegmentedAVI(\"segments.avi\",0,2,2);";
+    QString error;
+    if (!check(!window.runAutomationText(segmented, directory, &error)
+               && error.contains("not approved") && error.contains(first)
+               && readFile(first) == "original0" && readFile(second) == "original1",
+               "unattended segmented export rejects actual numbered collisions")) return false;
+
+    window.setAutomationUnattended(false);
+    int answer = QMessageBox::Cancel;
+    bool promptSeen = false, promptCorrect = true, changeDuringApproval = false;
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *message = qobject_cast<QMessageBox*>(widget);
+            if (!message || !message->isVisible() || message->property("testAnswered").toBool()
+                || message->windowTitle() != "Replace AVI Segments?") continue;
+            message->setProperty("testAnswered", true);
+            promptSeen = true;
+            promptCorrect &= message->detailedText().contains(first)
+                && message->detailedText().contains(second)
+                && message->defaultButton() == message->button(QMessageBox::Cancel);
+            if (changeDuringApproval) fixtures.writeText(second, "changed during approval");
+            message->button(static_cast<QMessageBox::StandardButton>(answer))->click();
+        }
+    });
+    responder.start();
+    if (!check(!window.runAutomationText(segmented, directory, &error)
+               && promptSeen && promptCorrect
+               && readFile(first) == "original0" && readFile(second) == "original1",
+               "cancelling exact-target approval leaves numbered originals intact")) return false;
+    answer = QMessageBox::Yes;
+    changeDuringApproval = true;
+    if (!check(!window.runAutomationText(segmented, directory, &error)
+               && error.contains("changed") && readFile(first) == "original0"
+               && readFile(second) == "changed during approval",
+               "a destination modified inside the approval dialog is not replaced")) return false;
+    changeDuringApproval = false;
+    if (!check(window.runAutomationText(segmented, directory, &error),
+               "explicit approval installs the rendered segment family")) {
+        std::cerr << error.toStdString() << '\n';
+        return false;
+    }
+    responder.stop();
+    VDQtVideoDecoder verify;
+    for (const QString& segment : {first, second}) {
+        if (!verify.openFile(segment) || !verify.scanVideoStream().errorMessage.isEmpty()
+            || !check(verify.getFrameCount() == 2, "approved AVI segments contain the requested frames")) return false;
+        verify.close();
+    }
+
+    window.setAutomationUnattended(true);
+    const QString image = fixtures.directory.filePath("script_00.png");
+    fixtures.writeText(image, "original image");
+    if (!check(!window.runAutomationText(
+            "VirtualDub.SaveImageSequence(\"script_\",\".png\",2,3);", directory, &error)
+            && error.contains("not approved") && readFile(image) == "original image"
+            && !QFileInfo::exists(fixtures.directory.filePath("script_01.png")),
+            "unattended image scripts require numbered-file replacement approval")) return false;
+
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!queue) return false;
+    VDQtJobState job;
+    job.operation = VDQtJobOperation::ImageSequenceExport;
+    job.sourcePaths = {fixtures.mp4};
+    job.audioDisabled = true;
+    job.options.outputPath = fixtures.directory.filePath("queued.png");
+    job.options.endFrame = 3;
+    job.imageMinimumDigits = 2;
+    const QString queuedFirst = fixtures.directory.filePath("queued_00.png");
+    const QString queuedLast = fixtures.directory.filePath("queued_03.png");
+    fixtures.writeText(queuedFirst, "queued original");
+    if (!queue->replaceJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    if (!check(queue->jobAt(0)->status == VDQtJobStatus::Failed
+               && readFile(queuedFirst) == "queued original",
+               "image jobs reject collisions without queue replacement approval")) return false;
+    job.replaceExisting = true;
+    if (!queue->replaceJobs({job}, &error)) return false;
+    bool appeared = false;
+    const auto connection = QObject::connect(queue, &VDQtJobQueue::jobChanged, &window, [&](int row) {
+        const auto *running = queue->jobAt(row);
+        if (!appeared && running && running->status == VDQtJobStatus::Running && running->progress >= 0.5) {
+            appeared = true;
+            fixtures.writeText(queuedLast, "foreign image");
+        }
+    });
+    invoke(window, "runPendingJobs");
+    QObject::disconnect(connection);
+    if (!check(appeared && queue->jobAt(0)->status == VDQtJobStatus::Failed
+               && readFile(queuedFirst) == "queued original" && readFile(queuedLast) == "foreign image",
+               "queue approval does not permit overwriting files that appear during rendering")) return false;
+    if (!queue->replaceJobs({job}, &error)) return false;
+    invoke(window, "runPendingJobs");
+    return check(queue->jobAt(0)->status == VDQtJobStatus::Complete
+                 && !QImage(queuedFirst).isNull() && !QImage(queuedLast).isNull(),
+                 "approved image jobs still install a complete sequence");
+}
 } // namespace
 
 bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
@@ -290,5 +402,6 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);
+    if (scenario == "outputs") return outputFamilies(fixtures);
     return check(false, "unknown operation regression");
 }

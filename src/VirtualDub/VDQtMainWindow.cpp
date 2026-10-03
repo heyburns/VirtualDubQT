@@ -4,6 +4,7 @@
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
 #include "VDQtSourceSafety.h"
+#include "VDQtOutputTransaction.h"
 #include "VDQtBatchWizard.h"
 #include "VDQtJobControl.h"
 #include "VDQtPluginHost.h"
@@ -116,6 +117,32 @@ bool replaceWithStagedFile(const QString& stagedPath, const QString& outputPath)
     const QByteArray stagedName = QFile::encodeName(stagedPath);
     const QByteArray outputName = QFile::encodeName(outputPath);
     return std::rename(stagedName.constData(), outputName.constData()) == 0;
+}
+
+// A save dialog approves its selected base name, not the numbered files a
+// sequence actually writes. Approval is tied to the transaction's inspected
+// destinations, and unattended scripts cannot implicitly authorize replacement.
+bool approveOutputReplacement(QWidget *parent, const QString& title,
+                              const VDQtOutputTransaction& transaction,
+                              bool unattended, QString *errorMessage) {
+    const QStringList collisions = transaction.existingTargets();
+    if (collisions.isEmpty()) return true;
+    if (unattended) {
+        if (errorMessage) *errorMessage = QString(
+            "Generated output files already exist and replacement was not approved:\n%1")
+                .arg(collisions.join(QLatin1Char('\n')));
+        return false;
+    }
+    QMessageBox prompt(QMessageBox::Warning, title,
+        QString("%1 generated output file(s) already exist. Replace these files?\n\n"
+                "Use Show Details to see the exact filenames.").arg(collisions.size()),
+        QMessageBox::Yes | QMessageBox::Cancel, parent);
+    prompt.setDetailedText(collisions.join(QLatin1Char('\n')));
+    prompt.setDefaultButton(QMessageBox::Cancel);
+    if (prompt.exec() == QMessageBox::Yes) return true;
+    if (errorMessage) *errorMessage = QStringLiteral(
+        "Replacement was cancelled. No output files were changed.");
+    return false;
 }
 
 void clearLegacyPersistentProcessingSettings()
@@ -4005,38 +4032,19 @@ bool VDQtMainWindow::executeAutomationProgram(
                     stagedPaths.append(staged);
                 }
             }
-            const QString backupDirectory = staging.filePath(QStringLiteral("backups"));
-            if (!QDir().mkpath(backupDirectory))
-                return fail(command, QStringLiteral("Image backups could not be prepared."));
-            QVector<QPair<QString, QString>> backups;
-            QStringList committed;
-            const auto rollback = [&]() {
-                for (auto it = committed.crbegin(); it != committed.crend(); ++it)
-                    QFile::remove(*it);
-                for (auto it = backups.crbegin(); it != backups.crend(); ++it)
-                    QFile::rename(it->second, it->first);
-            };
-            for (int index = 0; index < targets.size(); ++index) {
-                const QFileInfo existing(targets.at(index));
-                if (!existing.exists() && !existing.isSymLink()) continue;
-                const QString backup = QDir(backupDirectory).filePath(
-                    QString::number(index));
-                if (!QFile::rename(targets.at(index), backup)) {
-                    rollback();
-                    return fail(command, QString("Existing image could not be backed up: %1")
-                        .arg(targets.at(index)));
-                }
-                backups.append({targets.at(index), backup});
+            VDQtOutputTransaction transaction(staging, targets);
+            QString commitError;
+            if (!transaction.inspect(&commitError)
+                || !approveOutputReplacement(this, QStringLiteral("Replace Image Sequence?"),
+                                             transaction, mAutomationUnattended, &commitError))
+                return fail(command, commitError);
+            for (const QString& target : targets) {
+                if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
+                                        mTimelineSources).isSafe())
+                    return fail(command, QString("An image output became unsafe: %1").arg(target));
             }
-            for (int index = 0; index < targets.size(); ++index) {
-                QDir().mkpath(QFileInfo(targets.at(index)).absolutePath());
-                if (!QFile::rename(stagedPaths.at(index), targets.at(index))) {
-                    rollback();
-                    return fail(command, QString("The completed image sequence could not be committed at %1")
-                        .arg(targets.at(index)));
-                }
-                committed.append(targets.at(index));
-            }
+            if (!transaction.commit(stagedPaths, true, &commitError))
+                return fail(command, commitError);
         } else if (name == QStringLiteral("SaveSegmentedAVI")) {
             if (!requireArguments(command, 3, 5))
                 return fail(command, QStringLiteral(
@@ -4790,7 +4798,6 @@ bool VDQtMainWindow::executeImageSequenceJob(
     }
     allSources.removeDuplicates();
     QStringList targets;
-    QSet<QString> existingTargets;
     targets.reserve(outputCount);
     for (int index = 0; index < outputCount; ++index) {
         const QString target = QDir(directory).filePath(
@@ -4812,8 +4819,6 @@ bool VDQtMainWindow::executeImageSequenceJob(
                 .arg(target);
             return false;
         }
-        if (targetInfo.exists() || targetInfo.isSymLink())
-            existingTargets.insert(target);
         targets.append(target);
     }
 
@@ -4824,6 +4829,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
             "A staging directory could not be created beside the destination.");
         return false;
     }
+    VDQtOutputTransaction transaction(staging, targets);
+    if (!transaction.inspect(errorMessage)) return false;
     QStringList staged;
     staged.reserve(outputCount);
     int rendered = 0;
@@ -4869,12 +4876,6 @@ bool VDQtMainWindow::executeImageSequenceJob(
         }
     }
 
-    const QString backupDirectory = staging.filePath(QStringLiteral("backups"));
-    if (!QDir().mkpath(backupDirectory)) {
-        if (errorMessage) *errorMessage = QStringLiteral(
-            "Transactional image backups could not be prepared.");
-        return false;
-    }
     // Revalidate after the potentially long render. A path that appeared in
     // the meantime was never part of the user's replacement approval.
     for (const QString& target : targets) {
@@ -4883,50 +4884,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
                 "A generated image destination became unsafe while rendering; no files were changed.");
             return false;
         }
-        const QFileInfo targetInfo(target);
-        if ((targetInfo.exists() || targetInfo.isSymLink())
-            && !existingTargets.contains(target)) {
-            if (errorMessage) *errorMessage = QString(
-                "A new image destination appeared while rendering; no files were changed:\n%1")
-                .arg(target);
-            return false;
-        }
     }
-    QVector<QPair<QString, QString>> backups;
-    QStringList committed;
-    const auto rollback = [&]() {
-        bool restored = true;
-        for (auto it = committed.crbegin(); it != committed.crend(); ++it)
-            restored = QFile::remove(*it) && restored;
-        for (auto it = backups.crbegin(); it != backups.crend(); ++it)
-            restored = QFile::rename(it->second, it->first) && restored;
-        return restored;
-    };
-    for (int index = 0; index < targets.size(); ++index) {
-        const QFileInfo existing(targets.at(index));
-        if (!existing.exists() && !existing.isSymLink()) continue;
-        const QString backup =
-            QDir(backupDirectory).filePath(QString::number(index));
-        QFile::setPermissions(staged.at(index), existing.permissions());
-        if (!QFile::rename(targets.at(index), backup)) {
-            rollback();
-            if (errorMessage) *errorMessage = QStringLiteral(
-                "An existing image could not be backed up; no new sequence was committed.");
-            return false;
-        }
-        backups.append(qMakePair(targets.at(index), backup));
-    }
-    for (int index = 0; index < targets.size(); ++index) {
-        if (!QFile::rename(staged.at(index), targets.at(index))) {
-            const bool restored = rollback();
-            if (errorMessage) *errorMessage = restored
-                ? QStringLiteral("The completed image sequence could not be committed; previous files were restored.")
-                : QStringLiteral("The image commit failed and automatic rollback was incomplete.");
-            return false;
-        }
-        committed.append(targets.at(index));
-    }
-    return true;
+    return transaction.commit(staged, job.replaceExisting, errorMessage);
 }
 
 void VDQtMainWindow::reloadQueuedJob(int row) {
@@ -5554,46 +5513,23 @@ bool VDQtMainWindow::exportSegmentedVideo(
         targets.append(target);
     }
 
-    const QString backupDirectory = staging.filePath(QStringLiteral("backups"));
-    if (!QDir().mkpath(backupDirectory)) {
-        if (errorMessage) *errorMessage = QStringLiteral(
-            "Existing segment files could not be backed up.");
+    VDQtOutputTransaction transaction(staging, targets);
+    if (!transaction.inspect(errorMessage)
+        || !approveOutputReplacement(this, QStringLiteral("Replace AVI Segments?"),
+                                     transaction, mAutomationUnattended, errorMessage))
         return false;
-    }
-    QVector<QPair<QString, QString>> backups;
-    QStringList committed;
-    const auto rollback = [&]() {
-        for (auto it = committed.crbegin(); it != committed.crend(); ++it)
-            QFile::remove(*it);
-        for (auto it = backups.crbegin(); it != backups.crend(); ++it)
-            QFile::rename(it->second, it->first);
-    };
-    for (int index = 0; index < targets.size(); ++index) {
-        if (!QFileInfo::exists(targets.at(index))
-            && !QFileInfo(targets.at(index)).isSymLink()) continue;
-        const QString backup = QDir(backupDirectory).filePath(
-            QString::number(index));
-        if (!QFile::rename(targets.at(index), backup)) {
-            rollback();
+    // Approval can run a dialog event loop. Recheck source protection afterward;
+    // commit independently verifies that the inspected destination identities
+    // and containing directories have not changed.
+    for (const QString& target : targets) {
+        if (!loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
+                                mTimelineSources).isSafe()) {
             if (errorMessage) *errorMessage = QString(
-                "The existing segment could not be backed up: %1")
-                    .arg(targets.at(index));
+                "A segment destination became unsafe; no files were changed: %1").arg(target);
             return false;
         }
-        backups.append({targets.at(index), backup});
     }
-    for (int index = 0; index < targets.size(); ++index) {
-        if (!QFile::rename(stagedPaths.at(index), targets.at(index))) {
-            rollback();
-            if (errorMessage) *errorMessage = QString(
-                "The completed segment could not be committed: %1")
-                    .arg(targets.at(index));
-            return false;
-        }
-        committed.append(targets.at(index));
-    }
-    if (errorMessage) errorMessage->clear();
-    return true;
+    return transaction.commit(stagedPaths, true, errorMessage);
 }
 
 void VDQtMainWindow::onFileExportRawVideo() {
@@ -6413,7 +6349,6 @@ void VDQtMainWindow::onFileSaveImageSequence() {
     const int framesToExport = sourceFramesToExport * filterTiming.outputFramesPerInput;
     QStringList targetPaths;
     targetPaths.reserve(framesToExport);
-    QStringList existingTargets;
     for (int f = startFrame; f <= endFrame; ++f) {
         for (int phase = 0; phase < filterTiming.outputFramesPerInput; ++phase) {
             const qint64 outputNumber = static_cast<qint64>(f)
@@ -6431,7 +6366,6 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                                       QString("Generated image path aliases a loaded source:\n%1").arg(targetPath));
                 return;
             }
-            const QFileInfo targetInfo(targetPath);
             if (imageSafety.issue
                 == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
                 QMessageBox::critical(
@@ -6440,26 +6374,22 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                             "Choose a new image-sequence base name.").arg(targetPath));
                 return;
             }
-            if (targetInfo.exists() || targetInfo.isSymLink())
-                existingTargets.append(targetPath);
             targetPaths.append(targetPath);
         }
-    }
-
-    if (!existingTargets.isEmpty()) {
-        const auto answer = QMessageBox::warning(
-            this, "Replace Existing Image Sequence?",
-            QString("%1 generated image file(s) already exist. They will be replaced only after "
-                    "the complete sequence has rendered successfully. Continue?")
-                .arg(existingTargets.size()),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (answer != QMessageBox::Yes) return;
     }
 
     QTemporaryDir stagingDirectory(QDir(dir).filePath(QStringLiteral(".virtualdub-images-XXXXXX")));
     if (!stagingDirectory.isValid()) {
         QMessageBox::critical(this, "Image Export Error",
                               "A staging directory could not be created beside the destination sequence.");
+        return;
+    }
+    VDQtOutputTransaction transaction(stagingDirectory, targetPaths);
+    QString commitError;
+    if (!transaction.inspect(&commitError)
+        || !approveOutputReplacement(this, QStringLiteral("Replace Existing Image Sequence?"),
+                                     transaction, false, &commitError)) {
+        QMessageBox::warning(this, "Image Export", commitError);
         return;
     }
 
@@ -6550,14 +6480,6 @@ void VDQtMainWindow::onFileSaveImageSequence() {
                                   "A generated image path became an alias of a loaded source. Existing files were not changed.");
             return;
         }
-        const QFileInfo targetInfo(targetPath);
-        if ((targetInfo.exists() || targetInfo.isSymLink())
-            && !existingTargets.contains(targetPath)) {
-            QMessageBox::critical(this, "Image Export Collision",
-                                  QString("A destination appeared while the sequence was rendering:\n%1\n"
-                                          "Existing files were not changed.").arg(targetPath));
-            return;
-        }
         if (imageSafety.issue
             == VDQtOutputSafetyIssue::ExistingDestinationWithIncompleteScriptAudit) {
             QMessageBox::critical(
@@ -6568,52 +6490,9 @@ void VDQtMainWindow::onFileSaveImageSequence() {
         }
     }
 
-    const QString backupDirectory = stagingDirectory.filePath(QStringLiteral("backups"));
-    if (!QDir().mkpath(backupDirectory)) {
-        QMessageBox::critical(this, "Image Export Error",
-                              "Could not prepare transactional backups. Existing files were not changed.");
+    if (!transaction.commit(stagedPaths, true, &commitError)) {
+        QMessageBox::critical(this, "Image Export Error", commitError);
         return;
-    }
-
-    QVector<QPair<QString, QString>> backups;
-    QStringList committedTargets;
-    auto rollbackCommit = [&]() {
-        bool restored = true;
-        for (auto it = committedTargets.crbegin(); it != committedTargets.crend(); ++it)
-            restored = QFile::remove(*it) && restored;
-        for (auto it = backups.crbegin(); it != backups.crend(); ++it)
-            restored = QFile::rename(it->second, it->first) && restored;
-        return restored;
-    };
-
-    for (int i = 0; i < targetPaths.size(); ++i) {
-        const QString& targetPath = targetPaths.at(i);
-        const QFileInfo targetInfo(targetPath);
-        if (!targetInfo.exists() && !targetInfo.isSymLink()) continue;
-
-        QFile::setPermissions(stagedPaths.at(i), targetInfo.permissions());
-        const QString backupPath = QDir(backupDirectory).filePath(QString::number(i));
-        if (!QFile::rename(targetPath, backupPath)) {
-            const bool restored = rollbackCommit();
-            QMessageBox::critical(this, "Image Export Error",
-                                  restored
-                                      ? "Could not back up an existing image. No sequence files were changed."
-                                      : "Could not back up an existing image, and automatic rollback was incomplete.");
-            return;
-        }
-        backups.append(qMakePair(targetPath, backupPath));
-    }
-
-    for (int i = 0; i < targetPaths.size(); ++i) {
-        if (!QFile::rename(stagedPaths.at(i), targetPaths.at(i))) {
-            const bool restored = rollbackCommit();
-            QMessageBox::critical(this, "Image Export Error",
-                                  restored
-                                      ? "Could not commit the completed sequence. Previous files were restored."
-                                      : "Could not commit the completed sequence, and automatic rollback was incomplete.");
-            return;
-        }
-        committedTargets.append(targetPaths.at(i));
     }
 
     VDLogWindow::instance(this)->appendLog(QString("[Export] Image sequence successfully exported: %1 frames to %2").arg(exportedCount).arg(dir));
@@ -9061,6 +8940,7 @@ void VDQtMainWindow::onCaptureVideo() {
                 ? !capturedSegments.isEmpty()
                 : QFileInfo(stagedPath).size() > 0);
     bool committed = false;
+    QString commitError;
     if (captured && !splitCapture->isChecked()) {
         committed = replaceWithStagedFile(stagedPath, outputPath);
     } else if (captured) {
@@ -9079,57 +8959,35 @@ void VDQtMainWindow::onCaptureVideo() {
                 && !loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
                                        mTimelineSources).isSafe()) {
                 safe = false;
+                commitError = QString("A capture segment destination is unsafe: %1").arg(target);
                 break;
             }
             targets.append(target);
         }
-        QStringList collisions;
+        VDQtOutputTransaction transaction(segmentStaging, targets);
+        if (safe) safe = transaction.inspect(&commitError)
+            && approveOutputReplacement(this, QStringLiteral("Replace Capture Segments?"),
+                                        transaction, false, &commitError);
+        QStringList stagedSegments;
+        for (const QString& segment : capturedSegments)
+            stagedSegments.append(segmentStaging.filePath(segment));
         for (const QString& target : targets) {
-            if (QFileInfo::exists(target) || QFileInfo(target).isSymLink())
-                collisions.append(target);
+            if (safe && mVideoDecoder.isOpen()
+                && !loadedOutputSafety(target, mVideoDecoder, mAudioPlayer,
+                                       mTimelineSources).isSafe()) {
+                safe = false;
+                commitError = QString("A capture segment destination became unsafe: %1").arg(target);
+            }
         }
-        if (safe && !collisions.isEmpty()) {
-            safe = QMessageBox::warning(
-                this, QStringLiteral("Replace Capture Segments?"),
-                QString("%1 segment file(s) already exist. Replace them only after capture succeeds?")
-                    .arg(collisions.size()),
-                QMessageBox::Yes | QMessageBox::Cancel,
-                QMessageBox::Cancel) == QMessageBox::Yes;
-        }
-        const QString backupDirectory = segmentStaging.filePath(
-            QStringLiteral("backups"));
-        QVector<QPair<QString, QString>> backups;
-        QStringList installed;
-        if (safe) safe = QDir().mkpath(backupDirectory);
-        const auto rollback = [&]() {
-            for (auto it = installed.crbegin(); it != installed.crend(); ++it)
-                QFile::remove(*it);
-            for (auto it = backups.crbegin(); it != backups.crend(); ++it)
-                QFile::rename(it->second, it->first);
-        };
-        for (int index = 0; safe && index < targets.size(); ++index) {
-            if (!QFileInfo::exists(targets.at(index))
-                && !QFileInfo(targets.at(index)).isSymLink()) continue;
-            const QString backup = QDir(backupDirectory).filePath(
-                QString::number(index));
-            safe = QFile::rename(targets.at(index), backup);
-            if (safe) backups.append({targets.at(index), backup});
-        }
-        for (int index = 0; safe && index < targets.size(); ++index) {
-            const QString sourceSegment = QDir(segmentStaging.path()).filePath(
-                capturedSegments.at(index));
-            safe = QFile::rename(sourceSegment, targets.at(index));
-            if (safe) installed.append(targets.at(index));
-        }
-        if (!safe) rollback();
+        if (safe) safe = transaction.commit(stagedSegments, true, &commitError);
         committed = safe;
     }
     if (!captured || !committed) {
         if (!stagedPath.isEmpty()) QFile::remove(stagedPath);
         QMessageBox::critical(
             this, "Capture Error",
-            QString("Capture failed.\n\n%1")
-                .arg(QString::fromLocal8Bit(diagnosticTail.right(8192))));
+            QString("Capture failed.\n\n%1\n\n%2")
+                .arg(commitError, QString::fromLocal8Bit(diagnosticTail.right(8192))));
         return;
     }
     statusBar()->showMessage(

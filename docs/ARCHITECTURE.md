@@ -192,6 +192,25 @@ rendering, and atomically rename only on success. Preserve that ordering: source
 files must survive cancellation, encoder failure, script ambiguity, and path
 changes during a long render.
 
+Numbered AVI exports, interactive/script/queued image sequences, and split
+captures share `VDQtOutputTransaction`. Inspect the **actual generated paths**
+before approval, then retain that transaction through rendering/commit; do not
+re-inspect after approval and thereby authorize a newly arrived file. Unattended
+scripts reject collisions; image jobs use their explicit replacement option.
+The transaction checks destination and parent-directory identities, preserves
+ordinary permissions, and uses Linux no-overwrite atomic moves without a
+cross-filesystem copy fallback.
+
+For a multi-file commit, originals move into the staging directory's `backups/`
+and a `recovery.txt` maps backup paths to their original destinations. A failed
+commit restores originals without overwriting intervening files. Rollback moves
+new outputs into private quarantine before removing them, so a changed public
+destination is not blindly deleted. If removal/restoration fails, staging
+auto-removal stays disabled and the returned error lists exact recovery paths.
+Never replace that error with a generic failure message, or re-enable cleanup
+from a caller. Individual moves are atomic; a whole multi-file export is not a
+single atomic filesystem operation or a power-loss recovery guarantee.
+
 ## Persistent and session state
 
 `VDQtProcessingState` contains codec, filter, and processing choices.

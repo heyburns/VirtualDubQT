@@ -67,6 +67,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtVideoExporter.cpp
     src/VirtualDub/VDQtSourceSafety.h
     src/VirtualDub/VDQtSourceSafety.cpp
+    src/VirtualDub/VDQtOutputTransaction.h
+    src/VirtualDub/VDQtOutputTransaction.cpp
     src/VirtualDub/VDQtTimeline.h
     src/VirtualDub/VDQtTimeline.cpp
     src/VirtualDub/VDQtProjectFile.h
@@ -200,6 +202,16 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    add_executable(output_transaction_tests
+        tests/test_output_transaction.cpp
+        src/VirtualDub/VDQtOutputTransaction.cpp
+        src/VirtualDub/VDQtOutputTransaction.h)
+    target_include_directories(output_transaction_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(output_transaction_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(output_transaction_tests)
+    add_test(NAME output_transaction_tests COMMAND output_transaction_tests)
+    set_tests_properties(output_transaction_tests PROPERTIES LABELS "filesystem;recovery" TIMEOUT 30)
+
     # Exercise the real controller, including its asynchronous preview worker.
     # Smaller decoder-only suites cannot cover main-window integration failures.
     add_executable(application_baseline_tests
@@ -224,7 +236,7 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio queue)
+    foreach(operation_case IN ITEMS source snapshot audio queue outputs)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
