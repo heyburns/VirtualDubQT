@@ -329,3 +329,19 @@ Multi-instance ownership and fully transactional project restoration remain open
 Validation: Release recovery/empty/source/log/CLI checks passed (5/5); equivalent
 sanitizer controller checks passed (4/4). Regular build/VirtualDubQt rebuilt and
 passed generated-processing.vcf under isolated configuration/data directories.
+
+Edit-to-preview invalidation (S07)
+---------------------------------
+
+operation_edit_preview compares real GUI input pixels against decoded source
+frames after crop, undo, redo, reset, delete and paste at an unchanged frame-zero
+playhead. It also undoes a crop before its decode returns and drains queued
+results to ensure an obsolete generation cannot repaint the restored timeline.
+Before repair, crop remained on the original source image and the check failed.
+Every timeline refresh now stops playback, invalidates pending work and cached
+phases, blocks redundant control emissions, and explicitly requests the new frame.
+
+Validation: focused Release timeline/controller/CLI checks passed (6/6), sanitizer
+timeline/controller checks passed (5/5), and the rebuilt regular application
+passed generated-processing.vcf with isolated settings. Empty timeline refusal,
+unknown/underestimated playback and recovery preservation remain covered.

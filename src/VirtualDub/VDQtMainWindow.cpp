@@ -6650,6 +6650,21 @@ int VDQtMainWindow::sourceFrameForTimelineFrame(qint64 timelineFrame) const {
 
 void VDQtMainWindow::updateTimelineView(qint64 preferredPosition,
                                         bool clearSelection) {
+    // An edit changes the source mapping even when the output playhead remains
+    // at zero. Invalidate old requests before altering the controls and submit
+    // exactly one request for the new mapping, rather than relying on a signal
+    // that SetPosition deliberately omits for an unchanged number.
+    if (mPlaybackTimer->isActive()) {
+        mPlaybackTimer->stop();
+        mAudioPlayer.pause();
+    }
+    mPlaybackPausedFrame = -1;
+    if (mFrameDecodeWorker) mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);
+    mFrameRequestPending = false;
+    mQueuedPlaybackFrame = -1;
+    mDecodedPreviewFrames.clear();
+    mDecodedPreviewTimelineFrame = -1;
+    const QSignalBlocker blocked(mPositionControl);
     const qint64 count = mTimeline.frameCount();
     const qint64 last = std::max<qint64>(0, count - 1);
     mTimelineMarkers.erase(
@@ -6666,18 +6681,14 @@ void VDQtMainWindow::updateTimelineView(qint64 preferredPosition,
         ? std::clamp(preferredPosition, qint64(0), last) : 0;
     mPositionControl->SetPosition(position);
     if (mTimeline.isEmpty()) {
-        // An outstanding decode belongs to the old edit mapping. It must not
-        // repaint source frames after delete-all or an empty project restore.
-        if (mFrameDecodeWorker) mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);
-        mFrameRequestPending = false;
-        mQueuedPlaybackFrame = -1;
-        mDecodedPreviewFrames.clear();
-        mDecodedPreviewTimelineFrame = -1;
         mPositionControl->SetSelection(0, 0);
         mPositionControl->ClearZoomRange();
         mInputDisplay->clearDisplay();
         mOutputDisplay->clearDisplay();
         statusBar()->showMessage(QStringLiteral("The edited timeline is empty"));
+    } else {
+        seekAudioToVideoFrame(static_cast<int>(position));
+        updateFrameDisplay(static_cast<int>(position));
     }
     updateEditActions();
 }

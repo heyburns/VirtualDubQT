@@ -187,6 +187,50 @@ bool recoveryRetention(VDQtTestFixtures& fixtures) {
     return true;
 }
 
+bool editPreview(VDQtTestFixtures& fixtures) {
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(fixtures.mp4)) return false;
+    QMap<int, QImage> expected;
+    for (int frame : {0, 8, 16})
+        expected.insert(frame, reference.getFrameImage(frame).convertToFormat(QImage::Format_RGBA8888));
+    if (!check(expected[0] != expected[16] && !expected[8].isNull(),
+               "edit fixture has distinguishable source frames")) return false;
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4)) return false;
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (panes.size() != 2 || !position) return false;
+    auto displays = [&](int frame) {
+        return panes.first()->frameImage().convertToFormat(QImage::Format_RGBA8888) == expected[frame];
+    };
+    auto refreshed = [&](int frame, const char *message) {
+        return check(waitFor([&] { return displays(frame); }) && position->GetPosition() == 0, message);
+    };
+    if (!refreshed(0, "frame-zero preview is ready")) return false;
+    position->SetSelection(16, 24);
+    if (!invoke(window, "onEditCropToSelection")
+        || !refreshed(16, "crop refreshes changed source mapping without moving frame-zero playhead")
+        || !invoke(window, "onEditUndo") || !refreshed(0, "undo refreshes the same numeric position")
+        || !invoke(window, "onEditRedo") || !refreshed(16, "redo refreshes the same numeric position")
+        || !invoke(window, "onEditResetTimeline") || !refreshed(0, "reset refreshes source identity")) return false;
+    position->SetSelection(0, 8);
+    if (!invoke(window, "onEditDelete") || !refreshed(8, "delete refreshes the held playhead")) return false;
+    position->SetSelection(8, 16); // These are source frames 16..23 after deletion.
+    if (!invoke(window, "onEditCopy")) return false;
+    position->SetSelection(0, 0);
+    if (!invoke(window, "onEditPaste") || !refreshed(16, "paste refreshes frame zero")) return false;
+    if (!invoke(window, "onEditResetTimeline")) return false;
+    position->SetSelection(16, 24);
+    // Undo before the requested cropped frame returns. Old-generation results
+    // must not repaint once the restored identity result has been delivered.
+    if (!invoke(window, "onEditCropToSelection") || !invoke(window, "onEditUndo")) return false;
+    QElapsedTimer settle; settle.start();
+    return check(waitFor([&] { return settle.elapsed() >= 150; }) && displays(0),
+                 "a stale in-flight crop decode cannot repaint after undo");
+}
+
 bool sourceLifetime(VDQtTestFixtures& fixtures) {
     const QString audioAvs = fixtures.directory.filePath("source-audio.avs");
     QByteArray script = readFile(fixtures.avs);
@@ -818,6 +862,7 @@ bool sourceProtection(VDQtTestFixtures& fixtures) {
 bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
     if (scenario == "log_lifetime") return logLifetime();
     if (scenario == "recovery") return recoveryRetention(fixtures);
+    if (scenario == "edit_preview") return editPreview(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);

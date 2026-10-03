@@ -21,7 +21,7 @@ Remaining execution sequence
 ----------------------------
 [x] N01: parent-owned log singleton must not retain a deleted dialog.
 [x] H11: retain failed recovery files through loading, Close, timers and app exit.
-[ ] S07: refresh and invalidate preview after every edit, even at the same position.
+[x] S07: refresh and invalidate preview after every edit, even at the same position.
 [ ] S05/S09: prevalidate project references; preserve and roll back complete Append
     state, audio choices, markers, zoom, selection, edits and source intent.
 [ ] H03: sparse EOF must not promote an incomplete prefix to exact source length.
