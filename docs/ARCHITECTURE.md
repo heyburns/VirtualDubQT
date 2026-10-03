@@ -10,6 +10,12 @@ the `VDQt*` source files.
 Those maintained native modules live in `src/VirtualDub/VDQt*` plus
 `src/main.cpp`.
 
+`vdqt_core` is a build-only static library containing those native modules. The
+application and offscreen controller tests link the same compiled implementation,
+with the same definitions and dependencies. It is not a new installed shared
+library. Isolated audio-testing and other test-specific compilation variants
+remain separate targets, so testing hooks cannot enter the production binary.
+
 The repository also retains substantial original VirtualDub/VirtualDub2 source
 under directories such as `src/VirtualDub/source`, `src/Kasumi`, and `src/system`.
 That code is useful as a behavior and ABI reference, but it is not silently

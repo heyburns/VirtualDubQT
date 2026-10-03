@@ -397,3 +397,17 @@ Validation, 2026-10-03:
     exported BGRA raw video through the command-line controller. The output was
     exactly 98,304 bytes (8 * 64 * 48 * 4), despite the source's 9-frame estimate.
   - The standalone codec troubleshooting suite was not included.
+
+Shared application/controller compilation (C06)
+----------------------------------------------
+
+The production executable and application_baseline_tests now link one build-only
+vdqt_core static library. Compile records contain one VDQtMainWindow.cpp command
+per configuration, with unchanged version/QT_NO_KEYWORDS definitions and diagnostic
+flags. Audio-testing and other isolated variants remain separate; the core archive
+is not installed and creates no new shared-library runtime requirement.
+
+Validation: full Release 33/33 and sanitizer 29/29 passed before adding the next
+sparse-EOF regression. The rebuilt regular binary passed the VCF smoke and opened
+the generated FFV1 fixture to export exactly 98,304 raw BGRA bytes. Source-level
+behavior is unchanged by this checkpoint; build-time duplication is reduced.

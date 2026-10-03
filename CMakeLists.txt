@@ -93,18 +93,21 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtMainWindow.cpp
 )
 
-add_executable(VirtualDubQt
-    src/main.cpp
-    ${VIRTUALDUB_QT_SOURCES}
-)
-target_compile_definitions(VirtualDubQt PRIVATE
+# The GUI and its real-controller regressions use exactly the same native
+# implementation and compile definitions. Compile that implementation once per
+# configuration, not once per executable. A static library introduces no new
+# installed runtime dependency. Isolated testing variants below stay separate.
+add_library(vdqt_core STATIC ${VIRTUALDUB_QT_SOURCES})
+target_compile_definitions(vdqt_core PUBLIC
     QT_NO_KEYWORDS
     VDQT_VERSION_STRING="${PROJECT_VERSION}"
 )
-target_include_directories(VirtualDubQt PRIVATE
+target_include_directories(vdqt_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${AVISYNTH_INCLUDE_DIR}
 )
+add_executable(VirtualDubQt src/main.cpp)
+target_link_libraries(VirtualDubQt PRIVATE vdqt_core)
 
 option(ENABLE_SANITIZERS "Build VirtualDubQt with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
@@ -125,9 +128,10 @@ function(vdqt_enable_diagnostics target_name)
     endif()
 endfunction()
 
+vdqt_enable_diagnostics(vdqt_core)
 vdqt_enable_diagnostics(VirtualDubQt)
 
-target_link_libraries(VirtualDubQt PRIVATE
+target_link_libraries(vdqt_core PUBLIC
     Qt6::Widgets
     Qt6::Core
     Qt6::Gui
@@ -244,15 +248,8 @@ if (BUILD_TESTING)
         tests/VDQtOperationRegressions.cpp
         tests/support/VDQtTestFixtures.h
         tests/support/VDQtTestFixtures.cpp
-        ${VIRTUALDUB_QT_SOURCES}
     )
-    target_compile_definitions(application_baseline_tests PRIVATE
-        QT_NO_KEYWORDS VDQT_VERSION_STRING="${PROJECT_VERSION}")
-    target_include_directories(application_baseline_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src ${AVISYNTH_INCLUDE_DIR})
-    target_link_libraries(application_baseline_tests PRIVATE
-        Qt6::Widgets Qt6::Multimedia Qt6::DBus Qt6::Concurrent
-        ${AVISYNTH_LIBRARY} PkgConfig::FFMPEG)
+    target_link_libraries(application_baseline_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(application_baseline_tests)
     set_target_properties(application_baseline_tests PROPERTIES
         BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")

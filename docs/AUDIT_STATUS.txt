@@ -54,7 +54,8 @@ Remaining execution sequence
 [ ] Progressive MP4/AVS -> ProRes slowdown: representative repeated-cycle profiling;
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
 [ ] M19/C07: correct existing resampling/temporal/warp choices and geometry predictions.
-[ ] C02/C03/C04/C06/C07: confirmed unused state, menu ownership, duplication, diagnostics
+[x] C06: share identical application/controller-test compilation in a static core.
+[ ] C02/C03/C04/C07: confirmed unused state, menu ownership, duplication, diagnostics
     and overflow-safe progress. Common multi-output transactions are already extracted.
 [ ] Q01/Q02/Q03: command-tool packaging, CMake/Release documentation, PR CI and clean
     package decode/export smoke checks. Local regression infrastructure already exists.
