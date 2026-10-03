@@ -1,0 +1,62 @@
+Audit remediation checklist
+===========================
+
+Updated from the 2026-10-02 audit and implementation plan. Each checked item
+requires focused regressions, a rebuilt-application smoke check, and a local
+commit. An unchecked item is not resolved merely because the existing suite
+passes. The separate codec troubleshooting suite is excluded. Hardware tests
+and the user's unreproduced progressive ProRes slowdown require separate evidence.
+
+Already completed before this checklist
+---------------------------------------
+[x] Release/sanitizer presets, isolated fixtures and application baselines.
+[x] H01: parallel filter image detachment and allocation-failure handling.
+[x] H06/H07: guarded source transitions and private running-job pipelines.
+[x] H08/H09: numbered-output approval and recoverable replacement transactions.
+[x] S02/S12: recursive source protection and operation-scoped dependency audits.
+[x] S01/S03/M02/M03: provisional identity, explicit empty edits, persistent intent,
+    and metadata-safe timeline undo/redo. New-format untouched estimates reopen.
+
+Remaining execution sequence
+----------------------------
+[x] N01: parent-owned log singleton must not retain a deleted dialog.
+[ ] H11: retain failed recovery files through loading, Close, timers and app exit.
+[ ] S07: refresh and invalidate preview after every edit, even at the same position.
+[ ] S05/S09: prevalidate project references; preserve and roll back complete Append
+    state, audio choices, markers, zoom, selection, edits and source intent.
+[ ] H03: sparse EOF must not promote an incomplete prefix to exact source length.
+[ ] H04/H05/P01/P02/M16: exact cancellable seeks, efficient and reusable indexes,
+    variable-rate frame identity and shared keyframe/navigation knowledge.
+[ ] S04: preserve all imported sequence images at the requested rational frame rate.
+[ ] H02/M01/M10: incoming field history, normalized layouts and meaningful high depth.
+[ ] H10/M25: explicit filter failures, missing assets/plugins and invalid preview.
+[ ] S06/M06: consistent source/timeline/output-phase filter context in all consumers.
+[ ] M18/M26: unique filter IDs and typed finite/range/relationship validation.
+[ ] M17/C01: actual plugin timing, explicit unsupported contracts, module-cycle cleanup.
+    Private pipeline runtime reset/destruction is already fixed.
+[ ] P05: stage-wise expanded frame sequences, correct histories and memory budgets.
+[ ] M04/M05/S10: usable audio clock, consistent inclusion/disable and silent sources.
+[ ] S08: shared codec/conversion/range-aware manual/script/queued audio export.
+[ ] M14/M15: matching audio effects and device-boundary conversion without bypass.
+[ ] Audio follow-up: independently verify continuous sound across masked ranges.
+[ ] M08/M09/M11/M12/M13: AVS formats, color/aspect metadata and effective codec controls.
+[ ] M20/M21: bounded script evaluation and safe numeric conversion throughout inputs.
+[ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
+[ ] Batch naming: preserve filenames across analysis/export operation changes.
+[ ] M07: timed capture stops independently of preview output (hardware verification pending).
+[ ] M24/P03: fast AVS serving startup, cumulative variable-rate timing and explicit precision.
+[ ] S11/P08: scoped raw copies, temporary-storage ownership and two-pass space checks.
+[ ] P04/P06/P07/P10/P11: measured filter/cache/display/log/buffer optimizations.
+    Source-owned Close caches and offline audio-device avoidance are already fixed.
+[ ] Progressive MP4/AVS -> ProRes slowdown: representative repeated-cycle profiling;
+    previous synthetic runs did not reproduce the user's stepwise throughput loss.
+[ ] M19/C07: correct existing resampling/temporal/warp choices and geometry predictions.
+[ ] C02/C03/C04/C06/C07: confirmed unused state, menu ownership, duplication, diagnostics
+    and overflow-safe progress. Common multi-output transactions are already extracted.
+[ ] Q01/Q02/Q03: command-tool packaging, CMake/Release documentation, PR CI and clean
+    package decode/export smoke checks. Local regression infrastructure already exists.
+[ ] Final supported-source/export matrix, full sanitizers and measured performance;
+    physical audio/capture and arbitrary external plugin coverage reported separately.
+
+Checkpoint evidence and limitations live in docs/TESTING.txt.
+Do not remove working features or legacy ABI/reference source as a cleanup shortcut.

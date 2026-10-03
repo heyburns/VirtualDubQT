@@ -295,3 +295,16 @@ Validation, 2026-10-03:
   - Regular build/VirtualDubQt rebuilt and passed generated-processing.vcf
     through the real command-line entry point with isolated config/data paths.
   - The codec troubleshooting suite was not included.
+
+Log dialog ownership (N01)
+-------------------------
+
+operation_log_lifetime recreates three parent-owned log dialogs in one process,
+checks reuse while the owner is alive, and proves deletion with a QPointer. It
+failed before repair because the static raw pointer survived owner destruction.
+The cached singleton is now a Qt weak pointer and clears automatically.
+
+Validation: Release log/source/provisional-playback/CLI smoke checks passed (4/4);
+sanitizer log/source/provisional-playback checks passed (3/3). The rebuilt regular
+build/VirtualDubQt also passed generated-processing.vcf with isolated settings.
+This repairs the extra observation recorded above; no user process was restarted.

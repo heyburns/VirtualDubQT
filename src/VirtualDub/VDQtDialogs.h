@@ -18,6 +18,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QPointer>
 
 #include "VDQtFilterSystem.h"
 
@@ -642,7 +643,9 @@ public:
 
 private:
     QTextEdit *mLogText;
-    static VDLogWindow *sInstance;
+    // The parent editor owns this dialog. Reset automatically when Qt destroys
+    // it, so another editor in the same process cannot dereference stale storage.
+    static QPointer<VDLogWindow> sInstance;
 };
 
 // VDSaveVideoDialog (File -> Save video... F7 matching VirtualDub2 screenshot)

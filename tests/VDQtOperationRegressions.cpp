@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QPointer>
 #include <QThread>
 #include <QtEndian>
 #include <iostream>
@@ -87,6 +88,25 @@ bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString
     const bool invoked = invoke(window, action);
     responder.stop();
     return check(invoked && chosen && !failed, "project save/load dialog completes successfully");
+}
+
+bool logLifetime() {
+    // Recreating an editor must not reuse its parent's deleted log dialog.
+    // The weak pointer also proves that destruction actually occurred.
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        QPointer<VDLogWindow> log;
+        {
+            QWidget owner;
+            log = VDLogWindow::instance(&owner);
+            if (!check(log && log->parentWidget() == &owner,
+                       "new log dialog belongs to the current editor")) return false;
+            log->appendLog(QStringLiteral("lifetime regression"));
+            if (!check(VDLogWindow::instance(&owner) == log,
+                       "live editor reuses its log dialog")) return false;
+        }
+        if (!check(log.isNull(), "editor destruction deletes the parent-owned log")) return false;
+    }
+    return true;
 }
 
 bool sourceLifetime(VDQtTestFixtures& fixtures) {
@@ -718,6 +738,7 @@ bool sourceProtection(VDQtTestFixtures& fixtures) {
 } // namespace
 
 bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtures) {
+    if (scenario == "log_lifetime") return logLifetime();
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);

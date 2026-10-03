@@ -4573,7 +4573,7 @@ VDAboutDialog::VDAboutDialog(QWidget *parent)
 // -----------------------------------------------------------------------------
 // VDLogWindow
 // -----------------------------------------------------------------------------
-VDLogWindow* VDLogWindow::sInstance = nullptr;
+QPointer<VDLogWindow> VDLogWindow::sInstance;
 
 VDLogWindow::VDLogWindow(QWidget *parent)
     : QDialog(parent) {
@@ -4610,7 +4610,7 @@ VDLogWindow* VDLogWindow::instance(QWidget *parent) {
     if (!sInstance) {
         sInstance = new VDLogWindow(parent);
     }
-    return sInstance;
+    return sInstance.data();
 }
 
 void VDLogWindow::appendLog(const QString &text) {
