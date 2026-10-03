@@ -9,6 +9,10 @@
 
 VDQtFrameDecodeWorker::VDQtFrameDecodeWorker(QObject *parent)
     : QObject(parent) {
+    // The signal uses a nested alias. AutoConnection to a functor does not
+    // reliably register that spelling before its first cross-thread delivery.
+    qRegisterMetaType<VDQtVideoDecoder::FrameIndexSnapshotPtr>(
+        "VDQtVideoDecoder::FrameIndexSnapshotPtr");
 }
 
 bool VDQtFrameDecodeWorker::openSource(const QString& filePath,

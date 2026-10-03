@@ -2,10 +2,14 @@
 // sequential prefix must not search every older entry for every decoded frame.
 #include "support/VDQtTestFixtures.h"
 #include "VirtualDub/VDQtVideoDecoder.h"
+#include "VirtualDub/VDQtFrameDecodeWorker.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QEventLoop>
+#include <QThread>
+#include <QTimer>
 #include <cstring>
 #include <iostream>
 
@@ -198,15 +202,53 @@ bool exactVfrOrdinals(VDQtTestFixtures& fixtures) {
     return check(!consumer.adoptFrameIndexSnapshot(snapshot),
                  "index from another source cannot be adopted");
 }
+
+bool queuedIndexDelivery(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("exact-vfr.mkv");
+    VDQtVideoDecoder consumer;
+    if (!consumer.openFile(source)) return false;
+    QThread thread;
+    auto *worker = new VDQtFrameDecodeWorker;
+    worker->moveToThread(&thread);
+    QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+    thread.start();
+    bool opened = false;
+    QMetaObject::invokeMethod(worker, [&] {
+        opened = worker->openSource(source, "Autoselect", 0, 0, 0);
+    }, Qt::BlockingQueuedConnection);
+    bool delivered = false;
+    QEventLoop loop;
+    QObject::connect(worker, &VDQtFrameDecodeWorker::frameIndexAvailable, &loop,
+        [&](quint64 generation, const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot) {
+            delivered = generation == 1 && consumer.adoptFrameIndexSnapshot(snapshot)
+                && consumer.getDecodedFrameCount() == 0
+                && consumer.getFrameTimestampSeconds(150) == 15.0;
+            loop.quit();
+        });
+    if (opened) {
+        QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+        worker->requestFrame(150, 1, false, false);
+        loop.exec();
+    }
+    QMetaObject::invokeMethod(worker, [worker] { worker->closeSource(); }, Qt::BlockingQueuedConnection);
+    thread.quit();
+    thread.wait();
+    return check(opened && delivered,
+                 "real worker queued delivery installs verified VFR timing without rescanning");
+}
 }
 
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
+    VDQtFrameDecodeWorker worker;
+    if (!check(QMetaType::fromName("VDQtVideoDecoder::FrameIndexSnapshotPtr").isValid(),
+               "worker snapshot alias is registered for queued GUI delivery")) return 1;
     VDQtTestFixtures fixtures;
     const bool scaling = sequentialScaling(fixtures);
     const bool duplicates = duplicateTimestamps(fixtures);
     const bool ordinals = exactVfrOrdinals(fixtures);
-    if (!scaling || !duplicates || !ordinals) {
+    const bool delivered = ordinals && queuedIndexDelivery(fixtures);
+    if (!scaling || !duplicates || !ordinals || !delivered) {
         if (!fixtures.error.isEmpty()) std::cerr << fixtures.error.toStdString() << '\n';
         return 1;
     }

@@ -589,3 +589,19 @@ is not exercised; VFR jump-to-time and cumulative edited-timeline time remain op
 
 Validation: full Release 38/38 and sanitizer 34/34 passed. The regular binary
 rebuilt and passed the actual MP4/native-AVS export smoke.
+
+Shared-index queued delivery (M16 follow-up)
+------------------------------------------
+
+The subsequent image-import regression exposed a Qt warning: AutoConnection to
+a functor did not register the nested snapshot alias for queued delivery. This
+would leave worker-built knowledge unshared, even though direct adoption and
+editor-built navigation already worked. The worker now explicitly registers the
+signal's type spelling before moving to its thread. A maintained regression
+checks registration and drives a real worker thread; its queued snapshot must
+install VFR frame-150 time 15 seconds in another decoder with zero scan decodes.
+
+Validation: focused Release and sanitizer decoder/controller/keyframe/stabilization/
+actual-binary smoke checks passed 5/5 each. Regular binary rebuilt and passed its
+MP4/native-AVS export smoke. This completes the automatic worker-to-editor path;
+it does not change the separately deferred VFR time-entry calculations.
