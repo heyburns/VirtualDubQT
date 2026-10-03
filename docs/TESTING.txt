@@ -1389,3 +1389,79 @@ raw/encoded runtime smoke checks. Hardware and leak detection remain excluded.
 An independent Chorus/cut comparison subsequently reproduced effects restarting
 at cuts in edited video audio preparation; it is an open next-gate fix, not
 covered by the successful audio-only assembly checks.
+
+Joined audio, plugin metadata and exact filter follow-ups
+--------------------------------------------------------
+
+  ctest --preset release-checks -R 'edited_audio_effects|exporter_diagnostics|filter_blur|filter_interpolate|codec_controls|plugin_host|operation_audio$|operation_export_preview|operation_playback_transport'
+
+Run the same selection in the sanitizer preset. Every fixture, source alias,
+replacement target, child encoder and configuration directory is disposable.
+The tests do not use the separate codec troubleshooting suite.
+
+edited_audio_effects_tests compares edited video audio with a separately joined
+and filtered FFmpeg reference. The baseline Chorus probe differed at sample
+48000, exactly the first cut, and appended a tail per cut. Full/Normal and the
+edited Fast fallback now match the composed reference through the final video
+duration. The direct multi-range helper emits one effect tail. A genuine native
+Fast path and both image-rendering modes test nonedited FPS reinterpretation,
+gain and 44.1 kHz resampling, with byte-exact final integer32 and float64 muxes.
+Integer32 and float32/64 extraction and filtered intermediate precision are
+checked independently; unsupported signed64 extraction must preserve existing
+destinations. Live Int16/Int32/Float filter formats have byte contracts, not
+physical listening coverage. Audio-stage outer cancellation and literal,
+symlink, hardlink and callback-created late source aliases retain original files.
+The operation snapshot test counts actual float64 WAV samples instead of
+assuming the obsolete integer16 intermediate layout.
+
+exporter_diagnostics_tests checks unsupported modes, failed staging/encoder
+startup, successful children producing no valid output, smart-render fallback
+and the real keyframe-warning Cancel button. All four video modes retain existing
+destinations on failure. The same regression fails 13 assertions against the
+previous checkpoint core. Cancellation is separate from a failure diagnostic;
+the manual Save Video front end's generic result dialog remains a follow-up.
+
+plugin_host_tests uses a real native module to inspect source/destination/last
+bitmap ratios, normalized negotiated output, per-frame overrides, source changes,
+seek resets, unknown 0/0, malformed pairs and extreme unsigned ABI values.
+The central chain carries returned ratios through downstream rotation and
+opacity. Native rate/prefetch contracts remain explicitly unsupported. H.264
+baseline with positive B-frames now fails instead of silently disabling them;
+the actual Configure dialog, cancellation and a baseline encode are checked.
+
+filter_blur_tests compares the complete output with a separate integer scalar
+oracle across all radii 1-48, powers 1-3, borders, odd strides, column-band
+boundaries, parallel images, alpha and native low bits. It includes saturated
+maximum-sum cases. Its scalar radius-48 oracle is deliberately expensive;
+CTest's 300-second bound is not a performance assertion. All 100 native
+allocation-failure/recovery cases also passed with the final optimized object.
+
+Controlled old/new medians, seven warm frames and eight workers, radius 3 / two
+passes (milliseconds per filtered image, measured without other builds):
+  RGB888:   1080p 16.66 -> 15.98; 4K 65.54 -> 48.48.
+  RGBA8888: 1080p 16.81 -> 14.13; 4K 78.65 -> 60.19.
+  RGBA64:   1080p 19.53 -> 14.79; 4K 185.52 -> 175.80.
+These are directly paired filter measurements, not overall playback/export fps.
+
+filter_interpolate_tests fails against the old recursive history and passes
+with incoming-stage history. It covers four nonmonotonic inputs, amount
+0/0.125/0.5/1, three layouts, alpha/native low bits, source preservation,
+seek/reset/transient replacement, unknown positions, upstream Invert and ordered
+Bob phases. Motion Blur's intentional recursive output remains unchanged.
+This is not the original application's arbitrary-rate Interpolate algorithm.
+
+Real controller tests verify Full and edited-Fast fallback Save Video previews,
+the final edited frame, frame-zero Play/Preview, changed video after pause/resume,
+and 32 rapid Play/Preview/Stop cycles. The physical sink is disabled, so these
+do not establish audible synchronization or device pause/resume behavior.
+
+Validation of this follow-up checkpoint, 2026-10-03: focused regressions passed,
+then full Release 189/189 (110.66 s) and ASan/UBSan 85/85 (216.22 s). The separately
+rebuilt regular executable passed MP4/native-AVS raw and FFV1/native-AVS raw/
+encoded smoke tests. The first full run exposed an obsolete integer16 assertion
+in the audio snapshot test; it was corrected for actual float64 samples, and
+both final full suites passed. Hardware and leak detection remain excluded.
+Native-AVS padding, neutral six-axis endpoint rounding and manual Save Video's
+generic failure dialog are documented next-gate follow-ups, not solved by these
+passing tests. Native algorithm parity and user-specific ProRes slowdown remain
+separately open.

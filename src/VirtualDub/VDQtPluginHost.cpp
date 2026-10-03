@@ -3,6 +3,7 @@
 // and one runtime object is retained per filter-chain instance ID.
 #include "VDQtPluginHost.h"
 #include "VDQtFilterSystem.h"
+#include "VDQtVideoAspect.h"
 
 extern "C" {
 #include <libavutil/rational.h>
@@ -281,9 +282,30 @@ double stageDuration(const VDFilterFrameContext& context) {
         ? context.inputDurationSeconds : context.frameRate > 0 ? 1 / context.frameRate : 0;
 }
 
+// The legacy ABI permits unknown pixel shape as 0/0, but a one-zero pair is
+// malformed. Keep unknown inside the ABI; QImage consumers use the established
+// square-pixel fallback, just as the Windows display does for an unknown PAR.
+bool bitmapSampleAspectRatio(const VDXFBitmap& bitmap, AVRational *ratio,
+                             QString *errorMessage) {
+    const uint32 numerator = bitmap.mAspectRatioHi;
+    const uint32 denominator = bitmap.mAspectRatioLo;
+    if (!numerator && !denominator) {
+        *ratio = {0, 0};
+        return true;
+    }
+    if (numerator && denominator) {
+        av_reduce(&ratio->num, &ratio->den, numerator, denominator,
+                  std::numeric_limits<int>::max());
+        if (ratio->num > 0 && ratio->den > 0) return true;
+    }
+    if (errorMessage)
+        *errorMessage = QStringLiteral("The plugin returned an invalid or unsupported sample aspect ratio.");
+    return false;
+}
+
 void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
                 VDXPixmap& pixmap, QImage& image, sint64 frameNumber,
-                const VDFilterFrameContext& context) {
+                const VDFilterFrameContext& context, AVRational sampleAspect) {
     std::memset(&bitmap, 0, sizeof bitmap);
     std::memset(&layout, 0, sizeof layout);
     std::memset(&pixmap, 0, sizeof pixmap);
@@ -301,6 +323,8 @@ void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
         ? av_d2q(context.frameRate, std::numeric_limits<int>::max()) : AVRational{0, 0};
     bitmap.mFrameRateHi = rate.num;
     bitmap.mFrameRateLo = rate.den;
+    bitmap.mAspectRatioHi = sampleAspect.num;
+    bitmap.mAspectRatioLo = sampleAspect.den;
     bitmap.mFrameCount = -1;
     bitmap.mFrameNumber = frameNumber;
     const double timestamp = stageTimestamp(context, frameNumber);
@@ -336,9 +360,11 @@ public:
 
     bool matches(const QByteArray& configuration, const QImage& input,
                  const VDFilterFrameContext& context) const {
+        const AVRational inputAspect = VDQtImageSampleAspectRatio(input);
         return initialized && serializedConfiguration == configuration
             && sourceWidth == input.width() && sourceHeight == input.height()
             && input.depth() <= 32
+            && sourceAspect.num == inputAspect.num && sourceAspect.den == inputAspect.den
             && frameContext.frameRate == context.frameRate
             && (context.frameNumber < 0 || previousContext.frameNumber < 0
                 || (previousContext.frameNumber < std::numeric_limits<qint64>::max()
@@ -364,6 +390,8 @@ public:
 
         sourceWidth = input.width();
         sourceHeight = input.height();
+        sourceAspect = VDQtImageSampleAspectRatio(input);
+        destinationAspect = lastAspect = sourceAspect;
         serializedConfiguration = configuration;
         frameContext = context;
         previousContext = context;
@@ -458,17 +486,28 @@ public:
                 return setError(errorMessage,
                                 QStringLiteral("The plugin reported a frame-processing failure."));
             }
-            *output = swapBuffers ? destinationImage.image.copy()
-                                  : sourceImage.image.copy();
+            AVRational returnedAspect;
+            if (!bitmapSampleAspectRatio(destinationBitmap, &returnedAspect, errorMessage))
+                return false;
+            QImage result = swapBuffers ? destinationImage.image.copy()
+                                        : sourceImage.image.copy();
+            if (result.isNull())
+                return setError(errorMessage, QStringLiteral("Not enough memory for the plugin output frame."));
+            // AlignedImage wraps an external buffer. Annotate the unique copy,
+            // never its binding: setting QImage text there could detach pixels
+            // and invalidate the negotiated scanline alignment and ABI pointers.
+            VDQtSetImageSampleAspectRatio(result, returnedAspect);
             if (needsLast) {
                 lastImage.copyFrom(converted);
+                lastAspect = sourceAspect;
                 fillBitmap(lastBitmap, lastLayout, lastPixmap,
-                           lastImage.image, frameNumber, frameContext);
+                           lastImage.image, frameNumber, frameContext, lastAspect);
             }
             previousContext = frameContext;
             previousContext.frameNumber = frameNumber;
             if (frameNumber < std::numeric_limits<sint64>::max()) ++frameNumber;
-            return !output->isNull();
+            *output = std::move(result);
+            return true;
         } catch (const std::exception& error) {
             return setError(errorMessage, QString::fromLocal8Bit(error.what()));
         } catch (...) {
@@ -493,9 +532,9 @@ private:
             return setError(errorMessage, QStringLiteral("The plugin output frame is too large."));
         destinationImage.copyFrom(converted);
         fillBitmap(sourceBitmap, sourceLayout, sourcePixmap,
-                   sourceImage.image, frameNumber, frameContext);
+                   sourceImage.image, frameNumber, frameContext, sourceAspect);
         fillBitmap(destinationBitmap, destinationLayout, destinationPixmap,
-                   destinationImage.image, frameNumber, frameContext);
+                   destinationImage.image, frameNumber, frameContext, sourceAspect);
         pixmapProvider.source = &sourcePixmap;
         pixmapProvider.destination = &destinationPixmap;
 
@@ -507,6 +546,11 @@ private:
         if (flags == FILTERPARAM_NOT_SUPPORTED)
             return setError(errorMessage,
                 QStringLiteral("The plugin does not support 32-bit RGB input."));
+        // paramProc may change the output pixel shape without changing dimensions.
+        // Save that negotiated stream metadata before buffer rebinding clears
+        // the ABI structs; runProc may explicitly override it for one frame.
+        if (!bitmapSampleAspectRatio(destinationBitmap, &destinationAspect, errorMessage))
+            return false;
         if (static_cast<uint64>(destinationBitmap.mFrameRateHi) * sourceBitmap.mFrameRateLo
                 != static_cast<uint64>(sourceBitmap.mFrameRateHi) * destinationBitmap.mFrameRateLo
             || (sourceBitmap.mFrameRateHi && !destinationBitmap.mFrameRateLo))
@@ -564,14 +608,15 @@ private:
 
     void updateFrameBindings() {
         fillBitmap(sourceBitmap, sourceLayout, sourcePixmap,
-                   sourceImage.image, frameNumber, frameContext);
+                   sourceImage.image, frameNumber, frameContext, sourceAspect);
         QImage& outputBinding = swapBuffers ? destinationImage.image
                                             : sourceImage.image;
         fillBitmap(destinationBitmap, destinationLayout, destinationPixmap,
-                   outputBinding, frameNumber, frameContext);
+                   outputBinding, frameNumber, frameContext, destinationAspect);
         if (needsLast)
             fillBitmap(lastBitmap, lastLayout, lastPixmap,
-                       lastImage.image, std::max<qint64>(0, previousContext.frameNumber), previousContext);
+                       lastImage.image, std::max<qint64>(0, previousContext.frameNumber), previousContext,
+                       lastAspect);
         pixmapProvider.source = &sourcePixmap;
         pixmapProvider.destination = &destinationPixmap;
         activation->x2 = static_cast<uint32>(destinationImage.image.width());
@@ -612,6 +657,7 @@ private:
         sourceImage = {};
         destinationImage = {};
         lastImage = {};
+        sourceAspect = destinationAspect = lastAspect = {1, 1};
     }
 
     QSharedPointer<PluginDefinition> plugin;
@@ -638,6 +684,9 @@ private:
     AlignedImage lastImage;
     int sourceWidth = 0;
     int sourceHeight = 0;
+    AVRational sourceAspect = {1, 1};
+    AVRational destinationAspect = {1, 1};
+    AVRational lastAspect = {1, 1};
     sint64 frameNumber = 0;
     VDFilterFrameContext frameContext;
     VDFilterFrameContext previousContext;
@@ -928,6 +977,11 @@ bool VDQtPluginHost::processVideoFilter(
     const QByteArray& serializedConfiguration, const QImage& input,
     QImage *output, QString *errorMessage, const VDFilterFrameContext *context) {
     if (!output) return false;
+    // A caller may reuse the same QImage for input/output. Snapshot it cheaply
+    // before clearing the destination so errors never leave a previous frame.
+    const QImage source = input;
+    *output = {};
+    if (errorMessage) errorMessage->clear();
     QMutexLocker locker(&d->mutex);
     d->ensureLoaded();
     const auto definition = d->definitions.value(filterId);
@@ -940,17 +994,17 @@ bool VDQtPluginHost::processVideoFilter(
         + QString::number(reinterpret_cast<quintptr>(QThread::currentThreadId()), 16);
     const VDFilterFrameContext actualContext = context ? *context : VDFilterFrameContext{};
     auto runtime = d->runtimes.value(runtimeKey);
-    if (!runtime || !runtime->matches(serializedConfiguration, input, actualContext)) {
+    if (!runtime || !runtime->matches(serializedConfiguration, source, actualContext)) {
         // End the old instance before starting its replacement. Some modules
         // keep a global resource and cannot safely overlap two configurations.
         d->runtimes.remove(runtimeKey);
         runtime.clear();
         runtime = QSharedPointer<VideoFilterRuntime>::create(definition);
-        if (!runtime->initialize(serializedConfiguration, input, errorMessage, actualContext))
+        if (!runtime->initialize(serializedConfiguration, source, errorMessage, actualContext))
             return false;
         d->runtimes.insert(runtimeKey, runtime);
     }
-    const bool success = runtime->process(input, output, errorMessage, actualContext);
+    const bool success = runtime->process(source, output, errorMessage, actualContext);
     if (!success) d->runtimes.remove(runtimeKey);
     return success;
 }

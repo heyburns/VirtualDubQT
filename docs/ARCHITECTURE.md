@@ -233,9 +233,12 @@ using raw rows or starting a painter. A null allocation raises a controlled
 failure at the pipeline boundary, not a dereference inside a worker. Read-only
 and no-op stages retain their inexpensive implicit sharing.
 
-Field Delay/Interlace history retains the incoming stage frame, not an output
-already containing a copied old field. Recursive blend/smoother history instead
-retains its output intentionally. Sequential context controls whether history is
+Field Delay/Interlace and the existing Interpolate amount control retain the
+incoming stage frame, not an output already containing an old field or blend.
+Motion Blur and Temporal Smoother retain their output intentionally. This fixes
+adjacent-image interpolation; native arbitrary-rate interpolation and paired,
+half-rate Interlace require a different scheduling/lookahead contract and are
+not implied by this history correction. Sequential context controls whether history is
 usable after a seek. At each stage boundary, channel layout and alpha are normalized
 to straight RGB888/RGBA8888/RGBA64; image depth alone cannot identify transformed
 ARGB/premultiplied storage safely.
@@ -281,6 +284,9 @@ Transient chain replacement resets temporal history and private plugin runtimes,
 but retains immutable parameter-keyed six-axis tables (at most eight). Gamma,
 sRGB conversion, Curves and Levels also use bounded immutable channel tables,
 computed with their original integer-level formulas at 8/16-bit precision.
+Box Blur uses rolling sums and contiguous 64-pixel column bands in its vertical
+pass; RGBA64's horizontal pass processes all RGB channels together. Its integer
+rounding, repeated-pass order, edge extension and untouched alpha are unchanged.
 Derived caches are pipeline-private and keyed by all affecting parameters. Asset
 images are pipeline-local and bounded by 64 entries / 64 MiB of decoded pixels;
 larger valid images are drawn without retention. Each use checks canonical path,
@@ -360,6 +366,18 @@ edits, then filters/encodes once. Cuts do not restart effect history or append a
 tail per segment. A transaction checks destination identity before installation;
 the outer caller still owns source-graph safety and user overwrite approval.
 
+`VDQtPrepareAudioWav` supplies the same joined-before-effects preparation to
+processed video audio and the direct multi-range AudioPlayer helper. Extraction
+retains supported integer PCM up to 32 bits and float32/64; filtered WAV
+intermediates use float64, not the eventual encoder's integer depth. Gain uses
+double processing, while live sinks still negotiate their explicit Qt PCM
+format. Signed64 integer extraction fails rather than silently narrowing to
+integer32. The final codec performs the requested conversion. Video identity
+ranges retain their existing output-duration/FPS-reinterpretation policy;
+explicit edits use source timestamp boundaries. The caller's abort callback
+remains active during extraction, joining and effects, and cancellation is
+captured before closing the multi-phase progress dialog.
+
 Waveform previews use these same ordered edited ranges, capped by their summed
 length rather than their first-to-last source span. Effects run once after
 assembly. `VDQtWaveform` streams checked RIFF/RF64 PCM or floating-point samples
@@ -397,8 +415,11 @@ remain per input frame; the last rendered timeline frame is always presented.
 Each display caches one byte-identical scaled image, up to 32 MiB, for unchanged
 frame/size/interpolation/alpha settings. Expose, pan and badge repaints reuse it;
 Clear releases it and oversized results are drawn without retained caching.
+If Fast Recompress falls back to frame rendering for edits, delivered callbacks
+still update Input and the edited playhead. Only Full Processing updates Output.
 Two-pass space estimates include checked coexisting extracted, filtered and
-concatenated PCM files as well as video; this is a preflight, not a reservation.
+concatenated PCM files as well as video, allowing eight bytes per PCM channel
+and one composed effect tail; this is a preflight, not a reservation.
 
 - Direct Stream Copy remuxes compressed packets when edits/ranges permit it.
 - Fast Recompress keeps video in an FFmpeg-native planar pipeline and bypasses
@@ -546,6 +567,14 @@ callbacks/instances finish.
 Legacy filters may assume padded/aligned XRGB storage and mutable state. The host
 adapts QImages through aligned buffers, serializes instance callbacks, and runs
 ABI teardown in the required order.
+
+VDX source, destination and last-frame bitmaps carry their own sample-aspect
+ratios. Output ratios negotiated by `paramProc` survive buffer rebinding;
+`runProc` may override them for one frame. Ratios are normalized and malformed
+one-zero pairs fail; the ABI's unknown 0/0 stays unknown internally and displays
+as square pixels. Metadata is attached only to the copied output QImage, never
+to externally backed aligned bindings where detachment would invalidate ABI
+pointers. A changed upstream ratio restarts the runtime and its history.
 
 Bitmap timing describes the current stage (including emitted Bob phases); legacy
 state also exposes the original source identity/time. Known seeks reset temporal

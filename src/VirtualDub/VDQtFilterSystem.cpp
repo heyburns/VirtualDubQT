@@ -35,6 +35,7 @@ constexpr int kMaxSequencedBobFilters = 6;
 constexpr qint64 kParallelFilterPixelThreshold = 256 * 1024;
 constexpr qsizetype kMaximumAssetBytes = qsizetype{64} * 1024 * 1024;
 constexpr qsizetype kMaximumAssetEntries = 64;
+constexpr int kBlurColumnBandWidth = 64;
 
 // QImage's copy-on-write allocation reports failure with a null pointer rather
 // than an exception. Centralize the check at each real mutation, before row
@@ -893,6 +894,10 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 return failProcessing(errorMessage.isEmpty()
                     ? QStringLiteral("The native plugin could not process this frame.") : errorMessage, &filter);
             }
+            // Native filters may negotiate a new pixel aspect ratio. Keep it
+            // as this stage's output metadata rather than restoring the input
+            // ratio in the common geometry/opacity tail below.
+            outputAspect = VDQtImageSampleAspectRatio(pluginResult);
             result = pluginResult.convertToFormat(QImage::Format_RGBA8888);
             if (result.isNull())
                 return failProcessing(QStringLiteral("The native plugin returned no valid image."), &filter);
@@ -1056,12 +1061,14 @@ QImage VDQtFilterSystem::processFilterForPhase(
         case VDFilterType::Interpolate:
         case VDFilterType::MotionBlur:
         case VDFilterType::TemporalSmoother: {
-            // Field weaving needs the preceding *incoming stage frame*. Saving
-            // its already delayed output feeds the old field back indefinitely.
-            // Recursive blend/smoother history intentionally remains output-based.
+            // Field weaving and adjacent-frame interpolation need the preceding
+            // *incoming stage frame*. Feeding back an interpolated output turns
+            // a two-frame blend into an unintended progressively fading trail.
+            // Motion blur/smoother history intentionally remains output-based.
             const bool incomingHistory = filter.type == VDFilterType::FieldDelay
-                || filter.type == VDFilterType::Interlace;
-            const QImage incomingFieldFrame = incomingHistory ? result : QImage();
+                || filter.type == VDFilterType::Interlace
+                || filter.type == VDFilterType::Interpolate;
+            const QImage incomingHistoryFrame = incomingHistory ? result : QImage();
             const QString stateKey = filter.id;
             TemporalState& temporal = mTemporalStates[stateKey];
             const bool sequential = !temporal.previousFrame.isNull()
@@ -1076,7 +1083,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     || filter.type == VDFilterType::Interlace) {
                     const int delayedParity = static_cast<int>(filter.params.value(
                         filter.type == VDFilterType::FieldDelay ? "field" : "fieldOrder", 1)) & 1;
-                    // incomingFieldFrame deliberately shares this buffer for
+                    // incomingHistoryFrame deliberately shares this buffer for
                     // history. Detach once here, not via unchecked scanLine()
                     // on every row; allocation failure must abort the sequence.
                     uchar *destinationBits = checkedImageBits(result);
@@ -1161,7 +1168,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     }
                 }
             }
-            temporal.previousFrame = incomingHistory ? incomingFieldFrame : result;
+            temporal.previousFrame = incomingHistory ? incomingHistoryFrame : result;
             temporal.lastFrameNumber = context.frameNumber >= 0
                 ? context.frameNumber : temporal.lastFrameNumber < std::numeric_limits<qint64>::max()
                 ? temporal.lastFrameNumber + 1 : temporal.lastFrameNumber;
@@ -1981,7 +1988,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 auto boxBlurPass64 = [w, h](QImage& image, int radius) {
                     if (radius <= 0 || w <= 0 || h <= 0) return;
                     QImage horizontal = image;
-                    const qint64 windowSize = static_cast<qint64>(radius) * 2 + 1;
+                    // Validation caps radius at 48: a rolling RGB sum is at
+                    // most 97 * 65535 = 6,356,895, safely within signed int.
+                    const int windowSize = radius * 2 + 1;
                     const uchar *imageSourceBits = image.constBits();
                     const int imageSourceStride = image.bytesPerLine();
                     uchar *horizontalBits = checkedImageBits(horizontal);
@@ -1991,53 +2000,66 @@ QImage VDQtFilterSystem::processFilterForPhase(
                             imageSourceBits + static_cast<qint64>(y) * imageSourceStride);
                         QRgba64 *dst = reinterpret_cast<QRgba64 *>(
                             horizontalBits + static_cast<qint64>(y) * horizontalStride);
-                        for (int c = 0; c < 3; ++c) {
-                            qint64 sum = 0;
-                            for (int offset = -radius; offset <= radius; ++offset)
-                                sum += rgba64Channel(src[std::clamp(offset, 0, w - 1)], c);
-                            for (int x = 0; x < w; ++x) {
-                                QRgba64 pixel = dst[x];
-                                setRgba64Channel(pixel, c,
-                                    static_cast<quint16>(sum / windowSize));
-                                dst[x] = pixel;
-                                const int left = std::clamp(x - radius, 0, w - 1);
-                                const int right = std::clamp(x + radius + 1, 0, w - 1);
-                                sum += static_cast<qint64>(rgba64Channel(src[right], c))
-                                     - static_cast<qint64>(rgba64Channel(src[left], c));
-                            }
+                        // Update the RGB sums together and write each packed
+                        // pixel once, not one row pass per separate channel.
+                        std::array<int, 3> sums{};
+                        for (int offset = -radius; offset <= radius; ++offset) {
+                            const QRgba64 pixel = src[std::clamp(offset, 0, w - 1)];
+                            sums[0] += pixel.red();
+                            sums[1] += pixel.green();
+                            sums[2] += pixel.blue();
+                        }
+                        for (int x = 0; x < w; ++x) {
+                            dst[x] = QRgba64::fromRgba64(
+                                static_cast<quint16>(sums[0] / windowSize),
+                                static_cast<quint16>(sums[1] / windowSize),
+                                static_cast<quint16>(sums[2] / windowSize), src[x].alpha());
+                            const QRgba64 left = src[std::clamp(x - radius, 0, w - 1)];
+                            const QRgba64 right = src[std::clamp(x + radius + 1, 0, w - 1)];
+                            sums[0] += int(right.red()) - left.red();
+                            sums[1] += int(right.green()) - left.green();
+                            sums[2] += int(right.blue()) - left.blue();
                         }
                     });
                     const uchar *horizontalSourceBits = horizontal.constBits();
                     uchar *imageDestinationBits = checkedImageBits(image);
                     const int imageDestinationStride = image.bytesPerLine();
-                    parallelFor(w, static_cast<qint64>(w) * h, [&](int x) {
-                        for (int c = 0; c < 3; ++c) {
-                            qint64 sum = 0;
-                            for (int offset = -radius; offset <= radius; ++offset) {
-                                const int row = std::clamp(offset, 0, h - 1);
-                                const QRgba64 *src = reinterpret_cast<const QRgba64 *>(
-                                    horizontalSourceBits
-                                        + static_cast<qint64>(row) * horizontalStride);
-                                sum += rgba64Channel(src[x], c);
+                    // A whole column repeatedly misses cache lines and makes
+                    // neighboring workers fight over the same output lines.
+                    // Roll a bounded band of sums down the image instead: each
+                    // row reads/writes adjacent pixels, with no new heap scratch.
+                    const int bands = (w + kBlurColumnBandWidth - 1) / kBlurColumnBandWidth;
+                    parallelFor(bands, static_cast<qint64>(w) * h, [&](int band) {
+                        const int begin = band * kBlurColumnBandWidth;
+                        const int columns = std::min(kBlurColumnBandWidth, w - begin);
+                        std::array<int, kBlurColumnBandWidth * 3> sums{};
+                        for (int offset = -radius; offset <= radius; ++offset) {
+                            const auto *row = reinterpret_cast<const QRgba64 *>(horizontalSourceBits
+                                + static_cast<qint64>(std::clamp(offset, 0, h - 1)) * horizontalStride);
+                            for (int column = 0; column < columns; ++column) {
+                                const QRgba64 pixel = row[begin + column];
+                                sums[column * 3] += pixel.red();
+                                sums[column * 3 + 1] += pixel.green();
+                                sums[column * 3 + 2] += pixel.blue();
                             }
-                            for (int y = 0; y < h; ++y) {
-                                QRgba64 *dst = reinterpret_cast<QRgba64 *>(
-                                    imageDestinationBits
-                                        + static_cast<qint64>(y) * imageDestinationStride);
-                                QRgba64 pixel = dst[x];
-                                setRgba64Channel(pixel, c,
-                                    static_cast<quint16>(sum / windowSize));
-                                dst[x] = pixel;
-                                const int top = std::clamp(y - radius, 0, h - 1);
-                                const int bottom = std::clamp(y + radius + 1, 0, h - 1);
-                                const QRgba64 *topRow = reinterpret_cast<const QRgba64 *>(
-                                    horizontalSourceBits
-                                        + static_cast<qint64>(top) * horizontalStride);
-                                const QRgba64 *bottomRow = reinterpret_cast<const QRgba64 *>(
-                                    horizontalSourceBits
-                                        + static_cast<qint64>(bottom) * horizontalStride);
-                                sum += static_cast<qint64>(rgba64Channel(bottomRow[x], c))
-                                     - static_cast<qint64>(rgba64Channel(topRow[x], c));
+                        }
+                        for (int y = 0; y < h; ++y) {
+                            auto *destination = reinterpret_cast<QRgba64 *>(imageDestinationBits
+                                + static_cast<qint64>(y) * imageDestinationStride);
+                            const auto *top = reinterpret_cast<const QRgba64 *>(horizontalSourceBits
+                                + static_cast<qint64>(std::clamp(y - radius, 0, h - 1)) * horizontalStride);
+                            const auto *bottom = reinterpret_cast<const QRgba64 *>(horizontalSourceBits
+                                + static_cast<qint64>(std::clamp(y + radius + 1, 0, h - 1)) * horizontalStride);
+                            for (int column = 0; column < columns; ++column) {
+                                const int x = begin + column;
+                                int *sum = sums.data() + column * 3;
+                                destination[x] = QRgba64::fromRgba64(
+                                    static_cast<quint16>(sum[0] / windowSize),
+                                    static_cast<quint16>(sum[1] / windowSize),
+                                    static_cast<quint16>(sum[2] / windowSize), destination[x].alpha());
+                                sum[0] += int(bottom[x].red()) - top[x].red();
+                                sum[1] += int(bottom[x].green()) - top[x].green();
+                                sum[2] += int(bottom[x].blue()) - top[x].blue();
                             }
                         }
                     });
@@ -2083,27 +2105,35 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 const uchar *temporarySourceBits = temp.constBits();
                 uchar *imageDestinationBits = checkedImageBits(img);
                 const int imageDestinationStride = img.bytesPerLine();
-                parallelFor(w, static_cast<qint64>(w) * h, [&](int x) {
-                    for (int c = 0; c < 3; ++c) {
-                        int sum = 0;
-                        for (int y = -radius; y <= radius; ++y) {
-                            int cy = std::clamp(y, 0, h - 1);
-                            sum += temporarySourceBits[
-                                static_cast<qint64>(cy) * temporaryStride
-                                + x * bpp + c];
-                        }
-                        for (int y = 0; y < h; ++y) {
-                            imageDestinationBits[
-                                static_cast<qint64>(y) * imageDestinationStride
-                                + x * bpp + c] = static_cast<uchar>(sum / winSize);
-                            int ty = std::clamp(y - radius, 0, h - 1);
-                            int by = std::clamp(y + radius + 1, 0, h - 1);
-                            sum += temporarySourceBits[
-                                       static_cast<qint64>(by) * temporaryStride
-                                       + x * bpp + c]
-                                 - temporarySourceBits[
-                                       static_cast<qint64>(ty) * temporaryStride
-                                       + x * bpp + c];
+                // The same bounded, row-contiguous vertical bands as RGBA64.
+                // RGB channels keep the old positive-integer floor division;
+                // an optional fourth alpha byte is never read or overwritten.
+                const int bands = (w + kBlurColumnBandWidth - 1) / kBlurColumnBandWidth;
+                parallelFor(bands, static_cast<qint64>(w) * h, [&](int band) {
+                    const int begin = band * kBlurColumnBandWidth;
+                    const int columns = std::min(kBlurColumnBandWidth, w - begin);
+                    std::array<int, kBlurColumnBandWidth * 3> sums{};
+                    for (int offset = -radius; offset <= radius; ++offset) {
+                        const uchar *row = temporarySourceBits
+                            + static_cast<qint64>(std::clamp(offset, 0, h - 1)) * temporaryStride;
+                        for (int column = 0; column < columns; ++column)
+                            for (int c = 0; c < 3; ++c)
+                                sums[column * 3 + c] += row[(begin + column) * bpp + c];
+                    }
+                    for (int y = 0; y < h; ++y) {
+                        uchar *destination = imageDestinationBits
+                            + static_cast<qint64>(y) * imageDestinationStride;
+                        const uchar *top = temporarySourceBits
+                            + static_cast<qint64>(std::clamp(y - radius, 0, h - 1)) * temporaryStride;
+                        const uchar *bottom = temporarySourceBits
+                            + static_cast<qint64>(std::clamp(y + radius + 1, 0, h - 1)) * temporaryStride;
+                        for (int column = 0; column < columns; ++column) {
+                            const int pixelOffset = (begin + column) * bpp;
+                            for (int c = 0; c < 3; ++c) {
+                                int& sum = sums[column * 3 + c];
+                                destination[pixelOffset + c] = static_cast<uchar>(sum / winSize);
+                                sum += bottom[pixelOffset + c] - top[pixelOffset + c];
+                            }
                         }
                     }
                 });

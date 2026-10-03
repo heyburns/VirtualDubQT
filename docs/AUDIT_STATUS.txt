@@ -65,13 +65,14 @@ Remaining execution sequence
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
 [x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
     Effects run once after edit assembly; source precision is retained until encoding.
-[ ] Newly reproduced video-audio follow-up: edited video preparation and the
-    direct AudioPlayer multi-range helper still render effects before each cut
-    is concatenated. A Chorus reference differs exactly at the first cut.
-    Join source-precision PCM first, then run the captured effects once; preserve
-    final video/audio timing and codec choices. Filtered intermediates currently
-    force 16/24-bit WAVs before a requested 32-bit final encode. Audio preparation
-    must also forward the outer queue-abort callback, not only its local dialog.
+[x] Video-audio follow-up: shared preparation joins cuts before effects, preserves
+    integer PCM up to 32 bits and float32/64, uses float64 filtered intermediates,
+    and forwards outer abort during preparation. Edited Full/Normal/Fast fallback
+    and real nonedited Fast/FPS retiming match final-codec PCM references.
+    Unsupported signed64 extraction fails without replacing existing output.
+[ ] Native AVS audio follow-up: exact-count normalization still truncates positive
+    padded windows to source EOF. Read only available native samples, then write
+    bounded explicit trailing silence; preserve nonpadding and beyond-EOF errors.
 [x] M14/M15: matching audio effects and device-boundary conversion without bypass.
     All ten effects, EOF tails, seek resets and supported sink formats tested
     with PCM fixtures; physical listening/device negotiation remains a hardware gate.
@@ -84,9 +85,12 @@ Remaining execution sequence
     Unsupported floating-point video fails clearly at open, not as a null preview.
 [x] M09: encoder-specific effective codec controls and shared validated arguments.
     Unsupported saved combinations report errors; Fast Recompress remains intact.
+[x] M09 baseline follow-up: reject positive H.264 baseline B-frames, expose zero
+    in Configure, and test dialog cancellation plus the actual baseline encode.
 [x] M13 core: source/per-frame/display/filter/export/server pixel-aspect metadata.
     Manual view choices remain presentation-only; exact quarter turns reciprocate.
-[ ] M13 plug-in follow-up: VDX bitmap aspect fields and returned-ratio negotiation.
+[x] M13 plug-in follow-up: source/output/last bitmap ratios, validated negotiated
+    and per-frame returned ratios, restart on ratio change and chain propagation.
     Fast Recompress uses demuxer SAR; arbitrary per-frame AVS changes are not scanned.
 [x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
 [x] M21: known numeric conversion defects in saved inputs and runtime calculations.
@@ -122,8 +126,11 @@ Remaining execution sequence
     per-input cancellation and forced last edited export frame.
 [x] P11 measurement: bounded primed native-AVS pulls measured p99 27.04 us;
     no evidence justifies a speculative buffer rewrite. Hardware remains separate.
-[ ] P04 remaining measured filter work: improve Blur's strided vertical access;
-    benchmark other kernels before changing precision or thread budgets.
+[x] P04 Blur: exact contiguous vertical bands and packed 16-bit horizontal RGB,
+    independent scalar/alpha/rounding contracts and controlled paired benchmarks.
+[ ] P04 remaining measured filter work: benchmark other kernels before changing
+    precision or thread budgets. A neutral six-axis probe newly reproduced
+    gray253->252 and254->253 from the last cube cell's incorrect denominator.
     Offline audio-device avoidance is already fixed; full playback gains are not implied.
 [x] Audio EOF follow-up: both producers include QIODevice read-ahead in EOF;
     exact byte totals, tiny/unaligned reads, restarts and seek-to-EOF now pass.
@@ -134,11 +141,16 @@ Remaining execution sequence
     previous synthetic runs did not reproduce the user's stepwise throughput loss.
 [x] M19/C07 substep: distinct existing resamplers, precision/alpha/interlaced resizing,
     shared geometry plans, script alignment and honest conditional table predictions.
+[x] Interpolate amount-control follow-up: retain incoming stage history, not
+    recursive output; Motion Blur unchanged, including ordered downstream Bob phases.
 [ ] M19: original temporal/IVTC/interpolation/warp algorithms remain separate work;
     rate/lookahead contracts and native algorithm parity are not claimed by sizing fixes.
 [x] C06: share identical application/controller-test compilation in a static core.
 [x] C02/C03: temporary preview-menu action ownership and confirmed unused state.
-[ ] C04/C07: remaining duplication, diagnostics and overflow-safe progress.
+[x] C04/C07 substep: shared Play/Play Preview setup, exporter failure diagnostics,
+    distinct cancellation and rendered preview updates after Fast fallback.
+[ ] C04/C07: remaining duplication and manual export result presentation.
+    Manual Save Video still adds a generic failure dialog even on cancellation.
     Common multi-output transactions and audio-save processing are already extracted.
     Geometry, native path identity and process diagnostic helpers are now also shared.
 [x] Waveform follow-up: ordered edits/masks, rendered duration/rate/precision,
@@ -158,9 +170,10 @@ Remaining execution sequence
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
 
-Latest verified checkpoint: Release 183/183, ASan/UBSan 79/79 and independently
+Latest verified checkpoint: Release 189/189, ASan/UBSan 85/85 and independently
 rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. This includes
-100 native allocation-failure cases and actual waveform/export-preview dialogs.
+100 native allocation-failure cases, joined-audio precision/cancellation, exact
+blur/interpolation and actual waveform/export-preview/playback controls.
 VFR packed RGB24, RGBA8 and RGBA16 round trips compare exact pixels/timestamps.
 This does not resolve the unchecked follow-ups above.
 

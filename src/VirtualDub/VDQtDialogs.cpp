@@ -3616,6 +3616,7 @@ void VDVideoCompressionDialog::onConfigureClicked() {
     QSpinBox *bFrames = nullptr;
     if (capabilities.supportsBFrames) {
         bFrames = new QSpinBox(&dlg);
+        bFrames->setObjectName("videoBFrames");
         bFrames->setRange(0, 16);
         bFrames->setValue(params.bFrames);
         form->addRow("B-frames (0 disables):", bFrames);
@@ -3636,8 +3637,20 @@ void VDVideoCompressionDialog::onConfigureClicked() {
             twoPass->setEnabled(targetBitrate);
             if (!targetBitrate) twoPass->setChecked(false);
         }
+        if (bFrames) {
+            const bool baseline = (codecId == "libx264" || codecId == "libx264_10bit")
+                && profile && profile->currentData().toString() == "baseline";
+            // Selecting a baseline profile is an explicit configuration action,
+            // not permission for the exporter to silently discard saved B-frames.
+            if (baseline) bFrames->setValue(0);
+            bFrames->setEnabled(!baseline);
+            bFrames->setToolTip(baseline
+                ? QStringLiteral("The H.264 baseline profile does not support B-frames.") : QString());
+        }
     };
     connect(rateMode, &QComboBox::currentIndexChanged, &dlg, [refresh](int) { refresh(); });
+    if (profile)
+        connect(profile, &QComboBox::currentIndexChanged, &dlg, [refresh](int) { refresh(); });
     refresh();
     connect(buttons, &QDialogButtonBox::accepted, &dlg, [&]() {
         VDVideoCodecParams candidate = params;

@@ -455,6 +455,8 @@ bool VDQtCodecEngine::buildFfmpegVideoEncodeArguments(
         return fail(QStringLiteral("Keyframe control is unsupported by this encoder."));
     const bool x264 = id == "libx264" || id == "libx264_10bit";
     const bool x265 = id == "libx265" || id == "libx265_lossless";
+    if (x264 && params.profile == "baseline" && params.bFrames > 0)
+        return fail(QStringLiteral("The H.264 baseline profile does not support B-frames. Set B-frames to zero or select another profile."));
     if (x264 && (params.rateMode == "lossless"
         || ((params.rateMode == "cqp" || params.rateMode == "crf") && params.crf == 0))
         && !params.profile.isEmpty() && params.profile != "high444")

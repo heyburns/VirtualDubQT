@@ -13,6 +13,7 @@
 #include "VDQtCodecSettings.h"
 #include "VDQtCodecEngine.h"
 #include "VDQtAudioPlayer.h"
+#include "VDQtAudioExport.h"
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtSourceSafety.h"
 #include <QProcess>
@@ -1755,6 +1756,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         QString error;
         if (!VDQtCodecEngine::instance().checkVideoEncoderAvailable(
                 selectedVideoParams.codecId, &error)) {
+            mLastError = error;
             if (parentWidget)
                 QMessageBox::critical(
                     parentWidget, "Video Encoder Not Available", error);
@@ -1842,6 +1844,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
     if (!options.preserveEmptyFrames && videoMode != VideoMode_DirectStreamCopy
         && sourceHasAudio && variableFrameTiming) {
+        mLastError = QStringLiteral(
+            "Collapsing empty-frame/timestamp gaps would require cutting matching "
+            "sections out of the audio timeline. Disable audio for this export or "
+            "preserve empty frames to keep A/V synchronization exact.");
         if (parentWidget) {
             QMessageBox::critical(
                 parentWidget, "Cannot Collapse Video Gaps With Audio",
@@ -1866,6 +1872,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     if (preserveNativeVfr
         && (options.containerType.startsWith(QStringLiteral("avi"), Qt::CaseInsensitive)
             || options.outputPath.endsWith(QStringLiteral(".avi"), Qt::CaseInsensitive))) {
+        mLastError = QStringLiteral(
+            "AVI cannot reliably represent this source's variable frame timing. "
+            "Choose MKV, MP4, MOV, WebM, or NUT, or explicitly convert to a constant frame rate.");
         if (parentWidget) {
             QMessageBox::critical(
                 parentWidget, "Unsupported VFR Container",
@@ -1990,6 +1999,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     QTemporaryFile stagedOutput(stagedOutputTemplate(options.outputPath));
     stagedOutput.setAutoRemove(true);
     if (!stagedOutput.open()) {
+        mLastError = QStringLiteral("A temporary output could not be created in the destination directory.");
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Export Error",
                                   "A temporary output could not be created in the destination directory.");
@@ -1998,6 +2008,60 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
     const QString processOutputPath = stagedOutput.fileName();
     stagedOutput.close();
+
+    // Every recompress mode uses the same edited soundtrack preparation. Only
+    // the nonedited range uses output duration (the existing FPS-reinterpret
+    // contract); edits use their source PTS boundaries before joining/effects.
+    const auto prepareProcessedAudio = [&](const QString& path, double duration,
+                                           const QString& caption) {
+        if (!audioPlayer || !audioPlayer->hasAudio()) {
+            mLastError = QStringLiteral("The selected processed audio source is unavailable.");
+            return false;
+        }
+        const int rate = audioPlayer->getSampleRate();
+        QList<QPair<int64_t, int64_t>> ranges;
+        if (editedTimeline) {
+            if (!VDQtAudioRangesForTimeline(decoder, renderTimeline.segments(),
+                    startFrame, endFrame, rate, &ranges, &mLastError)) return false;
+        } else {
+            int64_t first = 0, count = 0;
+            if (!audioSampleRange(sourceStartSeconds, duration, rate, &first, &count)) {
+                mLastError = QStringLiteral("The selected audio time range cannot be represented.");
+                return false;
+            }
+            ranges.append({first, count});
+        }
+        QProgressDialog audioProgress(caption, QStringLiteral("Cancel"), 0, 100, parentWidget);
+        audioProgress.setWindowModality(Qt::NonModal);
+        ScopedEditorInputBlocker audioInputBlocker(parentWidget);
+        audioProgress.setMinimumDuration(0);
+        // Completing a phase must not reset cancellation before we capture it.
+        audioProgress.setAutoReset(false);
+        audioProgress.setAutoClose(false);
+        bool callerCancelled = false;
+        const bool prepared = VDQtPrepareAudioWav(*audioPlayer, path, ranges,
+            processing.audioFilters, [&](int current, int total) {
+                audioProgress.setValue(VDQtScaledProgress(current, total, 100));
+                QApplication::processEvents(QEventLoop::AllEvents, kProcessPollMs);
+                if (audioProgress.wasCanceled()) return false;
+                // Queue/script abort remains effective during extraction,
+                // concat and effects, not just the later video frame loop.
+                if (progressCallback && !progressCallback(100, 1000)) {
+                    callerCancelled = true;
+                    return false;
+                }
+                return true;
+            }, &mLastError);
+        const bool audioCancelled = callerCancelled || audioProgress.wasCanceled();
+        audioProgress.close();
+        if (audioCancelled) {
+            mWasCancelled = true;
+            mLastError.clear();
+        } else if (!prepared && parentWidget) {
+            QMessageBox::critical(parentWidget, "Audio Export Error", mLastError);
+        }
+        return prepared && !audioCancelled;
+    };
 
     // Fast Recompress keeps decoded video in FFmpeg's native pixel formats.
     // Unlike Normal/Full Processing, frames never cross the QImage/RGB boundary
@@ -2027,6 +2091,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         QString processedAudioPath;
         if (sourceHasAudio && audioMode != AudioMode_DirectStreamCopy) {
             if (!processedAudioDirectory.isValid() || !audioPlayer) {
+                mLastError = QStringLiteral("A temporary processed-audio file could not be created.");
                 if (parentWidget)
                     QMessageBox::critical(parentWidget, "Audio Export Error",
                                           "A temporary processed-audio file could not be created.");
@@ -2035,39 +2100,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             }
             processedAudioPath = processedAudioDirectory.filePath(
                 QStringLiteral("fast-recompress-audio.wav"));
-            const int sampleRate = std::max(1, audioPlayer->getSampleRate());
-            int64_t startSample = 0, sampleCount = 0;
-            if (!audioSampleRange(sourceStartSeconds, outputDurationSeconds, sampleRate, &startSample, &sampleCount)) {
-                mLastError = QStringLiteral("The selected audio time range cannot be represented.");
-                if (parentWidget) QMessageBox::critical(parentWidget, "Audio Export Error", mLastError);
+            if (!prepareProcessedAudio(processedAudioPath, outputDurationSeconds,
+                    QStringLiteral("Preparing selected audio for fast recompress..."))) {
                 removePartialOutput(processOutputPath);
-                return false;
-            }
-            QProgressDialog audioProgress(
-                QStringLiteral("Preparing selected audio for fast recompress..."),
-                QStringLiteral("Cancel"), 0, 100, parentWidget);
-            audioProgress.setWindowModality(Qt::NonModal);
-            ScopedEditorInputBlocker fastAudioInputBlocker(parentWidget);
-            audioProgress.setMinimumDuration(0);
-            const bool prepared = audioPlayer->exportAudioToFile(
-                processedAudioPath, startSample, sampleCount,
-                [&audioProgress](int current, int total) {
-                    const int maximum = std::max(1, total);
-                    audioProgress.setRange(0, maximum);
-                    audioProgress.setValue(std::clamp(current, 0, maximum));
-                    QApplication::processEvents(
-                        QEventLoop::AllEvents, kProcessPollMs);
-                    return !audioProgress.wasCanceled();
-                }, &processing.audioFilters);
-            audioProgress.close();
-            if (!prepared) {
-                if (audioProgress.wasCanceled()) mWasCancelled = true;
-                removePartialOutput(processOutputPath);
-                if (!audioProgress.wasCanceled() && parentWidget) {
-                    QMessageBox::critical(
-                        parentWidget, "Audio Export Error",
-                        "The selected audio graph could not be prepared for fast recompress.");
-                }
                 return false;
             }
         }
@@ -2204,6 +2239,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         videoDecoderProcess.setStandardOutputProcess(&ffmpeg);
         ffmpeg.start("ffmpeg", encoderArgs);
         if (!ffmpeg.waitForStarted(3000)) {
+            mLastError = QStringLiteral("The FFmpeg encoder process could not be started: %1")
+                .arg(ffmpeg.errorString());
             removePartialOutput(processOutputPath);
             if (parentWidget)
                 QMessageBox::critical(parentWidget, "Fast Recompress Failed",
@@ -2212,6 +2249,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         }
         videoDecoderProcess.start("ffmpeg", decoderArgs);
         if (!videoDecoderProcess.waitForStarted(3000)) {
+            mLastError = QStringLiteral("The native-format FFmpeg decoder process could not be started: %1")
+                .arg(videoDecoderProcess.errorString());
             stopProcess(ffmpeg);
             removePartialOutput(processOutputPath);
             if (parentWidget)
@@ -2234,6 +2273,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             mLastError = processOk
                 ? QStringLiteral("The completed output could not be committed to its destination.")
                 : QString::fromUtf8(diagnostics).trimmed();
+            if (!cancelled && mLastError.isEmpty())
+                mLastError = QStringLiteral("FFmpeg did not produce a valid output file.");
             if (!cancelled && parentWidget) {
                 QString message = processOk
                     ? QStringLiteral(
@@ -2255,6 +2296,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
     // 0. Direct Stream Copy Mode (For media files / containers)
     if (videoMode == VideoMode_DirectStreamCopy && decoder.isAvsNative()) {
+        mLastError = QStringLiteral(
+            "AviSynth output consists of decoded frames and cannot be direct-stream-copied. "
+            "Choose a recompress mode.");
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "Unsupported Direct Copy Operation",
                                   "AviSynth output consists of decoded frames and cannot be direct-stream-copied. "
@@ -2264,6 +2308,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
     if (videoMode == VideoMode_DirectStreamCopy && !decoder.isAvsNative()) {
         if (options.decimateFactor > 1 || options.customFps > 0.0) {
+            mLastError = QStringLiteral(
+                "Direct stream copy cannot decimate frames or change frame rate. "
+                "Choose a recompress mode for this operation.");
             if (parentWidget) {
                 QMessageBox::critical(parentWidget, "Unsupported Direct Copy Operation",
                     "Direct stream copy cannot decimate frames or change frame rate. "
@@ -2281,6 +2328,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             && audioMode != AudioMode_DirectStreamCopy
             && selectedAudioIsSeparateSource;
         if (hasFrameSelection && separateProcessedAudioInput) {
+            mLastError = QStringLiteral(
+                "A direct-video-copy selection may begin at an earlier keyframe, while an "
+                "external audio file has no matching video keyframe preroll. Choose Normal "
+                "or Full processing mode for an exact synchronized selection.");
             if (parentWidget) {
                 QMessageBox::critical(
                     parentWidget, "Exact External-Audio Cut Requires Recompression",
@@ -2301,8 +2352,10 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                     "the selected frame. Use a recompress mode for an exact frame boundary.",
                     QMessageBox::Ok | QMessageBox::Cancel,
                     QMessageBox::Cancel);
-                if (answer != QMessageBox::Ok)
+                if (answer != QMessageBox::Ok) {
+                    mWasCancelled = true;
                     return false;
+                }
             }
             // A copied video stream necessarily retains packets back to the
             // preceding keyframe. If audio is transcoded, FFmpeg's default
@@ -2383,6 +2436,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
         ffmpeg.start("ffmpeg", args);
         if (!ffmpeg.waitForStarted(3000)) {
+            mLastError = QStringLiteral("The FFmpeg direct-copy process could not be started: %1")
+                .arg(ffmpeg.errorString());
             removePartialOutput(processOutputPath);
             return false;
         }
@@ -2398,11 +2453,13 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             mLastError = processOk
                 ? QStringLiteral("The completed output could not be committed to its destination.")
                 : QString::fromUtf8(diagnostics).trimmed();
+            if (!cancelled && mLastError.isEmpty())
+                mLastError = QStringLiteral("FFmpeg did not produce a valid direct-copy output file.");
             if (!cancelled && parentWidget) {
                 QMessageBox::critical(parentWidget, "Direct Copy Failed",
                                       processOk
                                           ? QStringLiteral("The completed output could not be committed to its destination.")
-                                          : QString::fromUtf8(diagnostics).trimmed());
+                                          : mLastError);
             }
         }
         if (ok && progressCallback) progressCallback(1000, 1000);
@@ -2441,6 +2498,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
         const VDFilterTimingInfo timing = filters.getTimingInfo();
         if (!timing.sequenceSupported || timing.outputFramesPerInput <= 0) {
+            mLastError = QStringLiteral("The configured temporal filter chain is not supported.");
             if (parentWidget) QMessageBox::critical(parentWidget, "Filter Error", "The configured temporal filter chain is not supported.");
             return false;
         }
@@ -2522,149 +2580,14 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     QString tempAudioPath;
     if (options.includeAudio && !isDirectCopyMediaAudio && audioPlayer && audioPlayer->hasAudio()) {
         if (!temporaryDirectory.isValid()) {
+            mLastError = QStringLiteral("A secure temporary audio directory could not be created.");
             qWarning() << "[Exporter] Unable to create a secure temporary directory.";
             return false;
         }
         tempAudioPath = temporaryDirectory.filePath("audio.wav");
 
-        int sampleRate = audioPlayer->getSampleRate();
-        if (sampleRate <= 0) sampleRate = 48000;
-
-        int64_t startSample = 0, sampleCount = 0;
-        if (!audioSampleRange(sourceStartSeconds, outputDurationSeconds, sampleRate, &startSample, &sampleCount)) {
-            mLastError = QStringLiteral("The selected audio time range cannot be represented.");
-            if (parentWidget) QMessageBox::critical(parentWidget, "Audio Export Error", mLastError);
-            return false;
-        }
-
-        QProgressDialog audioProgress(
-            "Preparing processed audio...", "Cancel", 0, 100, parentWidget);
-        audioProgress.setWindowModality(Qt::NonModal);
-        ScopedEditorInputBlocker processedAudioInputBlocker(parentWidget);
-        audioProgress.setMinimumDuration(0);
-        bool audioPrepared = false;
-        if (editedTimeline) {
-            QString editError;
-            const QList<VDQtTimelineSegment> selectedSegments =
-                renderTimeline.copyRange(startFrame, endFrame + 1, &editError);
-            QStringList segmentFiles;
-            audioPrepared = !selectedSegments.isEmpty();
-            for (int index = 0;
-                 audioPrepared && index < selectedSegments.size(); ++index) {
-                const VDQtTimelineSegment& segment = selectedSegments.at(index);
-                const int firstSource = static_cast<int>(segment.sourceStartFrame);
-                const int lastSource = static_cast<int>(
-                    segment.sourceStartFrame + segment.frameCount - 1);
-                double segmentStartSeconds =
-                    decoder.getFrameTimestampSeconds(firstSource);
-                if (!std::isfinite(segmentStartSeconds))
-                    segmentStartSeconds = firstSource / sourceFps;
-                double segmentDurationSeconds = 0.0;
-                const double segmentLastTimestamp =
-                    decoder.getFrameTimestampSeconds(lastSource);
-                const double segmentLastDuration =
-                    decoder.getFrameDurationSeconds(lastSource);
-                if (std::isfinite(segmentLastTimestamp)
-                    && std::isfinite(segmentLastDuration)
-                    && segmentLastTimestamp + segmentLastDuration
-                        > segmentStartSeconds) {
-                    segmentDurationSeconds = segmentLastTimestamp
-                        + segmentLastDuration - segmentStartSeconds;
-                } else {
-                    segmentDurationSeconds = segment.frameCount / sourceFps;
-                }
-                int64_t segmentStartSample = 0, segmentSampleCount = 0;
-                if (!audioSampleRange(segmentStartSeconds, segmentDurationSeconds, sampleRate,
-                                      &segmentStartSample, &segmentSampleCount)) {
-                    mLastError = QStringLiteral("An edited audio time range cannot be represented.");
-                    audioPrepared = false;
-                    break;
-                }
-                const QString segmentPath = temporaryDirectory.filePath(
-                    QString("audio_segment_%1.wav").arg(index, 6, 10, QLatin1Char('0')));
-                audioPrepared = audioPlayer->exportAudioToFile(
-                    segmentPath, segmentStartSample, segmentSampleCount,
-                    [&audioProgress, index, &selectedSegments](int current, int total) {
-                        const double fraction = total > 0
-                            ? static_cast<double>(current) / total : 0.0;
-                        const int progress = static_cast<int>(std::llround(
-                            100.0 * (index + fraction) / selectedSegments.size()));
-                        audioProgress.setValue(std::clamp(progress, 0, 100));
-                        QApplication::processEvents(
-                            QEventLoop::AllEvents, kProcessPollMs);
-                        return !audioProgress.wasCanceled();
-                    }, &processing.audioFilters);
-                if (audioPrepared) segmentFiles.append(segmentPath);
-            }
-            if (audioPrepared && segmentFiles.size() == 1) {
-                QFile::remove(tempAudioPath);
-                audioPrepared = QFile::rename(segmentFiles.first(), tempAudioPath);
-            } else if (audioPrepared) {
-                const QString manifestPath =
-                    temporaryDirectory.filePath(QStringLiteral("audio.ffconcat"));
-                QSaveFile manifest(manifestPath);
-                QByteArray contents("ffconcat version 1.0\n");
-                for (const QString& segmentPath : segmentFiles) {
-                    contents += "file ";
-                    contents += QFileInfo(segmentPath).fileName().toUtf8();
-                    contents += '\n';
-                }
-                audioPrepared = manifest.open(QIODevice::WriteOnly)
-                    && manifest.write(contents) == contents.size()
-                    && manifest.commit();
-                if (audioPrepared) {
-                    QProcess concatProcess;
-                    concatProcess.setWorkingDirectory(temporaryDirectory.path());
-                    concatProcess.start(
-                        QStringLiteral("ffmpeg"),
-                        {QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
-                         QStringLiteral("-loglevel"), QStringLiteral("error"),
-                         QStringLiteral("-f"), QStringLiteral("concat"),
-                         QStringLiteral("-safe"), QStringLiteral("1"),
-                         QStringLiteral("-i"), QFileInfo(manifestPath).fileName(),
-                         QStringLiteral("-c:a"), QStringLiteral("copy"),
-                         QStringLiteral("-y"), QFileInfo(tempAudioPath).fileName()});
-                    if (!concatProcess.waitForStarted(3000)) {
-                        audioPrepared = false;
-                    } else {
-                        QByteArray concatDiagnostics;
-                        bool concatCancelled = false;
-                        // The shared waiter checks state before waiting again:
-                        // event pumping may already have delivered finished().
-                        audioPrepared = waitForProcess(concatProcess, audioProgress,
-                            concatDiagnostics, concatCancelled) && validOutputFile(tempAudioPath);
-                        if (!audioPrepared && !concatCancelled)
-                            mLastError = QStringLiteral("Edited audio concatenation failed: %1")
-                                .arg(QString::fromUtf8(concatDiagnostics).trimmed());
-                    }
-                }
-            }
-        } else {
-            audioPrepared = audioPlayer->exportAudioToFile(
-                tempAudioPath, startSample, sampleCount,
-                [&audioProgress](int current, int total) {
-                    audioProgress.setRange(0, std::max(1, total));
-                    audioProgress.setValue(
-                        std::clamp(current, 0, std::max(1, total)));
-                    QApplication::processEvents(
-                        QEventLoop::AllEvents, kProcessPollMs);
-                    return !audioProgress.wasCanceled();
-                }, &processing.audioFilters);
-        }
-        const bool audioCancelled = audioProgress.wasCanceled();
-        audioProgress.close();
-
-        if (audioPrepared) {
-            qDebug() << "[Exporter] Successfully prepared audio stream for export (samples:" << startSample << "count:" << sampleCount << "):" << tempAudioPath;
-        } else {
-            if (audioCancelled) mWasCancelled = true;
-            if (!audioCancelled && parentWidget) {
-                QMessageBox::critical(parentWidget, "Audio Export Error",
-                                      "The requested processed audio range could not be decoded. "
-                                      "The video export was stopped to avoid silently dropping audio.");
-            }
-            return false;
-        }
+        if (!prepareProcessedAudio(tempAudioPath, outputDurationSeconds,
+                QStringLiteral("Preparing processed audio..."))) return false;
     }
 
     // 2. FFmpeg input arguments (ALL inputs before encoding flags)
@@ -2814,6 +2737,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     bool writeFailed = false;
     ffmpeg.start("ffmpeg", args);
     if (!ffmpeg.waitForStarted(3000)) {
+        mLastError = QStringLiteral("The FFmpeg video encoder could not be started: %1")
+            .arg(ffmpeg.errorString());
         qWarning() << "[Exporter] Failed to start ffmpeg process.";
         removePartialOutput(processOutputPath);
         return false;
@@ -2850,6 +2775,11 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             || !timestampedWriter.open(ffmpeg, progress, diagnostics, cancelled,
                                        outW, outH, inputPixelFormat,
                                        terminalFrameRate, outputSampleAspect)) {
+            if (cancelled) mWasCancelled = true;
+            else mLastError = inputPixelFormat == AV_PIX_FMT_NONE
+                ? QStringLiteral("The timestamped video input pixel format is unsupported.")
+                : QStringLiteral("The timestamped video input could not be initialized: %1")
+                    .arg(QString::fromUtf8(diagnostics).trimmed());
             stopProcess(ffmpeg);
             removePartialOutput(processOutputPath);
             return false;
@@ -3084,6 +3014,12 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             errOutput = "The completed output could not be committed to its destination.";
         if (writeFailed && errOutput.trimmed().isEmpty())
             errOutput = "The FFmpeg input pipe closed before all frames were written.";
+        if (!cancelled && errOutput.trimmed().isEmpty()) {
+            errOutput = doneCount != framesToExport
+                ? QStringLiteral("The export produced %1 of %2 requested video frames.")
+                    .arg(doneCount).arg(framesToExport)
+                : QStringLiteral("FFmpeg did not produce a valid processed video output file.");
+        }
         qWarning() << "[Exporter] FFmpeg export error:" << errOutput;
         mLastError = errOutput.trimmed();
         VDLogWindow::instance(parentWidget)->appendLog(QString("[Export Error] %1").arg(errOutput));

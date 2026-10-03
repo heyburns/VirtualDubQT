@@ -34,6 +34,16 @@ bool VDQtAudioRangesForTimeline(
     QList<QPair<int64_t, int64_t>> *ranges, QString *errorMessage,
     const std::function<bool(int, int)>& progress = {});
 
+// Prepare one source-precision soundtrack for a video mux or later encoder.
+// Cuts are joined before rendering the immutable effect chain once. The WAV
+// intermediate is not quantized to the eventual codec's integer bit depth.
+bool VDQtPrepareAudioWav(
+    VDQtAudioPlayer& player, const QString& outputPath,
+    const QList<QPair<int64_t, int64_t>>& sampleRanges,
+    const QList<VDAudioFilterInstance>& filters,
+    const std::function<bool(int, int)>& progress = {},
+    QString *errorMessage = nullptr, bool padToRequestedLength = true);
+
 bool VDQtExportAudio(
     VDQtAudioPlayer& player, const VDQtAudioExportRequest& request,
     const std::function<bool(int, int)>& progress = {}, QString *errorMessage = nullptr);

@@ -153,6 +153,8 @@ public:
     bool exportAudioToFile(const QString &outputPath, int64_t startSample = 0, int64_t sampleCount = -1, std::function<bool(int progress, int total)> progressCallback = nullptr,
                            const QList<VDAudioFilterInstance> *filterChain = nullptr,
                            bool padToRequestedLength = true);
+    // Preserve source precision while assembling cuts, then render effects once
+    // on the joined soundtrack so stateful filters do not restart at every cut.
     bool exportAudioRangesToFile(
         const QString& outputPath,
         const QList<QPair<int64_t, int64_t>>& sampleRanges,

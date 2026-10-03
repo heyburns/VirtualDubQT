@@ -8,10 +8,10 @@
 #include <limits>
 
 // Estimate the PCM files that can coexist with a two-pass video intermediate.
-// Extraction writes at most 32-bit PCM; filtered WAVs write 16/24-bit PCM. Four
-// bytes/channel is conservative for both. Edited exports retain segment files
-// while concatenating one final WAV; filtered extraction can retain its original
-// WAV too. This is an estimate, not a disk reservation or exact encoder promise.
+// Raw extraction preserves source precision, including double PCM. Edited
+// exports retain source segments while joining one raw WAV; effects then render
+// that soundtrack once to double PCM. Eight bytes/channel covers each file.
+// This is an estimate, not a disk reservation or exact encoder promise.
 inline bool VDQtEstimatePcmTemporaryStorage(double durationSeconds, int sourceRate,
         int sourceChannels, const QList<VDAudioFilterInstance>& filters,
         qint64 segments, qint64 *requiredBytes, QString *error = nullptr) {
@@ -56,9 +56,8 @@ inline bool VDQtEstimatePcmTemporaryStorage(double durationSeconds, int sourceRa
             break;
         }
         case VDAudioFilterType::Chorus:
-            // Delay and depth are individually bounded to one second. Each
-            // separately rendered edit can have a delayed tail before concat.
-            filteredSeconds += 2.L * segments;
+            // The composed chain emits one tail, not a tail for every cut.
+            filteredSeconds += 2.L;
             break;
         default:
             break;
@@ -67,19 +66,19 @@ inline bool VDQtEstimatePcmTemporaryStorage(double durationSeconds, int sourceRa
             return fail(QStringLiteral("The filtered temporary audio duration is too large."));
     }
     qint64 sourceBytes = 0, filteredBytes = 0;
-    if (!VDQtCheckedRoundedNonnegative(std::ceil(sourceSeconds * sourceRate * sourceChannels * 4), &sourceBytes)
+    if (!VDQtCheckedRoundedNonnegative(std::ceil(sourceSeconds * sourceRate * sourceChannels * 8), &sourceBytes)
         || !VDQtCheckedRoundedNonnegative(std::ceil(
-            (filteredSeconds * actualRate + (hasEffects ? 1024.L * segments : 0)) * filteredChannels * 4), &filteredBytes))
+            (filteredSeconds * actualRate + (hasEffects ? 1024.L : 0)) * filteredChannels * 8), &filteredBytes))
         return fail(QStringLiteral("The temporary audio storage estimate is too large."));
     constexpr qint64 maximum = std::numeric_limits<qint64>::max();
     const qint64 copies = segments > 1 ? 2 : 1;
-    if (filteredBytes > maximum / copies)
+    if (sourceBytes > maximum / copies)
         return fail(QStringLiteral("The retained temporary audio files are too large."));
-    qint64 total = filteredBytes * copies;
+    qint64 total = sourceBytes * copies;
     if (hasEffects) {
-        if (sourceBytes > maximum - total)
+        if (filteredBytes > maximum - total)
             return fail(QStringLiteral("The temporary audio extraction is too large."));
-        total += sourceBytes;
+        total += filteredBytes;
     }
     // WAV/RF64 headers, a concat manifest and per-file rounding/headroom. The
     // video/storage estimator adds the shared fixed safety reserve separately.

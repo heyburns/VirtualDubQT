@@ -8,12 +8,14 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QListWidget>
 #include <QProcess>
+#include <QPushButton>
 #include <QSpinBox>
 #include <QTimer>
 #include <cmath>
@@ -38,7 +40,7 @@ QByteArray bytes(const QString& path) {
 QJsonObject probe(const QString& path) {
     QProcess process;
     process.start("ffprobe", {"-v", "error", "-select_streams", "v:0", "-count_frames",
-        "-show_entries", "stream=codec_name,profile,nb_read_frames", "-of", "json", path});
+        "-show_entries", "stream=codec_name,profile,nb_read_frames,has_b_frames", "-of", "json", path});
     if (!process.waitForStarted(5000) || !process.waitForFinished(15000)) {
         process.kill();
         process.waitForFinished(5000);
@@ -90,6 +92,19 @@ bool policyContracts() {
         "CRF zero is lossless too and requires a compatible x264 profile");
     passed &= check(VDQtCodecEngine::getDefaultVideoParamsForCodec("  LIBX264_10BIT  ").codecId
         == "libx264_10bit", "encoder defaults normalize aliases consistently with command generation");
+
+    params = VDQtCodecEngine::getDefaultVideoParamsForCodec("libx264");
+    params.profile = "baseline";
+    params.bFrames = 3;
+    arguments = {"unchanged"};
+    passed &= check(!VDQtCodecEngine::buildFfmpegVideoEncodeArguments(params, false, &arguments, &error)
+        && arguments == QStringList{"unchanged"} && error.contains("baseline")
+        && !VDQtCodecEngine::buildFfmpegVideoEncodeArguments(params, true, &arguments, &error),
+        "saved baseline/B-frame combinations are diagnosed rather than silently overridden by x264");
+    params.bFrames = 0;
+    passed &= check(VDQtCodecEngine::buildFfmpegVideoEncodeArguments(params, false, &arguments, &error)
+        && option(arguments, "-bf") == "0" && option(arguments, "-profile:v") == "baseline",
+        "legal baseline encoding retains an explicit zero B-frame control");
 
     params = VDQtCodecEngine::getDefaultVideoParamsForCodec("libx265_lossless");
     params.tune = "grain";
@@ -173,6 +188,7 @@ bool dialogContracts() {
             continue;
         }
         list->setCurrentRow(row);
+        const auto savedBefore = VDQtCodecEngine::instance().getVideoParamsForCodec(id);
         bool inspected = false;
         QTimer::singleShot(0, [&]() {
             auto *modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
@@ -188,14 +204,54 @@ bool dialogContracts() {
                     && modal->findChild<QComboBox*>("videoPreset")
                     && modal->findChild<QComboBox*>("videoProfile");
             } else {
+                auto *profile = modal->findChild<QComboBox*>("videoProfile");
+                auto *bFrames = modal->findChild<QSpinBox*>("videoBFrames");
                 inspected = mode && mode->findData("cqp") >= 0 && mode->findData("lossless") >= 0
-                    && modal->findChild<QComboBox*>("videoProfile")
-                    && modal->findChild<QComboBox*>("videoTune");
+                    && profile && bFrames && modal->findChild<QComboBox*>("videoTune");
+                if (profile && bFrames) {
+                    profile->setCurrentIndex(profile->findData("main"));
+                    bFrames->setValue(3);
+                    profile->setCurrentIndex(profile->findData("baseline"));
+                    inspected &= !bFrames->isEnabled() && bFrames->value() == 0;
+                    profile->setCurrentIndex(profile->findData("main"));
+                    inspected &= bFrames->isEnabled();
+                }
             }
             modal->reject();
         });
         const bool invoked = QMetaObject::invokeMethod(&dialog, "onConfigureClicked", Qt::DirectConnection);
-        passed &= check(invoked && inspected, "codec dialogs expose only effective encoder-specific controls");
+        const auto savedAfter = VDQtCodecEngine::instance().getVideoParamsForCodec(id);
+        passed &= check(invoked && inspected && savedBefore.profile == savedAfter.profile
+            && savedBefore.bFrames == savedAfter.bFrames,
+            "codec dialogs expose effective controls without persisting canceled profile/B-frame changes");
+    }
+    // Configure is an explicit repair boundary: accepting an old invalid saved
+    // baseline/B-frame request clears that request; rejecting the dialog does not.
+    for (int row = 0; row < list->count(); ++row) {
+        if (list->item(row)->data(Qt::UserRole).toString() != "libx264") continue;
+        list->setCurrentRow(row);
+        auto& engine = VDQtCodecEngine::instance();
+        const auto original = engine.getVideoParamsForCodec("libx264");
+        auto saved = VDQtCodecEngine::getDefaultVideoParamsForCodec("libx264");
+        saved.profile = "baseline";
+        saved.bFrames = 3;
+        engine.setVideoParamsForCodec("libx264", saved);
+        bool repaired = false;
+        QTimer::singleShot(0, [&]() {
+            auto *modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!modal) return;
+            auto *frames = modal->findChild<QSpinBox*>("videoBFrames");
+            auto *buttons = modal->findChild<QDialogButtonBox*>();
+            repaired = frames && !frames->isEnabled() && frames->value() == 0 && buttons;
+            if (repaired) buttons->button(QDialogButtonBox::Ok)->click();
+            else modal->reject();
+        });
+        const bool invoked = QMetaObject::invokeMethod(&dialog, "onConfigureClicked", Qt::DirectConnection);
+        const auto corrected = engine.getVideoParamsForCodec("libx264");
+        passed &= check(invoked && repaired && corrected.profile == "baseline" && corrected.bFrames == 0,
+            "accepting Configure explicitly repairs an unsupported saved baseline/B-frame combination");
+        engine.setVideoParamsForCodec("libx264", original);
+        break;
     }
     return passed;
 }
@@ -253,6 +309,7 @@ bool actualEncoding(VDQtTestFixtures& fixtures) {
         QByteArray log;
         const QString output = encode(params, "h264-profile-vbv", &log);
         passed &= check(!output.isEmpty() && probe(output).value("profile").toString().contains("Baseline")
+            && probe(output).value("has_b_frames").toInt(-1) == 0
             && log.contains("vbv_maxrate=900") && log.contains("vbv_bufsize=1800"),
             "real H.264 stream has the selected profile and encoder-confirmed VBV settings");
     }

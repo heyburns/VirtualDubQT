@@ -379,6 +379,16 @@ if (BUILD_TESTING)
         LABELS "export;vfr;pixels;contracts" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
 
+    foreach(audio_export_contract IN ITEMS edited_audio_effects exporter_diagnostics)
+        add_executable(${audio_export_contract}_tests tests/test_${audio_export_contract}.cpp)
+        target_link_libraries(${audio_export_contract}_tests PRIVATE vdqt_core)
+        vdqt_enable_diagnostics(${audio_export_contract}_tests)
+        add_test(NAME ${audio_export_contract}_tests COMMAND ${audio_export_contract}_tests)
+        set_tests_properties(${audio_export_contract}_tests PROPERTIES
+            LABELS "audio;export;contracts" TIMEOUT 120
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    endforeach()
+
     foreach(geometry_contract IN ITEMS filter_geometry filter_geometry_table filter_resampling filter_channel_lut)
         add_executable(${geometry_contract}_tests tests/test_${geometry_contract}.cpp)
         target_link_libraries(${geometry_contract}_tests PRIVATE vdqt_core)
@@ -388,6 +398,25 @@ if (BUILD_TESTING)
             LABELS "filters;geometry;contracts" TIMEOUT 60
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
     endforeach()
+
+    add_executable(filter_blur_tests tests/test_filter_blur.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(filter_blur_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(filter_blur_tests)
+    add_test(NAME filter_blur_tests COMMAND filter_blur_tests)
+    set_tests_properties(filter_blur_tests PROPERTIES
+        # The independent radius-48 scalar oracle is deliberately expensive,
+        # especially under sanitizers; timing is not this test's assertion.
+        LABELS "filters;blur;performance;contracts" TIMEOUT 300
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    add_executable(filter_interpolate_tests tests/test_filter_interpolate.cpp)
+    target_link_libraries(filter_interpolate_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(filter_interpolate_tests)
+    add_test(NAME filter_interpolate_tests COMMAND filter_interpolate_tests)
+    set_tests_properties(filter_interpolate_tests PROPERTIES
+        LABELS "filters;temporal;contracts" TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
 
     add_executable(codec_controls_tests tests/test_codec_controls.cpp
         tests/support/VDQtTestFixtures.cpp)
@@ -432,7 +461,7 @@ if (BUILD_TESTING)
             LABELS "packaging;runtime;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -469,6 +498,10 @@ if (BUILD_TESTING)
     # Large integration suite covering workflows that cross module boundaries.
     add_executable(stabilization_tests
         src/VirtualDub/test_stabilization.cpp
+        src/VirtualDub/VDQtAudioExport.cpp
+        src/VirtualDub/VDQtAudioExport.h
+        src/VirtualDub/VDQtOutputTransaction.cpp
+        src/VirtualDub/VDQtOutputTransaction.h
         src/VirtualDub/VDQtFrameDecodeWorker.cpp
         src/VirtualDub/VDQtFrameDecodeWorker.h
         src/VirtualDub/VDQtAudioPlayer.cpp
@@ -562,6 +595,8 @@ if (BUILD_TESTING)
 
     add_executable(audio_backend_tests
         src/VirtualDub/test_audio_backend.cpp
+        src/VirtualDub/VDQtSourceSafety.cpp
+        src/VirtualDub/VDQtSourceSafety.h
         src/VirtualDub/VDQtAudioPlayer.cpp
         src/VirtualDub/VDQtAudioPlayer.h
         src/VirtualDub/VDQtAudioFilterSystem.cpp

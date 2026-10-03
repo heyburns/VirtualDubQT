@@ -7,6 +7,7 @@
 #include "VirtualDub/VDQtFrameDecodeWorker.h"
 #include "VirtualDub/VDQtAudioExport.h"
 #include "VirtualDub/VDQtFilterFrameContext.h"
+#include "VirtualDub/VDQtWaveform.h"
 
 #include <QApplication>
 #include <QDir>
@@ -838,15 +839,17 @@ bool audioSnapshot(VDQtTestFixtures& fixtures) {
             return true;
         })) return check(false, "range audio snapshot exports");
     for (const QString& path : {single, ranges}) {
-        const auto wav = readFile(path);
-        const auto data = wav.indexOf("data", 12);
-        if (!check(data >= 0 && data + 8 <= wav.size(), "WAV has PCM data")) return false;
-        const quint32 bytes = qFromLittleEndian<quint32>(wav.constData() + data + 4);
-        if (!check(bytes == 2048 && data + 8 + bytes <= wav.size(), "snapshot has exactly 1024 samples")) return false;
-        for (quint32 offset = 0; offset < bytes; offset += 2) {
-            const qint16 sample = qFromLittleEndian<qint16>(wav.constData() + data + 8 + offset);
-            if (!check(std::abs(int(sample)) <= 1, "captured mute survives filter changes in callbacks")) return false;
-        }
+        // Processed WAVs deliberately retain float64 precision now. Count
+        // samples from their actual format, not the previous integer16 layout.
+        VDQtWaveformData waveform;
+        QString error;
+        if (!check(VDQtReadWaveformPeaks(path, 32, &waveform, &error)
+                && waveform.sampleFrames == 1024 && waveform.channels == 1
+                && waveform.sampleRate == 48000 && waveform.floatingPoint
+                && waveform.containerBits == 64, "snapshot has exactly 1024 high-precision samples")) return false;
+        for (double peak : waveform.peaks)
+            if (!check(peak <= 1.0 / 32768,
+                    "captured mute survives filter changes in callbacks")) return false;
     }
     return true;
 }
@@ -1035,7 +1038,7 @@ bool waveformPreview(VDQtTestFixtures& fixtures) {
                                "all waveform success/cancel/error paths preserve original media");
 }
 
-bool exportPreview(VDQtTestFixtures& fixtures) {
+bool exportPreview(VDQtTestFixtures& fixtures, int videoMode = VideoMode_FullProcessing) {
     VDQtVideoDecoder reference;
     if (!reference.openFile(fixtures.mp4)) return false;
     const QImage raw = reference.getFrameImage(3).convertToFormat(QImage::Format_RGBA8888);
@@ -1049,10 +1052,10 @@ bool exportPreview(VDQtTestFixtures& fixtures) {
     window.show();
     QString error;
     if (!window.openVideoFile(fixtures.mp4)
-        || !window.runAutomationText(
-            "VirtualDub.video.SetMode(3); VirtualDub.audio.SetSource(0); "
+        || !window.runAutomationText(QString(
+            "VirtualDub.video.SetMode(%1); VirtualDub.audio.SetSource(0); "
             "VirtualDub.subset.Clear(); VirtualDub.subset.AddRange(16,4); VirtualDub.subset.AddRange(0,4); "
-            "VirtualDub.video.filters.Clear(); VirtualDub.video.filters.Add(\"invert\");",
+            "VirtualDub.video.filters.Clear(); VirtualDub.video.filters.Add(\"invert\");").arg(videoMode),
             fixtures.directory.path(), &error)) return false;
     VDQtCodecEngine::instance().setVideoParams(VDQtCodecEngine::getDefaultVideoParamsForCodec("ffv1"));
     VDSaveVideoSessionConfig save;
@@ -1066,6 +1069,7 @@ bool exportPreview(VDQtTestFixtures& fixtures) {
     position->SetPosition(1);
     const QString output = fixtures.directory.filePath("edited-export-preview.mkv");
     bool chosen = false, completed = false, correct = true;
+    QImage previousOutput;
     QTimer responder;
     responder.setInterval(5);
     QObject::connect(&responder, &QTimer::timeout, &window, [&] {
@@ -1074,6 +1078,9 @@ bool exportPreview(VDQtTestFixtures& fixtures) {
                 if (!dialog->isVisible() || chosen) continue;
                 const auto lines = dialog->findChildren<QLineEdit*>();
                 if (lines.size() != 1) { correct = false; dialog->reject(); continue; }
+                // Non-full modes update only Input, including a Fast request
+                // that must render edits through Normal Recompress internally.
+                previousOutput = outputPreview->frameImage();
                 lines.first()->setText(output);
                 chosen = true;
                 dialog->accept();
@@ -1081,7 +1088,9 @@ bool exportPreview(VDQtTestFixtures& fixtures) {
                 if (!message->isVisible()) continue;
                 completed = message->windowTitle() == "Export Complete";
                 const bool rawMatches = inputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888) == raw;
-                const bool filteredMatches = outputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888) == filtered;
+                const bool filteredMatches = outputPreview->frameImage().convertToFormat(QImage::Format_RGBA8888)
+                    == (videoMode == VideoMode_FullProcessing ? filtered
+                        : previousOutput.convertToFormat(QImage::Format_RGBA8888));
                 const bool finalState = completed && position->GetPosition() == 7
                     && rawMatches && filteredMatches
                     && !window.menuBar()->isEnabled() && !position->isEnabled();
@@ -1126,6 +1135,79 @@ bool exportPreview(VDQtTestFixtures& fixtures) {
     VDQtVideoDecoder encoded;
     return check(encoded.openFile(output) && encoded.ensureFrameIndex().totalFrames == 8
         && !encoded.getFrameImage(7).isNull(), "the preview-tested export contains all edited frames");
+}
+
+bool playbackTransport(VDQtTestFixtures& fixtures) {
+    const QString source = fixtures.directory.filePath("transport-audio.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=24:duration=3",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-c:v", "ffv1", "-c:a", "pcm_s16le", source})) return false;
+    const QByteArray original = readFile(source);
+    VDQtVideoDecoder sourceReference;
+    if (!sourceReference.openFile(source)) return false;
+    const QImage zero = sourceReference.getFrameImage(0).convertToFormat(QImage::Format_RGBA8888);
+    sourceReference.close();
+    if (zero.isNull()) return false;
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(source)) return false;
+    QString error;
+    if (!window.runAutomationText("VirtualDub.video.filters.Clear(); "
+            "VirtualDub.video.filters.Add(\"invert\");", fixtures.directory.path(), &error)) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    auto *input = window.findChild<VDVideoDisplayWidget*>("inputPreview");
+    auto *output = window.findChild<VDVideoDisplayWidget*>("outputPreview");
+    if (!position || !input || !output || !waitFor([&] { return !input->frameImage().isNull(); })) return false;
+    const auto transport = [&](int code) {
+        return QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection, Q_ARG(int, code));
+    };
+    QTimer *playback = nullptr;
+    for (int mode : {VDQT_PCN_PLAY, VDQT_PCN_PLAYPREVIEW}) {
+        position->SetPosition(0);
+        // Wait for the asynchronous seek itself: comparing against the prior
+        // mode's last picture could falsely accept a preview stuck at frame 0.
+        if (!waitFor([&] {
+                return input->frameImage().convertToFormat(QImage::Format_RGBA8888) == zero;
+            })) return false;
+        if (!transport(mode)) return false;
+        for (QTimer *timer : window.findChildren<QTimer*>())
+            if (timer->isActive() && timer->timerType() == Qt::PreciseTimer) playback = timer;
+        if (!check(playback && waitFor([&] {
+                return position->GetPosition() >= 5
+                    && input->frameImage().convertToFormat(QImage::Format_RGBA8888) != zero;
+            }), "both real playback modes advance video from frame zero with audio present")) return false;
+        if (mode == VDQT_PCN_PLAYPREVIEW) {
+            VDQtFilterSystem reference;
+            reference.replaceActiveChain(invertChain());
+            if (!check(waitFor([&] {
+                    return !output->frameImage().isNull()
+                        && reference.processFrame(input->frameImage()).convertToFormat(QImage::Format_RGBA8888)
+                            == output->frameImage().convertToFormat(QImage::Format_RGBA8888);
+                }), "Play Preview presents the corresponding filtered frame")) return false;
+        }
+        if (!transport(mode) || !check(!playback->isActive(), "repeating either play action pauses its shared clock")) return false;
+        const qint64 paused = position->GetPosition();
+        const QImage pausedImage = input->frameImage();
+        if (!transport(mode) || !check(playback->isActive() && waitFor([&] {
+                return position->GetPosition() > paused && input->frameImage() != pausedImage;
+            }), "both play actions resume from the paused edited position")) return false;
+        if (!transport(VDQT_PCN_STOP) || !check(!playback->isActive(), "Stop halts either playback mode")) return false;
+    }
+    // Queue frame-zero requests without waiting for each decode. This exercises
+    // the real cancellation/worker path behind rapid toolbar clicks, not just
+    // a clock helper or a test-only playback implementation.
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        position->SetPosition(0);
+        if (!transport(VDQT_PCN_PLAY) || !playback->isActive()
+            || !transport(VDQT_PCN_PLAYPREVIEW) || playback->isActive()
+            || !transport(VDQT_PCN_PLAYPREVIEW) || !playback->isActive()
+            || !transport(VDQT_PCN_STOP) || playback->isActive()) return false;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+    }
+    const bool stable = invoke(window, "onFileClose") && window.menuBar()->isEnabled()
+        && !playback->isActive() && readFile(source) == original;
+    return check(stable, "rapid Play/Preview/Stop transitions preserve the source and close cleanly");
 }
 
 bool queueIsolation(VDQtTestFixtures& fixtures) {
@@ -2469,6 +2551,8 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "audio") return audioSnapshot(fixtures);
     if (scenario == "waveform") return waveformPreview(fixtures);
     if (scenario == "export_preview") return exportPreview(fixtures);
+    if (scenario == "export_preview_fallback") return exportPreview(fixtures, VideoMode_FastRecompress);
+    if (scenario == "playback_transport") return playbackTransport(fixtures);
     if (scenario == "audio_inclusion") return audioInclusion(fixtures);
     if (scenario == "audio_export") return audioExportContracts(fixtures);
     if (scenario == "queue") return queueIsolation(fixtures);

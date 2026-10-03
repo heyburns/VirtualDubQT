@@ -1,5 +1,6 @@
 // One effects backend for live and offline audio. The live graph consumes
 // source-rate packed S16, then converts only its final output to the sink format.
+#include <QString>
 #include "VDQtAudioFilterSystem.h"
 
 #include <QUuid>
@@ -593,7 +594,10 @@ QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate, QString *
         if (!filter.enabled) continue;
         switch (filter.type) {
         case VDAudioFilterType::Gain:
-            graph << QString("volume=%1dB").arg(number(
+            // Default volume processing is float32, which discards low bits of
+            // integer32/double sources before offline compression is selected.
+            // The live graph still negotiates its declared sink PCM format.
+            graph << QString("volume=%1dB:precision=double").arg(number(
                 filter.params.value(QStringLiteral("decibels"), 0.0)));
             break;
         case VDAudioFilterType::LowPass:

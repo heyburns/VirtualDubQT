@@ -6,6 +6,7 @@
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtTimingMath.h"
+#include "VDQtSourceSafety.h"
 
 #include <QAudioDevice>
 #include <QDataStream>
@@ -876,16 +877,21 @@ struct PcmOutputSpec {
     bool floatingPoint = false;
 };
 
-PcmOutputSpec choosePcmOutput(AVSampleFormat sourceFormat, int sourceBits)
+PcmOutputSpec chooseOfflinePcmOutput(AVSampleFormat sourceFormat, int sourceBits)
 {
     PcmOutputSpec result;
     const AVSampleFormat packed = av_get_packed_sample_fmt(sourceFormat);
     if (packed == AV_SAMPLE_FMT_FLT || packed == AV_SAMPLE_FMT_DBL) {
-        result.sampleFormat = AV_SAMPLE_FMT_FLT;
-        result.containerBits = 32;
-        result.validBits = 32;
+        result.sampleFormat = packed;
+        result.containerBits = packed == AV_SAMPLE_FMT_DBL ? 64 : 32;
+        result.validBits = result.containerBits;
         result.floatingPoint = true;
-    } else if (sourceBits > 16 || packed == AV_SAMPLE_FMT_S32 || packed == AV_SAMPLE_FMT_S64) {
+    } else if (packed == AV_SAMPLE_FMT_S64 || sourceBits > 32) {
+        // WAV consumers/effects and swresample do not provide a proven exact
+        // signed64 path here. Fail offline export instead of silently reducing
+        // it to signed32. Floating64 above has its own supported PCM path.
+        result.sampleFormat = AV_SAMPLE_FMT_NONE;
+    } else if (sourceBits > 16 || packed == AV_SAMPLE_FMT_S32) {
         result.sampleFormat = AV_SAMPLE_FMT_S32;
         result.containerBits = 32;
         result.validBits = std::clamp(sourceBits > 0 ? sourceBits : 32, 17, 32);
@@ -1081,7 +1087,7 @@ bool reportProgress(const std::function<bool(int, int)> &callback,
 
 bool transcodeTemporaryWav(const QString &wavPath,
                            const QString &outputPath,
-                           int sourceBits,
+                           const PcmOutputSpec& source,
                            const QString& filterGraph,
                            const std::function<bool(int, int)> &progressCallback)
 {
@@ -1095,9 +1101,15 @@ bool transcodeTemporaryWav(const QString &wavPath,
         arguments << "-c:a" << "flac";
     } else if (outputPath.endsWith(".aiff", Qt::CaseInsensitive) ||
                outputPath.endsWith(".aif", Qt::CaseInsensitive)) {
-        arguments << "-c:a" << (sourceBits > 16 ? "pcm_s24be" : "pcm_s16be");
+        arguments << "-c:a" << (source.floatingPoint
+            ? (source.containerBits > 32 ? "pcm_f64be" : "pcm_f32be")
+            : (source.validBits > 24 ? "pcm_s32be"
+                : source.validBits > 16 ? "pcm_s24be" : "pcm_s16be"));
     } else if (!filterGraph.isEmpty()) {
-        arguments << "-c:a" << (sourceBits > 16 ? "pcm_s24le" : "pcm_s16le");
+        // This is an intermediate, not the final compression choice. A double
+        // PCM container retains signed 32-bit source values and effect output
+        // without prematurely quantizing to 16/24-bit integer or float32.
+        arguments << "-c:a" << "pcm_f64le";
     } else {
         arguments << "-c:a" << "copy";
     }
@@ -2921,7 +2933,7 @@ bool VDQtAudioPlayer::exportAudioToFile(
 #endif
     if (!mHasAudio || outputPath.isEmpty()) return false;
     if (!mFilePath.isEmpty() &&
-        QFileInfo(outputPath).absoluteFilePath() == QFileInfo(mFilePath).absoluteFilePath()) {
+        VDQtSourceSafety::pathsReferToSameFile(outputPath, mFilePath)) {
         qWarning() << "[VDQtAudioPlayer] Refusing to overwrite the active source file.";
         return false;
     }
@@ -2972,7 +2984,7 @@ bool VDQtAudioPlayer::exportAudioToFile(
     }
 
     bool extractionSucceeded = false;
-    int exportedBits = mBitsPerSample;
+    PcmOutputSpec exportedSpec;
     const int extractionProgressMaximum = needsTranscode ? 90 : 100;
 
     if (mIsAvsAudio && mClip && mVi) {
@@ -2980,7 +2992,8 @@ bool VDQtAudioPlayer::exportAudioToFile(
         if (bytesPerChannel <= 0) return false;
         const int containerBits = bytesPerChannel * 8;
         const bool floatingPoint = mVi->sample_type == AVS_SAMPLE_FLOAT;
-        exportedBits = containerBits;
+        exportedSpec.containerBits = exportedSpec.validBits = containerBits;
+        exportedSpec.floatingPoint = floatingPoint;
         AVChannelLayout layout = {};
         av_channel_layout_default(&layout, mChannels);
 
@@ -3059,9 +3072,13 @@ bool VDQtAudioPlayer::exportAudioToFile(
             return false;
         }
 
-        const PcmOutputSpec spec = choosePcmOutput(decoder.sourceSampleFormat(),
+        const PcmOutputSpec spec = chooseOfflinePcmOutput(decoder.sourceSampleFormat(),
                                                    decoder.sourceBitsPerSample());
-        exportedBits = spec.validBits;
+        if (spec.sampleFormat == AV_SAMPLE_FMT_NONE) {
+            qWarning() << "[VDQtAudioPlayer] Signed PCM above 32 bits is not supported for offline extraction.";
+            return false;
+        }
+        exportedSpec = spec;
         if (!decoder.configureOutput(spec.sampleFormat,
                                      decoder.inputRate(),
                                      decoder.sourceLayout())) {
@@ -3257,14 +3274,16 @@ bool VDQtAudioPlayer::exportAudioToFile(
     if (needsTranscode) {
         outputSucceeded = transcodeTemporaryWav(wavPath,
                                                 stagedOutputPath,
-                                                exportedBits,
+                                                exportedSpec,
                                                 audioFilterGraph,
                                                 progressCallback);
     } else if (progressCallback && !progressCallback(100, 100)) {
         outputSucceeded = false;
     }
 
-    if (!outputSucceeded || !replaceWithStagedFile(stagedOutputPath, outputPath)) {
+    if (!outputSucceeded
+        || (!mFilePath.isEmpty() && VDQtSourceSafety::pathsReferToSameFile(outputPath, mFilePath))
+        || !replaceWithStagedFile(stagedOutputPath, outputPath)) {
         QFile::remove(stagedOutputPath);
         return false;
     }
@@ -3273,25 +3292,41 @@ bool VDQtAudioPlayer::exportAudioToFile(
 
 bool VDQtAudioPlayer::exportAudioRangesToFile(
     const QString& outputPath,
-    const QList<QPair<int64_t, int64_t>>& sampleRanges,
+    const QList<QPair<int64_t, int64_t>>& inputRanges,
     std::function<bool(int progress, int total)> progressCallback,
     const QList<VDAudioFilterInstance> *filterChain,
     bool padToRequestedLength)
 {
+    const auto sampleRanges = inputRanges; // Before event-pumping callbacks.
     if (sampleRanges.isEmpty() || outputPath.isEmpty()) return false;
+    if (!mFilePath.isEmpty() && VDQtSourceSafety::pathsReferToSameFile(outputPath, mFilePath))
+        return false;
     const QList<VDAudioFilterInstance> filters = filterChain ? *filterChain
         : VDQtAudioFilterSystem::instance().activeChain();
-    filterChain = &filters; // One immutable snapshot for every extracted range.
+    // Validate the whole request before extracting any segment. Effects belong
+    // to the composed soundtrack, not each cut: delay/chorus/resampler history
+    // must continue across edit boundaries and their tail is emitted only once.
+    VDQtAudioFilterSystem filterSystem;
+    filterSystem.replaceActiveChain(filters);
+    QString filterError;
+    const QString filterGraph = filterSystem.ffmpegFilterGraph(mSampleRate, &filterError);
+    if (!filterError.isEmpty()) return false;
+    qint64 requestedSamples = 0;
     for (const auto& range : sampleRanges) {
-        if (range.first < 0 || range.second <= 0) return false;
+        if (range.first < 0 || range.second <= 0
+            || range.first > std::numeric_limits<qint64>::max() - range.second
+            || requestedSamples > std::numeric_limits<qint64>::max() - range.second) return false;
+        requestedSamples += range.second;
     }
     if (sampleRanges.size() == 1) {
         return exportAudioToFile(outputPath, sampleRanges.first().first,
                                  sampleRanges.first().second,
-                                 std::move(progressCallback), filterChain, padToRequestedLength);
+                                 std::move(progressCallback), &filters, padToRequestedLength);
     }
     QTemporaryDir directory;
     if (!directory.isValid()) return false;
+    const QList<VDAudioFilterInstance> noFilters;
+    const int extractionMaximum = filterGraph.isEmpty() ? 90 : 75;
     QStringList segmentPaths;
     for (int index = 0; index < sampleRanges.size(); ++index) {
         const QString segmentPath = directory.filePath(
@@ -3304,9 +3339,9 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
                     const double fraction = total > 0
                         ? static_cast<double>(current) / total : 0.0;
                     const int aggregate = static_cast<int>(std::llround(
-                        90.0 * (index + fraction) / sampleRanges.size()));
-                    return progressCallback(std::clamp(aggregate, 0, 90), 100);
-                }, filterChain, padToRequestedLength)) {
+                        extractionMaximum * (index + fraction) / sampleRanges.size()));
+                    return progressCallback(std::clamp(aggregate, 0, extractionMaximum), 100);
+                }, &noFilters, padToRequestedLength)) {
             return false;
         }
         segmentPaths.append(segmentPath);
@@ -3327,6 +3362,10 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
     if (!staged.open()) return false;
     const QString stagedPath = staged.fileName();
     staged.close();
+    const bool needsTranscode = !outputPath.endsWith(".wav", Qt::CaseInsensitive)
+        || !filterGraph.isEmpty();
+    const QString joinedPath = needsTranscode
+        ? directory.filePath(QStringLiteral("joined.wav")) : stagedPath;
     QProcess process;
     process.setWorkingDirectory(directory.path());
     process.setProcessChannelMode(QProcess::MergedChannels);
@@ -3338,12 +3377,15 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
          QStringLiteral("-safe"), QStringLiteral("1"),
          QStringLiteral("-i"), QStringLiteral("segments.ffconcat"),
          QStringLiteral("-c:a"), QStringLiteral("copy"),
-         QStringLiteral("-y"), stagedPath});
+         QStringLiteral("-y"), joinedPath});
     if (!process.waitForStarted(5000)) return false;
     bool cancelled = false;
+    QByteArray diagnostics;
     // An already-completed child also makes waitForFinished() return false.
     while (process.state() != QProcess::NotRunning && !process.waitForFinished(50)) {
-        if (progressCallback && !progressCallback(95, 100)) {
+        diagnostics += process.readAll();
+        if (diagnostics.size() > 64 * 1024) diagnostics = diagnostics.right(64 * 1024);
+        if (progressCallback && !progressCallback(needsTranscode ? 80 : 95, 100)) {
             cancelled = true;
             process.terminate();
             if (!process.waitForFinished(1000)) {
@@ -3354,8 +3396,25 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
         }
     }
     if (cancelled || process.exitStatus() != QProcess::NormalExit
-        || process.exitCode() != 0 || QFileInfo(stagedPath).size() <= 0)
+        || process.exitCode() != 0 || QFileInfo(joinedPath).size() <= 0)
         return false;
+    if (needsTranscode) {
+        // WAV extraction already preserved source integer/float precision. The
+        // effects renderer writes double PCM before the final codec is chosen.
+        PcmOutputSpec source = chooseOfflinePcmOutput(mCodecCtx ? mCodecCtx->sample_fmt : AV_SAMPLE_FMT_S16,
+                                             mBitsPerSample);
+        if (mIsAvsAudio && mVi) {
+            source.validBits = source.containerBits = avs_bytes_per_channel_sample(mVi) * 8;
+            source.floatingPoint = mVi->sample_type == AVS_SAMPLE_FLOAT;
+        }
+        if (!transcodeTemporaryWav(joinedPath, stagedPath, source, filterGraph,
+            [&](int current, int total) {
+                return !progressCallback || progressCallback(
+                    80 + VDQtScaledProgress(current, total, 20), 100);
+            })) return false;
+    }
     if (progressCallback && !progressCallback(100, 100)) return false;
+    if (!mFilePath.isEmpty() && VDQtSourceSafety::pathsReferToSameFile(outputPath, mFilePath))
+        return false;
     return replaceWithStagedFile(stagedPath, outputPath);
 }

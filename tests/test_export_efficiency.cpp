@@ -72,13 +72,13 @@ bool storagePolicies() {
     qint64 plain = 0, edited = 0, processed = 0, disabled = 0;
     QString error;
     passed &= check(VDQtEstimatePcmTemporaryStorage(10, 48000, 2, {}, 1, &plain, &error)
-        && plain >= 10 * 48000 * 2 * 4
+        && plain >= 10 * 48000 * 2 * 8
         && VDQtEstimatePcmTemporaryStorage(10, 48000, 2, {}, 4, &edited, &error)
         && edited >= plain * 2, "PCM estimate includes retained edit segments and concatenated output");
     auto resample = effect(VDAudioFilterType::Resample, "sampleRate", 96000);
     auto slow = effect(VDAudioFilterType::TimeStretch, "factor", 0.5);
     passed &= check(VDQtEstimatePcmTemporaryStorage(10, 48000, 2, {resample, slow}, 4, &processed, &error)
-        && processed > edited * 4, "resampling, time stretch and extraction copies contribute to disk preflight");
+        && processed > edited * 2, "joined effects, resampling, time stretch and raw extraction copies contribute to disk preflight");
     resample.enabled = slow.enabled = false;
     passed &= check(VDQtEstimatePcmTemporaryStorage(10, 48000, 2, {resample, slow}, 1, &disabled, &error)
         && disabled == plain, "disabled audio effects do not inflate temporary-storage estimates");

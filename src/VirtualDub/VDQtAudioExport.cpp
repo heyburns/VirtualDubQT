@@ -72,6 +72,33 @@ bool VDQtAudioRangesForTimeline(
     return true;
 }
 
+bool VDQtPrepareAudioWav(VDQtAudioPlayer& player, const QString& outputPath,
+    const QList<QPair<int64_t, int64_t>>& inputRanges,
+    const QList<VDAudioFilterInstance>& inputFilters,
+    const std::function<bool(int, int)>& progress, QString *errorMessage,
+    bool padToRequestedLength) {
+    const auto ranges = inputRanges;
+    const auto filters = inputFilters;
+    if (errorMessage) errorMessage->clear();
+    if (!player.hasAudio() || outputPath.isEmpty() || ranges.isEmpty())
+        return fail(errorMessage, QStringLiteral("No audio or source ranges are available to prepare."));
+    if (!VDQtValidateAudioFilters(filters, errorMessage)) return false;
+    qint64 total = 0;
+    for (const auto& range : ranges) {
+        if (range.first < 0 || (range.second <= 0 && !(range.second == -1 && ranges.size() == 1))
+            || (range.second > 0 && (range.first > std::numeric_limits<qint64>::max() - range.second
+                || total > std::numeric_limits<qint64>::max() - range.second)))
+            return fail(errorMessage, QStringLiteral("Invalid or excessive audio sample range."));
+        if (range.second > 0) total += range.second;
+    }
+    const bool prepared = ranges.size() == 1
+        ? player.exportAudioToFile(outputPath, ranges.first().first, ranges.first().second,
+                                  progress, &filters, padToRequestedLength)
+        : player.exportAudioRangesToFile(outputPath, ranges, progress, &filters, padToRequestedLength);
+    return prepared || fail(errorMessage,
+        QStringLiteral("The requested audio ranges or effect chain could not be prepared."));
+}
+
 bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& input,
                     const std::function<bool(int, int)>& progress, QString *errorMessage) {
     const VDQtAudioExportRequest request = input; // Before any event-pumping callback.
@@ -115,16 +142,8 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
         return !progress || progress(maximum > 0 ? static_cast<int>(
             std::clamp(70.0 * value / maximum, 0.0, 70.0)) : 0, 100);
     };
-    bool extracted = false;
-    if (request.sampleRanges.size() == 1) {
-        const auto range = request.sampleRanges.first();
-        extracted = player.exportAudioToFile(wav, range.first, range.second, extractionProgress,
-                                            &noFilters, request.padToRequestedLength);
-    } else {
-        extracted = player.exportAudioRangesToFile(wav, request.sampleRanges, extractionProgress,
-                                                  &noFilters, request.padToRequestedLength);
-    }
-    if (!extracted) return fail(errorMessage, QStringLiteral("Audio extraction failed or was cancelled."));
+    if (!VDQtPrepareAudioWav(player, wav, request.sampleRanges, noFilters, extractionProgress,
+                            errorMessage, request.padToRequestedLength)) return false;
     VDQtAudioFilterSystem filters;
     filters.replaceActiveChain(request.filters);
     const QString graph = filters.ffmpegFilterGraph(player.getSampleRate());

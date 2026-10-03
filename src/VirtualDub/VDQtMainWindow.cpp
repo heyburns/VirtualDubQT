@@ -5340,15 +5340,14 @@ void VDQtMainWindow::onFileSaveAVI() {
         QImage latestRaw, latestFiltered;
         const auto presentPreview = [&] {
             if (latestPreviewFrame < 0) return;
-            if (opts.videoMode == VideoMode_NormalRecompress) {
-                // Normal Recompress: live preview in INPUT pane ONLY
-                mInputDisplay->setFrameImage(latestRaw);
-                mPositionControl->SetPositionSilent(latestPreviewFrame);
-            } else if (opts.videoMode == VideoMode_FullProcessing) {
-                // Full Processing: live preview in BOTH Input and Output panes
-                mInputDisplay->setFrameImage(latestRaw);
+            // A Fast request with explicit edits can fall back to Normal inside
+            // the exporter. A delivered callback is proof a frame was rendered,
+            // even when the original requested mode normally has no preview.
+            mInputDisplay->setFrameImage(latestRaw);
+            mPositionControl->SetPositionSilent(latestPreviewFrame);
+            if (opts.videoMode == VideoMode_FullProcessing) {
+                // Full Processing additionally previews the filtered output.
                 mOutputDisplay->setFrameImage(latestFiltered);
-                mPositionControl->SetPositionSilent(latestPreviewFrame);
             }
         };
         const auto frameCallback = [&](int frameIndex, const QImage &rawFrame, const QImage &filteredFrame) {
@@ -9137,53 +9136,10 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
         break;
 
     case VDQT_PCN_PLAY: // 1 - Play Input Pane Only
-        mPlaybackPreview = false;
-        if (mPlaybackTimer->isActive()) {
-            mPlaybackTimer->stop();
-            mAudioPlayer.pause();
-            mPlaybackPausedFrame = static_cast<int>(
-                mPositionControl->GetPosition());
-            updateFrameDisplay(mPositionControl->GetPosition());
-        } else {
-            mPlaybackStartFrame = mPositionControl->GetPosition();
-            mPlaybackClockFrame = mPlaybackStartFrame;
-            mPlaybackOutputPhase = 0;
-            mPlaybackClockFrameStartSeconds = 0.0;
-            int step = 1;
-            if (mFrameRateConfig.convMode == 1) step = 2;
-            else if (mFrameRateConfig.convMode == 2) step = 3;
-            else if (mFrameRateConfig.convMode == 3)
-                step = std::max(1, mFrameRateConfig.decimateN);
-            double playbackFps = mFrameRateConfig.sourceMode == 1
-                && mFrameRateConfig.customSourceFps > 0.0
-                ? mFrameRateConfig.customSourceFps : mVideoDecoder.getFps();
-            if (!(playbackFps > 0.0)) playbackFps = 29.97;
-            mPlaybackFrameDurationSeconds = step / playbackFps;
-            const int sourceFrame = audioSourceFrameForTimelineFrame(mPlaybackStartFrame);
-            mPlaybackAudioOriginSeconds = sourceFrame >= 0
-                ? mVideoDecoder.getFrameTimestampSeconds(sourceFrame) : -1.0;
-            const bool resumePausedAudio = mPlaybackPausedFrame
-                    == mPlaybackStartFrame
-                && mAudioPlayer.isPaused();
-            if (!resumePausedAudio)
-                seekAudioToVideoFrame(mPlaybackStartFrame);
-            mAudioPlayer.play();
-            if (!mAudioPlayer.playbackError().isEmpty())
-                statusBar()->showMessage(QStringLiteral("Audio playback: ") + mAudioPlayer.playbackError());
-            mPlaybackPausedFrame = -1;
-            syncInteractiveFilterChain();
-            mDecodedPreviewFrames.clear();
-            mDecodedPreviewTimelineFrame = -1;
-            mPlaybackElapsedTimer.restart();
-            mPlaybackClock.reset();
-            mPlaybackTimer->setTimerType(Qt::PreciseTimer);
-            mPlaybackTimer->start(mPreferencesConfig.playbackTimerIntervalMs);
-            updateFrameDisplay(mPlaybackStartFrame);
-        }
-        break;
-
-    case VDQT_PCN_PLAYPREVIEW: // 10 - Play Preview (Both Input & Output Panes)
-        mPlaybackPreview = true;
+    case VDQT_PCN_PLAYPREVIEW: // 10 - Play Both Input & Output Panes
+        // Both transports share source/audio ownership and the same clock;
+        // only filter/output presentation differs. Keep their fixes in one path.
+        mPlaybackPreview = actionCode == VDQT_PCN_PLAYPREVIEW;
         if (mPlaybackTimer->isActive()) {
             mPlaybackTimer->stop();
             mAudioPlayer.pause();
