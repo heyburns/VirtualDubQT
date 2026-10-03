@@ -668,3 +668,18 @@ that nondeterminism and the fixture now initializes it explicitly.
 Validation: full Release 43/43 passed (then the corrected fixture's focused 5/5);
 full sanitizer 39/39 passed. The regular binary rebuilt and passed real MP4/native
 AVS export smoke. No physical playback-device result is inferred from these checks.
+
+High-depth Temporal Smoother (M10, first substep)
+----------------------------------------------
+
+The independent scalar regression failed against the former QPainter-based
+RGBA64 blend. The new row-parallel 16-bit kernel uses the same motion threshold
+and full selected strength as 8-bit processing, keeps current alpha, and does not
+reduce samples to 8-bit precision. Detachment still precedes task submission.
+Fixtures now include channel values between 8-bit expansion levels; the temporal
+test also covers zero/small/normal thresholds and zero/half/full strengths.
+
+Validation: focused Release 7/7 and sanitizer 5/5 passed, plus regular-binary
+MP4/native-AVS export smoke. The extra parameter cases rerun the temporal pixel
+test in both configurations. IVTC/TV/Warp Sharp high-depth paths remain next;
+this does not claim the separate original-app temporal algorithm parity work.

@@ -6,7 +6,6 @@
 
 #include <QCoreApplication>
 #include <QFile>
-#include <QPainter>
 #include <QThread>
 #include <QThreadPool>
 #include <algorithm>
@@ -27,12 +26,24 @@ bool require(bool condition, const char* message) {
 QImage scalarReference(const QImage& source, const QImage& previous, VDFilterType type) {
     QImage result = source.copy();
     if (result.depth() > 32) {
-        // These repairs preserve existing high-depth behavior; implementing the
-        // currently missing high-depth algorithms is a separate audit batch.
         if (type == VDFilterType::TemporalSmoother && !previous.isNull()) {
-            QPainter painter(&result);
-            painter.setOpacity(0.25); // strength=4/8, existing high-depth blend.
-            painter.drawImage(0, 0, previous);
+            for (int y = 0; y < source.height(); ++y) {
+                auto *out = reinterpret_cast<QRgba64*>(result.scanLine(y));
+                const auto *in = reinterpret_cast<const QRgba64*>(source.constScanLine(y));
+                const auto *prior = reinterpret_cast<const QRgba64*>(previous.constScanLine(y));
+                for (int x = 0; x < source.width(); ++x) {
+                    const int current[3] = {in[x].red(), in[x].green(), in[x].blue()};
+                    const int old[3] = {prior[x].red(), prior[x].green(), prior[x].blue()};
+                    int maximum = 0;
+                    for (int c = 0; c < 3; ++c)
+                        maximum = std::max(maximum, std::abs(current[c] - old[c]));
+                    if (maximum <= 12 * 257)
+                        out[x] = QRgba64::fromRgba64(
+                            std::lround((current[0] + old[0]) * 0.5),
+                            std::lround((current[1] + old[1]) * 0.5),
+                            std::lround((current[2] + old[2]) * 0.5), in[x].alpha());
+                }
+            }
         }
         return result;
     }
@@ -108,8 +119,20 @@ bool runCase(VDFilterType type, QSize size, QImage::Format format, int frames,
     QImage previous;
     QList<QImage> retained, snapshots;
     for (int frame = 0; frame < frames; ++frame) {
-        const QImage input = VDQtTestFixtures::patternedImage(size.width(), size.height(), format, frame);
+        QImage input = VDQtTestFixtures::patternedImage(size.width(), size.height(), format, frame);
         if (!require(!input.isNull(), "allocate test image")) return false;
+        if (format == QImage::Format_RGBA64) {
+            // Values between 8-bit expansion levels catch hidden quantization.
+            for (int y = 0; y < input.height(); ++y) {
+                auto *row = reinterpret_cast<QRgba64*>(input.scanLine(y));
+                for (int x = 0; x < input.width(); ++x) {
+                    row[x].setRed((row[x].red() + 31 + frame * 13) & 65535);
+                    row[x].setGreen((row[x].green() + 57 + frame * 17) & 65535);
+                    row[x].setBlue((row[x].blue() + 93 + frame * 19) & 65535);
+                    row[x].setAlpha((row[x].alpha() + 11) & 65535);
+                }
+            }
+        }
         const QImage inputSnapshot = input.copy();
         const QImage expected = scalarReference(input, previous, type);
         QList<QImage> outputs;
@@ -135,6 +158,34 @@ bool runCase(VDFilterType type, QSize size, QImage::Format format, int frames,
     }
     std::cout << size.width() << 'x' << size.height() << " format=" << int(format)
               << " frames=" << frames << " passed\n";
+    return true;
+}
+
+bool highDepthTemporalControls() {
+    for (int threshold : {0, 1, 12}) {
+        for (int strength : {0, 4, 8}) {
+            VDQtFilterSystem filters;
+            filters.addFilter(VDFilterType::TemporalSmoother);
+            auto params = filters.getActiveChain().first().params;
+            params["threshold"] = threshold;
+            params["strength"] = strength;
+            filters.updateFilterParams(0, params);
+            QImage previous(9, 3, QImage::Format_RGBA64), input(9, 3, QImage::Format_RGBA64);
+            previous.fill(QColor::fromRgba64(20031, 10057, 30093, 50011));
+            input.fill(QColor::fromRgba64(21031, 10457, 31093, 22011));
+            if (filters.processFrame(previous, {0, 0, 24}).isNull()) return false;
+            QImage expected = input;
+            if (threshold * 257 >= 1000) {
+                const double mix = strength / 8.0;
+                expected.fill(QColor::fromRgba64(
+                    std::lround(21031 * (1 - mix) + 20031 * mix),
+                    std::lround(10457 * (1 - mix) + 10057 * mix),
+                    std::lround(31093 * (1 - mix) + 30093 * mix), 22011));
+            }
+            if (!require(filters.processFrame(input, {1, 1.0 / 24, 24}) == expected,
+                         "16-bit temporal threshold/strength preserve precision and current alpha")) return false;
+        }
+    }
     return true;
 }
 
@@ -194,6 +245,7 @@ int main(int argc, char** argv) {
         if (QString::fromLocal8Bit(argv[2]) != "--allocation-failure") return 2;
         return allocationFailure(type) ? 0 : 1;
     }
+    if (type == VDFilterType::TemporalSmoother && !highDepthTemporalControls()) return 1;
     if (QThread::idealThreadCount() <= 1)
         std::cout << "Single-CPU host: pixel checks run but parallel race coverage is unavailable\n";
     for (const auto format : {QImage::Format_RGB888, QImage::Format_RGBA8888}) {

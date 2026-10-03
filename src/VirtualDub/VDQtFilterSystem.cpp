@@ -1008,9 +1008,32 @@ QImage VDQtFilterSystem::processFrameForPhase(
                             }
                         });
                     } else {
-                        QPainter painter(&result);
-                        painter.setOpacity(strength * 0.5);
-                        painter.drawImage(0, 0, previous);
+                        const int width = result.width(), height = result.height();
+                        const uchar *previousBits = previous.constBits();
+                        const qsizetype previousStride = previous.bytesPerLine();
+                        uchar *destinationBits = result.bits();
+                        if (!destinationBits) return {};
+                        const qsizetype destinationStride = result.bytesPerLine();
+                        // Use the same motion gate and strength as the 8-bit
+                        // kernel, without quantizing RGB or blending alpha.
+                        parallelFor(height, static_cast<qint64>(width) * height, [=](int y) {
+                            auto *current = reinterpret_cast<QRgba64*>(
+                                destinationBits + y * destinationStride);
+                            const auto *prior = reinterpret_cast<const QRgba64*>(
+                                previousBits + y * previousStride);
+                            for (int x = 0; x < width; ++x) {
+                                int maximumDifference = 0;
+                                for (int channel = 0; channel < 3; ++channel)
+                                    maximumDifference = std::max(maximumDifference,
+                                        std::abs(int(rgba64Channel(current[x], channel))
+                                                 - int(rgba64Channel(prior[x], channel))));
+                                if (maximumDifference <= threshold * 257)
+                                    for (int channel = 0; channel < 3; ++channel)
+                                        setRgba64Channel(current[x], channel, std::lround(
+                                            rgba64Channel(current[x], channel) * (1.0 - strength)
+                                            + rgba64Channel(prior[x], channel) * strength));
+                            }
+                        });
                     }
                 }
             }
