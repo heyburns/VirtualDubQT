@@ -905,6 +905,27 @@ Validation: full Release 51/51 and ASan/UBSan 47/47 passed, including menu,
 animation, source, audio and EOF regressions. The rebuilt regular binary passed
 actual MP4/native-AVS decode/export smoke. Physical audio/capture are excluded.
 
+Bounded script evaluation (M20)
+------------------------------
+
+ASan/UBSan reproduced the unnecessary integer cast in the expression 1e100+1;
+Release independently accepted non-finite multiplication. Floating arithmetic
+now stays floating and rejects overflow. Integer-only remainder/bitwise/shift
+operators and variable filter indexes check representable integral values first.
+
+Tests cover deep parentheses/unary chains, exponentially doubled strings, a
+shared work-budget exhaustion, overlarge text inputs, binary text, invalid
+integer operands and unchanged output after a parse failure. Scalar paths
+containing the spelling VirtualDub are no longer mistaken for native calls.
+Generated project scripts still parse/execute. Offset/view token matching avoids
+repeated copying of every remaining expression suffix. Execution/JSON numeric
+entry points remain the independently tracked M21 work.
+
+Validation: final focused Release 7/7 and ASan/UBSan 7/7 passed, including
+bounded parsing, generated VCF execution, controller, audio/filter context and
+stabilization. The rebuilt regular binary independently passed MP4/native-AVS
+decode/export smoke. No user scripts, processes or settings were changed.
+
 Masked playback picture/audio separation
 ---------------------------------------
 

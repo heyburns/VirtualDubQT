@@ -421,6 +421,13 @@ inert `VDQtScriptCommand` values. It supports scalar values and basic expression
 needed by generated settings but deliberately has no arbitrary function calls,
 loops, filesystem access, or native evaluation.
 
+Both file and text parsing enforce a 4 MiB input limit. Expressions have a
+64-level nesting bound, 1 Mi-character string limit and shared 64 Mi-unit work
+budget across statements. Floating arithmetic is kept floating; integer-only
+operators check finite, integral, representable operands first. Overflow and
+limit errors never publish a partially parsed program. Token matching uses
+views/offsets instead of repeatedly allocating the unparsed suffix.
+
 `VDQtMainWindow::executeAutomationProgram()` is the execution boundary. New
 commands should be parsed generically, validated at execution, and routed through
 the same application methods as their interactive equivalents.

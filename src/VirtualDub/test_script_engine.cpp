@@ -10,6 +10,47 @@ int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
     VDQtScriptProgram program;
     QString error;
+    // Large finite reals are valid arithmetic operands, not integers. The old
+    // evaluator nevertheless cast them to qlonglong on every operation.
+    if (!VDQtScriptEngine::parseText("VirtualDub.test(1e100 + 1);", "/tmp", &program, &error)
+        || program.commands.first().arguments.first().toDouble() != 1e100) {
+        std::cerr << "finite floating arithmetic was mishandled\n";
+        return 1;
+    }
+    if (VDQtScriptEngine::parseText("VirtualDub.test(1e308 * 1e308);", "/tmp", &program, &error)) {
+        std::cerr << "non-finite arithmetic was accepted\n";
+        return 1;
+    }
+    const QString deeplyNested = "VirtualDub.test(" + QString(1000, '(') + "1" + QString(1000, ')') + ");";
+    const QString deepUnary = "VirtualDub.test(" + QString(1000, '!') + "1);";
+    QString doubled = "declare text = \"x\";";
+    for (int i = 0; i < 30; ++i) doubled += "text = text + text;";
+    for (const QString& invalid : {deeplyNested, deepUnary, doubled,
+            QString("VirtualDub.test(1e100 | 1);"), QString("VirtualDub.test(~1e100);"),
+            QString("VirtualDub.test(1e100 % 2);"), QString("VirtualDub.test(2.5 << 1);"),
+            QString("declare index = 1e100; VirtualDub.video.filters.instance[index].Config(1);"),
+            QString(4 * 1024 * 1024 + 1, ' '), QString("VirtualDub.test(\"a") + QChar::Null + "\");"}) {
+        const auto previous = program.commands.size();
+        if (VDQtScriptEngine::parseText(invalid, "/tmp", &program, &error)
+            || error.isEmpty() || program.commands.size() != previous) {
+            std::cerr << "bounded parser accepted invalid input or modified its output\n";
+            return 1;
+        }
+    }
+    if (!VDQtScriptEngine::parseText("declare name = \"VirtualDub.clip.avi\"; VirtualDub.Open(name);",
+                                   "/tmp", &program, &error)
+        || program.commands.first().arguments.first().toString() != "VirtualDub.clip.avi") {
+        std::cerr << "a scalar path containing VirtualDub was mistaken for a command\n";
+        return 1;
+    }
+    QString workLimited = "declare big = \"x\";";
+    for (int i = 0; i < 20; ++i) workLimited += "big = big + big;";
+    for (int i = 0; i < 80; ++i) workLimited += "VirtualDub.test(big);";
+    if (VDQtScriptEngine::parseText(workLimited, "/tmp", &program, &error)
+        || !error.contains("work limit")) {
+        std::cerr << "the shared evaluation budget did not bound repeated string use\n";
+        return 1;
+    }
     const QString script = QStringLiteral(
         "// VirtualDub project (Sylia script format)\n"
         "VirtualDub.Open(\"clip\\\\name.avi\", \"\", 0);\n"

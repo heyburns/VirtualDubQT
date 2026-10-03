@@ -8,6 +8,8 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QRegularExpression>
+#include <QScopeGuard>
+#include <QStringView>
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +20,30 @@ namespace {
 constexpr qint64 kMaximumScriptBytes = qint64{4} * 1024 * 1024;
 constexpr int kMaximumCommands = 100000;
 constexpr int kMaximumArguments = 256;
+constexpr int kMaximumExpressionDepth = 64;
+constexpr qsizetype kMaximumStringCharacters = 1024 * 1024;
+
+struct ScriptBudget {
+    // Shared across all statements: short scripts can otherwise repeatedly
+    // double scalar strings or repeat expensive expressions without a byte cap.
+    qint64 remaining = qint64{64} * 1024 * 1024;
+    bool exhausted = false;
+    bool spend(qint64 amount) {
+        if (amount < 0 || amount > remaining) { exhausted = true; return false; }
+        remaining -= amount;
+        return true;
+    }
+};
+
+qlonglong integerValue(const QVariant& value, bool *ok) {
+    if (value.typeId() != QMetaType::Double) return value.toLongLong(ok);
+    const double number = value.toDouble();
+    const long double extended = number;
+    *ok = std::isfinite(number) && std::trunc(number) == number
+        && extended >= static_cast<long double>(std::numeric_limits<qlonglong>::min())
+        && extended < -static_cast<long double>(std::numeric_limits<qlonglong>::min());
+    return *ok ? static_cast<qlonglong>(number) : 0;
+}
 
 void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
@@ -91,14 +117,17 @@ class ValueExpressionParser {
 public:
     ValueExpressionParser(const QString& text,
                           const QMap<QString, QVariant>& variables,
-                          QString *errorMessage)
-        : mText(text), mVariables(variables), mErrorMessage(errorMessage) {}
+                          QString *errorMessage, ScriptBudget& budget)
+        : mText(text), mVariables(variables), mErrorMessage(errorMessage), mBudget(budget) {}
 
     bool parse(QVariant *value) {
         skipSpace();
         if (atEnd()) return fail(QStringLiteral("An argument is empty."));
         if (!parseBitwiseOr(value)) return false;
         skipSpace();
+        if (mBudget.exhausted) return fail(QStringLiteral("The script evaluation work limit was exceeded."));
+        if (isDouble(*value) && !std::isfinite(value->toDouble()))
+            return fail(QStringLiteral("A numeric expression is not finite."));
         if (!atEnd()) {
             return fail(QStringLiteral("Unsupported argument expression near: %1")
                             .arg(mText.mid(mPosition).left(80)));
@@ -124,7 +153,8 @@ private:
 
     bool consume(const QString& token) {
         skipSpace();
-        if (!mText.mid(mPosition).startsWith(token)) return false;
+        if (!mBudget.spend(token.size())) return false;
+        if (!QStringView(mText).mid(mPosition).startsWith(token)) return false;
         mPosition += token.size();
         return true;
     }
@@ -140,7 +170,9 @@ private:
             const double converted = value.toDouble(&ok);
             if (!ok || !std::isfinite(converted)) return false;
             if (real) *real = converted;
-            if (integer) *integer = static_cast<qlonglong>(converted);
+            // Floating arithmetic has no need for an integer representation.
+            // Integer-only operators validate separately, before any cast.
+            if (integer) *integer = 0;
             if (floating) *floating = true;
             return true;
         }
@@ -157,7 +189,12 @@ private:
         if (operation == QLatin1Char('+')
             && (left.typeId() == QMetaType::QString
                 || right.typeId() == QMetaType::QString)) {
-            *result = left.toString() + right.toString();
+            const QString leftText = left.toString(), rightText = right.toString();
+            if (leftText.size() > kMaximumStringCharacters - rightText.size())
+                return fail(QStringLiteral("An evaluated script string is too large."));
+            if (!mBudget.spend(leftText.size() + rightText.size()))
+                return fail(QStringLiteral("The script evaluation work limit was exceeded."));
+            *result = leftText + rightText;
             return true;
         }
         double leftReal = 0.0, rightReal = 0.0;
@@ -168,6 +205,10 @@ private:
             return fail(QStringLiteral("An arithmetic operator requires numeric values."));
         }
         if (operation == QLatin1Char('%')) {
+            bool leftOk = false, rightOk = false;
+            leftInteger = integerValue(left, &leftOk);
+            rightInteger = integerValue(right, &rightOk);
+            if (!leftOk || !rightOk) return fail(QStringLiteral("Remainder requires representable integers."));
             if (!rightInteger) return fail(QStringLiteral("Integer division by zero."));
             if (leftInteger == std::numeric_limits<qlonglong>::min()
                 && rightInteger == -1) {
@@ -178,7 +219,9 @@ private:
         }
         if (operation == QLatin1Char('/')) {
             if (rightReal == 0.0) return fail(QStringLiteral("Division by zero."));
-            *result = leftReal / rightReal;
+            const double quotient = leftReal / rightReal;
+            if (!std::isfinite(quotient)) return fail(QStringLiteral("Floating expression overflow."));
+            *result = quotient;
             return true;
         }
         if (leftFloating || rightFloating) {
@@ -226,7 +269,8 @@ private:
             }
             *result = computed;
         }
-        return true;
+        return !isDouble(*result) || std::isfinite(result->toDouble())
+            || fail(QStringLiteral("Floating expression overflow."));
     }
 
     bool parseBitwiseOr(QVariant *value) {
@@ -235,8 +279,8 @@ private:
             QVariant right;
             if (!parseBitwiseXor(&right)) return false;
             bool leftOk = false, rightOk = false;
-            const qlonglong left = value->toLongLong(&leftOk);
-            const qlonglong converted = right.toLongLong(&rightOk);
+            const qlonglong left = integerValue(*value, &leftOk);
+            const qlonglong converted = integerValue(right, &rightOk);
             if (!leftOk || !rightOk)
                 return fail(QStringLiteral("A bitwise operator requires integers."));
             *value = left | converted;
@@ -250,8 +294,8 @@ private:
             QVariant right;
             if (!parseBitwiseAnd(&right)) return false;
             bool leftOk = false, rightOk = false;
-            const qlonglong left = value->toLongLong(&leftOk);
-            const qlonglong converted = right.toLongLong(&rightOk);
+            const qlonglong left = integerValue(*value, &leftOk);
+            const qlonglong converted = integerValue(right, &rightOk);
             if (!leftOk || !rightOk)
                 return fail(QStringLiteral("A bitwise operator requires integers."));
             *value = left ^ converted;
@@ -265,8 +309,8 @@ private:
             QVariant right;
             if (!parseShift(&right)) return false;
             bool leftOk = false, rightOk = false;
-            const qlonglong left = value->toLongLong(&leftOk);
-            const qlonglong converted = right.toLongLong(&rightOk);
+            const qlonglong left = integerValue(*value, &leftOk);
+            const qlonglong converted = integerValue(right, &rightOk);
             if (!leftOk || !rightOk)
                 return fail(QStringLiteral("A bitwise operator requires integers."));
             *value = left & converted;
@@ -283,8 +327,8 @@ private:
             QVariant right;
             if (!parseAdditive(&right)) return false;
             bool leftOk = false, rightOk = false;
-            const qlonglong left = value->toLongLong(&leftOk);
-            const qlonglong count = right.toLongLong(&rightOk);
+            const qlonglong left = integerValue(*value, &leftOk);
+            const qlonglong count = integerValue(right, &rightOk);
             if (!leftOk || !rightOk || count < 0 || count > 63)
                 return fail(QStringLiteral("A shift operator requires integers and a count from 0 to 63."));
             const quint64 bits = static_cast<quint64>(left);
@@ -325,6 +369,10 @@ private:
     }
 
     bool parseUnary(QVariant *value) {
+        ++mDepth;
+        const auto leave = qScopeGuard([&] { --mDepth; });
+        if (mDepth > kMaximumExpressionDepth)
+            return fail(QStringLiteral("The expression nesting limit was exceeded."));
         skipSpace();
         if (consume(QStringLiteral("+"))) return parseUnary(value);
         if (consume(QStringLiteral("-"))) {
@@ -344,7 +392,7 @@ private:
         if (consume(QStringLiteral("~"))) {
             if (!parseUnary(value)) return false;
             bool ok = false;
-            const qlonglong converted = value->toLongLong(&ok);
+            const qlonglong converted = integerValue(*value, &ok);
             if (!ok) return fail(QStringLiteral("Bitwise not requires an integer."));
             *value = ~converted;
             return true;
@@ -377,6 +425,10 @@ private:
                     if (!decodeQuotedString(
                             mText.mid(start, mPosition - start), &decoded,
                             mErrorMessage)) return false;
+                    if (decoded.size() > kMaximumStringCharacters)
+                        return fail(QStringLiteral("A script string is too large."));
+                    if (!mBudget.spend(decoded.size()))
+                        return fail(QStringLiteral("The script evaluation work limit was exceeded."));
                     *value = decoded;
                     return true;
                 }
@@ -404,6 +456,8 @@ private:
                 *value = QVariant();
             } else if (mVariables.contains(identifier)) {
                 *value = mVariables.value(identifier);
+                if (!mBudget.spend(value->typeId() == QMetaType::QString ? value->toString().size() : 1))
+                    return fail(QStringLiteral("The script evaluation work limit was exceeded."));
             } else {
                 return fail(QStringLiteral("Unknown script variable: %1")
                                 .arg(identifier));
@@ -411,14 +465,17 @@ private:
             return true;
         }
         static const QRegularExpression numberExpression(
-            QStringLiteral("^(?:0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"));
+            QStringLiteral("(?:0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"));
         const QRegularExpressionMatch numberMatch =
-            numberExpression.match(mText.mid(mPosition));
+            numberExpression.match(mText, mPosition, QRegularExpression::NormalMatch,
+                                   QRegularExpression::AnchorAtOffsetMatchOption);
         if (!numberMatch.hasMatch()) {
             return fail(QStringLiteral("Unsupported argument expression: %1")
                             .arg(mText.mid(mPosition).left(80)));
         }
         const QString token = numberMatch.captured(0);
+        if (token.size() > 128 || !mBudget.spend(token.size()))
+            return fail(QStringLiteral("A numeric literal or expression is too large."));
         mPosition += token.size();
         bool integerOk = false;
         const qlonglong integer = token.toLongLong(&integerOk, 0);
@@ -440,19 +497,21 @@ private:
     const QMap<QString, QVariant>& mVariables;
     QString *mErrorMessage = nullptr;
     int mPosition = 0;
+    int mDepth = 0;
+    ScriptBudget& mBudget;
 };
 
 bool parseValue(const QString& text,
                 const QMap<QString, QVariant>& variables,
-                QVariant *value, QString *errorMessage) {
-    ValueExpressionParser parser(text.trimmed(), variables, errorMessage);
+                QVariant *value, QString *errorMessage, ScriptBudget& budget) {
+    ValueExpressionParser parser(text.trimmed(), variables, errorMessage, budget);
     return parser.parse(value);
 }
 
 bool parseArguments(const QString& text,
                     const QMap<QString, QVariant>& variables,
                     QList<QVariant> *arguments,
-                    QString *errorMessage) {
+                    QString *errorMessage, ScriptBudget& budget) {
     if (text.trimmed().isEmpty()) return true;
     QString current;
     bool quoted = false;
@@ -462,10 +521,12 @@ bool parseArguments(const QString& text,
     // legally contain commas that belong to a single argument.
     const auto finish = [&]() {
         QVariant value;
-        if (!parseValue(current, variables, &value, errorMessage)) return false;
+        if (!parseValue(current, variables, &value, errorMessage, budget)) return false;
         arguments->append(value);
         current.clear();
-        return arguments->size() <= kMaximumArguments;
+        if (arguments->size() <= kMaximumArguments) return true;
+        setError(errorMessage, QStringLiteral("A command contains too many arguments."));
+        return false;
     };
     for (const QChar character : text) {
         if (quoted) {
@@ -482,6 +543,10 @@ bool parseArguments(const QString& text,
                    || character == QLatin1Char('[')
                    || character == QLatin1Char('{')) {
             ++nested;
+            if (nested > kMaximumExpressionDepth) {
+                setError(errorMessage, QStringLiteral("The argument nesting limit was exceeded."));
+                return false;
+            }
             current += character;
         } else if (character == QLatin1Char(')')
                    || character == QLatin1Char(']')
@@ -545,6 +610,10 @@ bool splitStatements(const QString& text, QList<Statement> *statements,
             current += character;
         } else if (character == QLatin1Char('(')) {
             ++nested;
+            if (nested > kMaximumExpressionDepth + 1) {
+                setError(errorMessage, QStringLiteral("Line %1 exceeds the expression nesting limit.").arg(line));
+                return false;
+            }
             current += character;
         } else if (character == QLatin1Char(')')) {
             --nested;
@@ -612,6 +681,15 @@ bool VDQtScriptEngine::parseText(const QString& text,
         setError(errorMessage, QStringLiteral("No script destination was provided."));
         return false;
     }
+    if (text.size() > kMaximumScriptBytes || text.toUtf8().size() > kMaximumScriptBytes) {
+        setError(errorMessage, QStringLiteral("The script is too large."));
+        return false;
+    }
+    if (text.contains(QChar::Null)) {
+        setError(errorMessage, QStringLiteral("The script contains binary data."));
+        return false;
+    }
+    ScriptBudget budget;
     QList<Statement> statements;
     if (!splitStatements(text, &statements, errorMessage)) return false;
     VDQtScriptProgram parsed;
@@ -646,7 +724,8 @@ bool VDQtScriptEngine::parseText(const QString& text,
 
         // A statement is either a VirtualDub command, a supported object-alias
         // call emitted by upstream project scripts, or a scalar declaration.
-        const int root = expressionText.indexOf(QStringLiteral("VirtualDub."));
+        // A path/string containing that spelling is not a native command.
+        const int root = expressionText.startsWith(QStringLiteral("VirtualDub.")) ? 0 : -1;
         if (root < 0) {
             const QRegularExpressionMatch aliasMatch =
                 aliasCallExpression.match(expressionText);
@@ -666,7 +745,7 @@ bool VDQtScriptEngine::parseText(const QString& text,
                 command.sourceText = statement.text;
                 if (!parseArguments(aliasMatch.captured(3), scalarVariables,
                                     &command.arguments,
-                                    errorMessage)) {
+                                    errorMessage, budget)) {
                     if (errorMessage
                         && !errorMessage->startsWith(QStringLiteral("Line "))) {
                         *errorMessage = QStringLiteral("Line %1: %2")
@@ -691,7 +770,7 @@ bool VDQtScriptEngine::parseText(const QString& text,
             if (!scalarName.isEmpty()) {
                 QVariant value;
                 if (!parseValue(scalarExpression, scalarVariables, &value,
-                                errorMessage)) {
+                                errorMessage, budget)) {
                     if (errorMessage
                         && !errorMessage->startsWith(QStringLiteral("Line "))) {
                         *errorMessage = QStringLiteral("Line %1: %2")
@@ -705,12 +784,6 @@ bool VDQtScriptEngine::parseText(const QString& text,
             setError(errorMessage,
                      QStringLiteral("Line %1 is not a VirtualDub command: %2")
                          .arg(statement.line).arg(statement.text.left(160)));
-            return false;
-        }
-        if (root != 0) {
-            setError(errorMessage,
-                     QStringLiteral("Line %1 contains an unsupported expression before the VirtualDub command.")
-                         .arg(statement.line));
             return false;
         }
         const int open = expressionText.indexOf(QLatin1Char('('), root);
@@ -742,7 +815,7 @@ bool VDQtScriptEngine::parseText(const QString& text,
             }
             bool indexOk = false;
             const qlonglong indexValue =
-                scalarVariables.value(variableName).toLongLong(&indexOk);
+                integerValue(scalarVariables.value(variableName), &indexOk);
             if (!indexOk || indexValue < 0) {
                 setError(errorMessage,
                          QStringLiteral("Line %1 uses a non-integer filter index variable: %2")
@@ -758,7 +831,7 @@ bool VDQtScriptEngine::parseText(const QString& text,
         if (command.name.isEmpty()
             || !parseArguments(expressionText.mid(open + 1, close - open - 1),
                                scalarVariables, &command.arguments,
-                               errorMessage)) {
+                               errorMessage, budget)) {
             if (errorMessage && !errorMessage->startsWith(QStringLiteral("Line ")))
                 *errorMessage = QStringLiteral("Line %1: %2")
                     .arg(statement.line).arg(*errorMessage);

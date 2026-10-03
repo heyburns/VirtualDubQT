@@ -65,7 +65,8 @@ Remaining execution sequence
 [x] Audio follow-up: separate held-picture and advancing audio mappings, including
     masked VFR playback intervals. Physical continuous-sound verification is pending.
 [ ] M08/M09/M11/M12/M13: AVS formats, color/aspect metadata and effective codec controls.
-[ ] M20/M21: bounded script evaluation and safe numeric conversion throughout inputs.
+[x] M20: bounded script evaluation and safe parser arithmetic/integer operators.
+[ ] M21: safe numeric conversion throughout execution, saved inputs and runtime calculations.
 [ ] M22/M23: coherent durable-queue limits, visible save failures and instance ownership.
 [ ] Batch naming: preserve filenames across analysis/export operation changes.
 [ ] M07: timed capture stops independently of preview output (hardware verification pending).
