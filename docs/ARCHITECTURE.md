@@ -260,6 +260,10 @@ source graph; staged-output commit must still apply its own destination checks.
 
 Loaders parse into temporary values and commit only after full validation.
 Writers use `QSaveFile` so a crash cannot leave a half-written project or queue.
+The GUI also validates/indexes saved frame references using the candidate decoder
+before replacing the current source or processing settings. A failed reference
+check or cancelled validation therefore retains the current editing session;
+late failures while committing a newly opened source/audio still need rollback.
 
 Document version 7 stores timeline intent in projects/jobs and source-count
 accuracy in projects. The editor saves untouched sources as implicit identity,

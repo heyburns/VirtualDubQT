@@ -48,8 +48,9 @@ QByteArray readFile(const QString& path) {
     return file.readAll();
 }
 
-bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString& path) {
-    bool chosen = false, failed = false;
+bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString& path,
+                       bool expectLoadError = false) {
+    bool chosen = false, failed = false, loadError = false;
     QElapsedTimer deadline;
     deadline.start();
     QTimer responder;
@@ -81,6 +82,7 @@ bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString
             } else if (auto *message = qobject_cast<QMessageBox*>(widget)) {
                 if (!message->isVisible()) continue;
                 std::cerr << "Project dialog: " << message->text().toStdString() << '\n';
+                loadError = message->windowTitle() == "Load Project Error";
                 failed = true;
                 message->accept();
             }
@@ -89,7 +91,9 @@ bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString
     responder.start();
     const bool invoked = invoke(window, action);
     responder.stop();
-    return check(invoked && chosen && !failed, "project save/load dialog completes successfully");
+    return check(invoked && chosen && (expectLoadError ? loadError : !failed),
+                 expectLoadError ? "project load reports the expected validation failure"
+                                 : "project save/load dialog completes successfully");
 }
 
 bool logLifetime() {
@@ -229,6 +233,54 @@ bool editPreview(VDQtTestFixtures& fixtures) {
     QElapsedTimer settle; settle.start();
     return check(waitFor([&] { return settle.elapsed() >= 150; }) && displays(0),
                  "a stale in-flight crop decode cannot repaint after undo");
+}
+
+bool projectValidation(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.mp4) || !invoke(window, "onEditSelectAll")) return false;
+    auto *position = window.findChild<VDQtPositionControlWidget*>();
+    if (!position) return false;
+    position->SetPosition(8);
+    position->SetSelection(4, 16);
+    position->SetZoomRange(0, 24);
+    if (!invoke(window, "onEditToggleMarker")) return false;
+    const QString original = fixtures.directory.filePath("original-session.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", original)) return false;
+    const QJsonObject before = QJsonDocument::fromJson(readFile(original)).object();
+    VDQtProjectState candidate;
+    QString error;
+    if (!VDQtProjectFile::loadProject(original, &candidate, &error)) return false;
+    candidate.sourcePath = fixtures.avs;
+    candidate.sourcePaths = {fixtures.avs};
+    candidate.audioDisabled = true;
+    candidate.timelineExplicit = true;
+    candidate.timelineSegments = {{0, 8}};
+    candidate.sourceFrameCountExact = true;
+    candidate.sourceFrameCount = 100;
+    candidate.position = 0;
+    candidate.hasSelection = false; candidate.selectionStart = candidate.selectionEnd = 0;
+    candidate.zoomEnabled = false; candidate.zoomStart = candidate.zoomEnd = 0;
+    candidate.markers.clear();
+    candidate.processing.videoMode = VideoMode_FastRecompress;
+    const QString invalid = fixtures.directory.filePath("invalid-references.vdqproject");
+    for (int failure = 0; failure < 2; ++failure) {
+        if (failure == 1) {
+            candidate.sourceFrameCount = 48;
+            candidate.timelineSegments = {{50, 8}};
+        }
+        if (!VDQtProjectFile::saveProject(invalid, candidate, &error)
+            || !chooseProjectFile(window, "onFileLoadProject", invalid, true)) return false;
+        if (!check(window.windowTitle().contains("source.mp4") && position->GetPosition() == 8,
+                   "invalid project does not replace source or playhead")) return false;
+        if (!invoke(window, "onFileSaveProject")) return false;
+        const QJsonObject after = QJsonDocument::fromJson(readFile(original)).object();
+        if (!check(after == before, "invalid project preserves selection, zoom, markers, settings and saved-project path")) return false;
+    }
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    return check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
+                 "original editor remains usable after rejected project loads");
 }
 
 bool sourceLifetime(VDQtTestFixtures& fixtures) {
@@ -863,6 +915,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "log_lifetime") return logLifetime();
     if (scenario == "recovery") return recoveryRetention(fixtures);
     if (scenario == "edit_preview") return editPreview(fixtures);
+    if (scenario == "project_validation") return projectValidation(fixtures);
     if (scenario == "source") return sourceLifetime(fixtures);
     if (scenario == "snapshot") return exportSnapshot(fixtures);
     if (scenario == "audio") return audioSnapshot(fixtures);

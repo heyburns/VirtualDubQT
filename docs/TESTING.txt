@@ -345,3 +345,23 @@ Validation: focused Release timeline/controller/CLI checks passed (6/6), sanitiz
 timeline/controller checks passed (5/5), and the rebuilt regular application
 passed generated-processing.vcf with isolated settings. Empty timeline refusal,
 unknown/underestimated playback and recovery preservation remain covered.
+
+Project reference prevalidation (S05)
+------------------------------------
+
+operation_project_validation saves an indexed MP4 session with selection, marker,
+zoom and nonzero playhead, then loads projects with a changed verified source count
+and an out-of-bounds edit list. Both must report errors without changing the source,
+position, processing or original Save Project destination. Saving again must retain
+the complete original document. Before repair, the first rejected project had
+already replaced the source and erased editor state.
+
+Candidate reference indexing and edit validation now precede editor replacement.
+The validated timeline is then installed without repeating that reference scan.
+Untouched unknown sources need not be scanned merely to restore frame zero.
+This does not yet guarantee rollback if a source/audio path fails between successful
+validation and actual opening, or resolve ambiguous legacy estimated identity lists.
+
+Validation: Release project/recovery/edit/empty/CLI checks passed (5/5), sanitizer
+controller checks passed (4/4), and the rebuilt regular application passed the
+generated-processing.vcf smoke check under isolated settings.

@@ -1854,11 +1854,53 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
             return false;
         }
     }
+    // Validate references against the candidate decoder while the original
+    // editor is still intact. Previously these failures happened only after
+    // Open had erased the current source, edits, markers and audio choices.
+    const qint64 requestedLast = std::max(
+        project.position, project.hasSelection ? project.selectionEnd - 1 : 0);
+    const bool needsReferenceIndex = !project.timelineSegments.isEmpty()
+        || (requestedLast > 0 && requestedLast >= validationDecoder.getFrameCount());
+    if (!validationDecoder.isFrameCountExact() && needsReferenceIndex) {
+        QProgressDialog progress("Validating saved frame references...", "Cancel",
+                                 0, std::max(1, validationDecoder.getFrameCount()), this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        const auto scan = validationDecoder.scanVideoStream([&](int frame, int total) {
+            progress.setRange(0, std::max({1, frame, total}));
+            progress.setValue(frame);
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        });
+        if (scan.cancelled) return false;
+        if (!scan.errorMessage.isEmpty()) {
+            QMessageBox::critical(this, "Load Project Error", scan.errorMessage);
+            return false;
+        }
+    }
+    VDQtTimeline validatedTimeline;
+    validatedTimeline.reset(validationDecoder.getFrameCount(), validationDecoder.isFrameCountExact());
+    if (project.hasExplicitTimeline()) {
+        if (!project.timelineSegments.isEmpty() && project.sourceFrameCountExact
+            && project.sourceFrameCount > 0
+            && project.sourceFrameCount != validationDecoder.getFrameCount()) {
+            QMessageBox::critical(this, "Load Project Error",
+                QString("The source now contains %1 frames, but the saved edit list was "
+                        "created for %2 frames. The current editing session was not changed.")
+                    .arg(validationDecoder.getFrameCount()).arg(project.sourceFrameCount));
+            return false;
+        }
+        if (!validatedTimeline.replaceSegments(project.timelineSegments, &error)) {
+            QMessageBox::critical(this, "Load Project Error", error);
+            return false;
+        }
+    }
     validationDecoder.close();
 
     applyProcessingState(project.processing);
     if (!openVideoFileImpl(sourceToOpen)) return false;
     applyProcessingState(project.processing);
+    mTimeline = validatedTimeline;
     mTimelineSources = project.sourcePaths;
     mImageSequenceFps = project.imageSequenceFps;
     if (mImageSequenceFps > 0.0)
@@ -1904,34 +1946,6 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
         onAudioModeFullProcessing();
     }
 
-    if (project.hasExplicitTimeline()) {
-        if (!project.timelineSegments.isEmpty()
-            && !ensureExactFrameRange(QStringLiteral("project edit list"))) return false;
-        if (!project.timelineSegments.isEmpty() && project.sourceFrameCountExact
-            && project.sourceFrameCount > 0
-            && project.sourceFrameCount != mVideoDecoder.getFrameCount()) {
-            QMessageBox::critical(
-                this, "Load Project Error",
-                QString("The source now contains %1 frames, but the saved edit list was "
-                        "created for %2 frames. The project was not applied because its "
-                        "frame references may no longer be valid.")
-                    .arg(mVideoDecoder.getFrameCount())
-                    .arg(project.sourceFrameCount));
-            return false;
-        }
-        if (!mTimeline.replaceSegments(project.timelineSegments, &error)) {
-            QMessageBox::critical(this, "Load Project Error", error);
-            return false;
-        }
-    }
-
-    const qint64 requestedLast = std::max(
-        project.position,
-        project.hasSelection ? project.selectionEnd - 1 : 0);
-    if (!mTimeline.isEmpty() && !mVideoDecoder.isFrameCountExact()
-        && requestedLast >= mVideoDecoder.getFrameCount()) {
-        if (!ensureExactFrameRange(QStringLiteral("project timeline"))) return false;
-    }
     const int frameCount = static_cast<int>(mTimeline.frameCount());
     if (frameCount > 0) {
         mPositionControl->SetRange(0, frameCount - 1);
@@ -1959,7 +1973,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
         mTimelineMarkers.end());
     refreshTimelineMarkers();
     if (mTimeline.isEmpty()) updateTimelineView(0, true);
-    else updateEditActions();
+    else updateTimelineView(mPositionControl->GetPosition(), false);
     statusBar()->showMessage(
         QString("Project loaded: %1").arg(QFileInfo(path).fileName()));
     return true;
