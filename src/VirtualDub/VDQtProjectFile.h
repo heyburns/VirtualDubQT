@@ -56,7 +56,10 @@ struct VDQtProjectState {
     qint64 zoomEnd = 0;
     QList<qint64> markers;
     qint64 sourceFrameCount = 0;
+    bool sourceFrameCountExact = false;
+    bool timelineExplicit = false;
     QList<VDQtTimelineSegment> timelineSegments;
+    bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     VDQtProcessingState processing;
 };
 

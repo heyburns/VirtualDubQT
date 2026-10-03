@@ -3,11 +3,16 @@
 #include "VDQtOperationRegressions.h"
 #include "support/VDQtTestFixtures.h"
 #include "VirtualDub/VDQtMainWindow.h"
+#include "VirtualDub/VDQtFrameServer.h"
 
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QThread>
 #include <QtEndian>
 #include <iostream>
@@ -38,6 +43,50 @@ QByteArray readFile(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return {};
     return file.readAll();
+}
+
+bool chooseProjectFile(VDQtMainWindow& window, const char *action, const QString& path) {
+    bool chosen = false, failed = false;
+    QElapsedTimer deadline;
+    deadline.start();
+    QTimer responder;
+    responder.setInterval(5);
+    QObject::connect(&responder, &QTimer::timeout, &window, [&] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<QFileDialog*>(widget)) {
+                if (dialog->isVisible() && deadline.elapsed() > 5000) {
+                    std::cerr << "Project file dialog timed out selecting " << path.toStdString()
+                              << "; selected=" << dialog->selectedFiles().join(',').toStdString() << '\n';
+                    failed = true; dialog->reject(); continue;
+                }
+                if (!dialog->isVisible() || dialog->property("testChosen").toBool()) continue;
+                dialog->setProperty("testChosen", true);
+                dialog->setDirectory(QFileInfo(path).absolutePath());
+                dialog->selectFile(QFileInfo(path).fileName());
+                // QFileSystemModel populates asynchronously. Let it resolve
+                // the existing project before accepting a load-file dialog.
+                QTimer::singleShot(100, dialog, [dialog, path] {
+                    if (auto *filename = dialog->findChild<QLineEdit*>("fileNameEdit")) {
+                        // Match a user's typed filename instead of relying on
+                        // a still-populating view to retain programmatic selection.
+                        filename->setFocus();
+                        filename->setText(path);
+                    } else dialog->selectFile(QFileInfo(path).fileName());
+                    QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
+                });
+                chosen = true;
+            } else if (auto *message = qobject_cast<QMessageBox*>(widget)) {
+                if (!message->isVisible()) continue;
+                std::cerr << "Project dialog: " << message->text().toStdString() << '\n';
+                failed = true;
+                message->accept();
+            }
+        }
+    });
+    responder.start();
+    const bool invoked = invoke(window, action);
+    responder.stop();
+    return check(invoked && chosen && !failed, "project save/load dialog completes successfully");
 }
 
 bool sourceLifetime(VDQtTestFixtures& fixtures) {
@@ -396,6 +445,167 @@ bool outputFamilies(VDQtTestFixtures& fixtures) {
                  "approved image jobs still install a complete sequence");
 }
 
+bool unknownTimeline(VDQtTestFixtures& fixtures) {
+    const QString unknown = fixtures.directory.filePath("unknown-count.h264");
+    if (!fixtures.ffmpeg({"-i", fixtures.mp4, "-c:v", "copy", "-an",
+                          "-bsf:v", "h264_mp4toannexb", "-f", "h264", unknown})) return false;
+    const QString underestimated = fixtures.directory.filePath("underestimated.avi");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
+                          "-frames:v", "48", "-c:v", "ffv1", "-threads", "2", "-an", underestimated})) return false;
+    QByteArray avi = readFile(underestimated);
+    const qsizetype mainHeader = avi.indexOf("avih"), streamHeader = avi.indexOf("strh");
+    if (!check(mainHeader >= 0 && streamHeader >= 0 && streamHeader + 44 < avi.size()
+               && avi.mid(streamHeader + 8, 4) == "vids", "disposable AVI has expected frame-count header fields")) return false;
+    // Deliberately stale RIFF metadata: dwTotalFrames and video dwLength report
+    // four frames while all 48 encoded frames and their index remain intact.
+    qToLittleEndian<quint32>(4, reinterpret_cast<uchar*>(avi.data() + mainHeader + 24));
+    qToLittleEndian<quint32>(4, reinterpret_cast<uchar*>(avi.data() + streamHeader + 40));
+    if (!fixtures.writeText(underestimated, avi)) return false;
+    VDQtVideoDecoder probe;
+    if (!check(probe.openFile(underestimated) && !probe.isFrameCountExact() && probe.getFrameCount() == 4,
+               "the AVI fixture really supplies an underestimated count")) return false;
+    probe.close();
+    // Production owns one main window per process. Exercise both files through
+    // its actual source-close/reopen lifecycle, not a second application window.
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    for (const QString& input : {unknown, underestimated}) {
+        if (!invoke(window, "onFileClose") || !window.openVideoFile(input)) return false;
+        const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+        auto *position = window.findChild<VDQtPositionControlWidget*>();
+        if (!check(panes.size() == 2 && position, "provisional-length preview controls are available")) return false;
+        if (!check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
+                   "unknown/estimated input displays frame zero without a full scan")) return false;
+        const QImage first = panes.first()->frameImage();
+        QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                                  Q_ARG(int, VDQT_PCN_PLAY));
+        const bool advanced = waitFor([&] {
+            return position->GetPosition() >= 8 && panes.first()->frameImage() != first;
+        });
+        QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                                  Q_ARG(int, VDQT_PCN_STOP));
+        if (!check(advanced, "unknown/underestimated playback advances real video beyond provisional length")) return false;
+    }
+    return true;
+}
+
+bool emptyTimeline(VDQtTestFixtures& fixtures) {
+    VDQtMainWindow window;
+    window.setAutomationUnattended(true);
+    window.show();
+    if (!window.openVideoFile(fixtures.avs)) return false;
+    QString error;
+    const QString output = fixtures.directory.filePath("must-not-be-exported.raw");
+    const bool exported = window.runAutomationText(
+        "VirtualDub.subset.Clear();\nVirtualDub.SaveRawVideo(\"must-not-be-exported.raw\",8,4,0,0);",
+        fixtures.directory.path(), &error);
+    if (!check(!exported && error.contains("timeline", Qt::CaseInsensitive)
+               && !QFile::exists(output),
+               "an explicitly empty GUI/script timeline cannot export the full original source")) return false;
+    const auto panes = window.findChildren<VDVideoDisplayWidget*>();
+    QElapsedTimer pending; pending.start();
+    if (!waitFor([&] { return pending.elapsed() >= 100; })
+        || !check(panes.size() == 2 && panes.first()->frameImage().isNull()
+                  && panes.last()->frameImage().isNull(),
+                  "a pending old preview cannot repaint a delete-all timeline")) return false;
+
+    VDQtVideoExporter exporter;
+    const QString sentinel = fixtures.directory.filePath("preserved-empty-output.mkv");
+    if (!fixtures.writeText(sentinel, "original output")) return false;
+    for (int mode : {VideoMode_DirectStreamCopy, VideoMode_FastRecompress,
+                     VideoMode_NormalRecompress, VideoMode_FullProcessing}) {
+        VDQtVideoExporter::ExportOptions options;
+        options.inputPath = fixtures.avs;
+        options.outputPath = sentinel;
+        options.includeAudio = false;
+        options.videoMode = mode;
+        options.timelineExplicit = true;
+        options.unattended = true;
+        if (!check(!exporter.exportVideo(options) && exporter.lastError().contains("timeline")
+                   && readFile(sentinel) == "original output",
+                   "every video export mode rejects explicit-empty edits without touching output")) return false;
+    }
+    VDQtVideoExporter::RawExportOptions raw;
+    raw.inputPath = fixtures.avs; raw.outputPath = sentinel;
+    raw.timelineExplicit = true; raw.unattended = true;
+    if (!check(!exporter.exportRawVideo(raw) && exporter.lastError().contains("timeline")
+               && readFile(sentinel) == "original output", "raw export preserves existing output for empty edits")) return false;
+    VDQtFrameServer server;
+    VDQtFrameServer::Config config;
+    config.sourcePath = fixtures.avs;
+    config.pipePath = fixtures.directory.filePath("must-not-be-created.fifo");
+    config.timelineExplicit = true;
+    if (!check(!server.start(config, &error) && error.contains("timeline")
+               && !server.isRunning() && !QFile::exists(config.pipePath),
+               "empty edited frame serving fails before creating a FIFO or worker")) return false;
+
+    const QString saved = fixtures.directory.filePath("empty.vdqproject");
+    if (!chooseProjectFile(window, "onFileSaveProjectAs", saved)) return false;
+    VDQtProjectState project;
+    const bool projectLoaded = VDQtProjectFile::loadProject(saved, &project, &error);
+    if (!projectLoaded || !project.timelineExplicit || !project.sourceFrameCountExact)
+        std::cerr << "Empty project: loaded=" << projectLoaded << ", exists=" << QFile::exists(saved)
+                  << ", explicit=" << project.timelineExplicit << ", exact=" << project.sourceFrameCountExact
+                  << ", error=" << error.toStdString() << '\n';
+    if (!check(projectLoaded
+               && project.timelineExplicit && project.timelineSegments.isEmpty()
+               && project.sourceFrameCountExact, "empty GUI project saves explicit intent and count accuracy")) return false;
+    if (!window.openVideoFile(fixtures.mp4)
+        || !chooseProjectFile(window, "onFileLoadProject", saved)) return false;
+    if (!check(!window.runAutomationText("VirtualDub.SaveRawVideo(\"reloaded.raw\",8,4,0,0);",
+                                        fixtures.directory.path(), &error)
+               && error.contains("timeline") && !QFile::exists(fixtures.directory.filePath("reloaded.raw")),
+               "loading an empty project keeps its deleted-all timeline")) return false;
+
+    auto *queue = window.findChild<VDQtJobQueue*>();
+    if (!queue) return false;
+    for (VDQtJobOperation operation : {VDQtJobOperation::VideoExport, VDQtJobOperation::RawVideoExport,
+                                      VDQtJobOperation::ImageSequenceExport, VDQtJobOperation::AudioExport}) {
+        VDQtJobState job;
+        job.operation = operation;
+        job.sourcePaths = {fixtures.avs};
+        job.audioDisabled = true;
+        job.options.includeAudio = false;
+        job.options.timelineExplicit = true;
+        job.options.outputPath = fixtures.directory.filePath(QString("empty-job-%1.mkv").arg(int(operation)));
+        const QString queuePath = fixtures.directory.filePath("empty-jobs.vdqjobs");
+        QList<VDQtJobState> restored;
+        if (!VDQtProjectFile::saveJobQueue(queuePath, {job}, &error)
+            || !VDQtProjectFile::loadJobQueue(queuePath, &restored, &error)
+            || !check(restored.size() == 1 && restored.first().options.timelineExplicit,
+                      "queued empty intent survives serialization")
+            || !queue->replaceJobs(restored, &error) || !invoke(window, "runPendingJobs")) return false;
+        if (!check(queue->jobAt(0)->status == VDQtJobStatus::Failed
+                   && queue->jobAt(0)->error.contains("timeline") && !QFile::exists(job.options.outputPath),
+                   "video/raw/image/audio jobs refuse empty edits before preparing output")) return false;
+    }
+
+    // Old empty arrays mean identity. Version 7 must carry a real boolean, and
+    // an untouched estimated source must not become an explicit bounded edit.
+    QJsonObject document = QJsonDocument::fromJson(readFile(saved)).object();
+    document["version"] = 6;
+    document.remove("timelineExplicit"); document.remove("sourceFrameCountExact");
+    const QString legacy = fixtures.directory.filePath("legacy.vdqproject");
+    fixtures.writeText(legacy, QJsonDocument(document).toJson());
+    if (!check(VDQtProjectFile::loadProject(legacy, &project, &error)
+               && !project.hasExplicitTimeline(), "legacy empty project arrays retain source-identity meaning")) return false;
+    document["version"] = 7;
+    document["sourceFrameCountExact"] = false;
+    document["timelineExplicit"] = "false";
+    const QString malformed = fixtures.directory.filePath("bad-intent.vdqproject");
+    fixtures.writeText(malformed, QJsonDocument(document).toJson());
+    if (!check(!VDQtProjectFile::loadProject(malformed, &project, &error),
+               "nonboolean timeline intent cannot silently become full-source identity")) return false;
+    document["timelineExplicit"] = false;
+    document["sourceFrameCount"] = 1;
+    const QString provisional = fixtures.directory.filePath("provisional.vdqproject");
+    fixtures.writeText(provisional, QJsonDocument(document).toJson());
+    if (!chooseProjectFile(window, "onFileLoadProject", provisional)) return false;
+    return check(waitFor([&] { return !panes.first()->frameImage().isNull(); }),
+                 "a new-format untouched estimate reopens as source identity, not a fixed-length edit");
+}
+
 bool sourceProtection(VDQtTestFixtures& fixtures) {
     const QString directory = fixtures.directory.path();
     const QString list = fixtures.directory.filePath("list.txt");
@@ -514,5 +724,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "queue") return queueIsolation(fixtures);
     if (scenario == "outputs") return outputFamilies(fixtures);
     if (scenario == "safety") return sourceProtection(fixtures);
+    if (scenario == "unknown_timeline") return unknownTimeline(fixtures);
+    if (scenario == "empty_timeline") return emptyTimeline(fixtures);
     return check(false, "unknown operation regression");
 }

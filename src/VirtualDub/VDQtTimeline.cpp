@@ -27,6 +27,7 @@ qint64 segmentTotal(const QList<VDQtTimelineSegment>& segments) {
 void VDQtTimeline::reset(qint64 sourceFrameCount, bool exactFrameCount) {
     mSourceFrameCount = std::max<qint64>(0, sourceFrameCount);
     mSourceFrameCountExact = exactFrameCount;
+    mIdentity = true;
     mSegments.clear();
     if (mSourceFrameCount > 0)
         mSegments.append({0, mSourceFrameCount});
@@ -39,27 +40,18 @@ void VDQtTimeline::setSourceFrameCount(qint64 sourceFrameCount,
     // length. Once the user has edited, changing segments would corrupt their
     // edit decisions; only the source boundary metadata is then updated.
     sourceFrameCount = std::max<qint64>(0, sourceFrameCount);
-    const bool identityBeforeUpdate = isIdentity();
+    if (sourceFrameCount == mSourceFrameCount && exactFrameCount == mSourceFrameCountExact) return;
     mSourceFrameCount = sourceFrameCount;
     mSourceFrameCountExact = exactFrameCount;
-    if (identityBeforeUpdate) {
+    if (mIdentity) {
         mSegments.clear();
         if (sourceFrameCount > 0) mSegments.append({0, sourceFrameCount});
-        clearHistory();
     }
 }
 
 qint64 VDQtTimeline::frameCount() const {
     const qint64 total = segmentTotal(mSegments);
     return std::max<qint64>(0, total);
-}
-
-bool VDQtTimeline::isIdentity() const {
-    if (mSourceFrameCount == 0) return mSegments.isEmpty();
-    return mSegments.size() == 1
-        && mSegments.first().sourceStartFrame == 0
-        && mSegments.first().frameCount == mSourceFrameCount
-        && !mSegments.first().masked;
 }
 
 bool VDQtTimeline::validateSegments(
@@ -124,12 +116,18 @@ bool VDQtTimeline::replaceSegments(
     const QList<VDQtTimelineSegment> compact = normalized(segments);
     if (!validateSegments(compact, errorMessage)) return false;
     mSegments = compact;
+    mIdentity = false;
     if (clearHistoryAfterReplace) clearHistory();
     return true;
 }
 
 qint64 VDQtTimeline::mapOutputToSource(qint64 outputFrame) const {
     if (outputFrame < 0) return -1;
+    if (mIdentity) {
+        // Only a verified EOF bounds an unedited source. Estimates and zero
+        // unknown counts must not prevent the decoder from discovering frames.
+        return !mSourceFrameCountExact || outputFrame < mSourceFrameCount ? outputFrame : -1;
+    }
     qint64 outputCursor = 0;
     qint64 precedingUnmaskedFrame = -1;
     for (const VDQtTimelineSegment& segment : mSegments) {
@@ -165,6 +163,11 @@ qint64 VDQtTimeline::mapSourceToOutput(qint64 sourceFrame,
                                        qint64 outputHint,
                                        bool searchForward) const {
     if (sourceFrame < 0) return -1;
+    if (mIdentity) {
+        if ((mSourceFrameCountExact && sourceFrame >= mSourceFrameCount)
+            || (searchForward ? sourceFrame < outputHint : sourceFrame > outputHint)) return -1;
+        return sourceFrame;
+    }
     qint64 outputCursor = 0;
     // A source frame may occur multiple times after paste/insert operations.
     // outputHint plus direction selects the occurrence appropriate for current
@@ -221,16 +224,17 @@ QList<VDQtTimelineSegment> VDQtTimeline::copyRange(
 }
 
 bool VDQtTimeline::applyEdit(const QList<VDQtTimelineSegment>& segments,
-                             QString *errorMessage) {
+                             QString *errorMessage, bool identity) {
     const QList<VDQtTimelineSegment> compact = normalized(segments);
     if (!validateSegments(compact, errorMessage)) return false;
-    if (compact == mSegments) return true;
+    if (compact == mSegments && identity == mIdentity) return true;
     // Store complete, compact segment lists. They are small in normal editing
     // and make undo atomic even when one command spans several source ranges.
-    mUndoStack.append(mSegments);
+    mUndoStack.append({mSegments, mIdentity});
     while (mUndoStack.size() > kMaximumHistoryEntries) mUndoStack.removeFirst();
     mRedoStack.clear();
     mSegments = compact;
+    mIdentity = identity;
     return true;
 }
 
@@ -298,7 +302,7 @@ bool VDQtTimeline::replaceRange(
 bool VDQtTimeline::resetEdits(QString *errorMessage) {
     QList<VDQtTimelineSegment> identity;
     if (mSourceFrameCount > 0) identity.append({0, mSourceFrameCount});
-    return applyEdit(identity, errorMessage);
+    return applyEdit(identity, errorMessage, true);
 }
 
 bool VDQtTimeline::clear(QString *errorMessage) {
@@ -307,16 +311,27 @@ bool VDQtTimeline::clear(QString *errorMessage) {
 
 bool VDQtTimeline::undo() {
     if (mUndoStack.isEmpty()) return false;
-    mRedoStack.append(mSegments);
-    mSegments = mUndoStack.takeLast();
+    mRedoStack.append({mSegments, mIdentity});
+    restoreState(mUndoStack.takeLast());
     return true;
 }
 
 bool VDQtTimeline::redo() {
     if (mRedoStack.isEmpty()) return false;
-    mUndoStack.append(mSegments);
-    mSegments = mRedoStack.takeLast();
+    mUndoStack.append({mSegments, mIdentity});
+    restoreState(mRedoStack.takeLast());
     return true;
+}
+
+void VDQtTimeline::restoreState(const State& state) {
+    mIdentity = state.identity;
+    mSegments = state.segments;
+    if (mIdentity) {
+        // Undoing an edit restores the current source, not a stale estimated
+        // identity length captured before the decoder refined its metadata.
+        mSegments.clear();
+        if (mSourceFrameCount > 0) mSegments.append({0, mSourceFrameCount});
+    }
 }
 
 void VDQtTimeline::clearHistory() {

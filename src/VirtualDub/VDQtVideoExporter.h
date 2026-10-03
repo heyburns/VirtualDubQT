@@ -83,9 +83,11 @@ public:
         // opening modal questions or error boxes. Progress remains visible and
         // cancellable.
         bool unattended = false;
-        // Empty means the decoder's identity timeline. Non-empty edit lists
-        // map output frames to source frames and force frame-accurate render.
+        // A missing mapping means source identity; an explicit empty mapping
+        // means no frames. Nonempty legacy callers remain explicit automatically.
+        bool timelineExplicit = false;
         QList<VDQtTimelineSegment> timelineSegments;
+        bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     };
 
     struct RawExportOptions {
@@ -105,7 +107,9 @@ public:
         QString colorMatrix = QStringLiteral("bt601");
         bool fullRange = false;
         bool unattended = false;
+        bool timelineExplicit = false;
         QList<VDQtTimelineSegment> timelineSegments;
+        bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     };
 
     bool exportVideo(const ExportOptions& options,

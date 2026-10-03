@@ -28,7 +28,9 @@ public:
         int errorMode = 0;
         QList<VDFilterInstance> filters;
         bool preserveEmptyFrames = true;
-        QList<VDQtTimelineSegment> timelineSegments; // Empty means identity.
+        bool timelineExplicit = false;
+        QList<VDQtTimelineSegment> timelineSegments;
+        bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     };
 
     explicit VDQtFrameServer(QObject *parent = nullptr);

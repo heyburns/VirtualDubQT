@@ -1000,6 +1000,10 @@ bool VDQtVideoExporter::exportRawVideo(
             QMessageBox::critical(parentWidget, "Raw Video Export Error", message);
     };
 
+    if (options.hasExplicitTimeline() && options.timelineSegments.isEmpty()) {
+        reportError(QStringLiteral("The edited timeline contains no frames."));
+        return false;
+    }
     if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) {
         reportError(QStringLiteral("The raw export source or destination path is empty."));
         return false;
@@ -1090,7 +1094,7 @@ bool VDQtVideoExporter::exportRawVideo(
     VDQtTimeline renderTimeline;
     renderTimeline.reset(totalFrames, true);
     QString timelineError;
-    const bool editedTimeline = !options.timelineSegments.isEmpty();
+    const bool editedTimeline = options.hasExplicitTimeline();
     if (editedTimeline
         && !renderTimeline.replaceSegments(
             options.timelineSegments, &timelineError, true)) {
@@ -1364,13 +1368,19 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         mWasCancelled = true;
         return false;
     }
+    if (options.hasExplicitTimeline() && options.timelineSegments.isEmpty()) {
+        mLastError = QStringLiteral("The edited timeline contains no frames.");
+        if (parentWidget)
+            QMessageBox::critical(parentWidget, "Timeline Export Error", mLastError);
+        return false;
+    }
     if (options.inputPath.isEmpty() || options.outputPath.isEmpty()) {
         mLastError = QStringLiteral("The video export source or destination path is empty.");
         return false;
     }
     int videoMode = options.videoMode;
     int audioMode = options.audioMode;
-    const bool editedTimeline = !options.timelineSegments.isEmpty();
+    const bool editedTimeline = options.hasExplicitTimeline();
     // Arbitrary edit lists cannot be represented as one compressed packet
     // interval. Route them through the frame-accurate render path. Audio is
     // likewise decoded at edit boundaries so removed ranges cannot leak back

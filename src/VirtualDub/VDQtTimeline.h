@@ -36,9 +36,18 @@ public:
     qint64 sourceFrameCount() const { return mSourceFrameCount; }
     bool sourceFrameCountExact() const { return mSourceFrameCountExact; }
     qint64 frameCount() const;
-    bool isEmpty() const { return mSegments.isEmpty(); }
-    bool isIdentity() const;
-    bool isModified() const { return !isIdentity(); }
+    // Identity is intent, not a guess from the current metadata/segment shape.
+    // An unknown identity source has no known frames yet; it is not an empty edit.
+    bool isEmpty() const { return !mIdentity && mSegments.isEmpty(); }
+    bool isIdentity() const { return mIdentity; }
+    bool isModified() const {
+        // A verified full-source list changes no pixels/ranges. Preserve the
+        // existing Fast Recompress/direct-copy eligibility for that case while
+        // keeping the explicit mapping intent available to persistence.
+        return !mIdentity && (mSegments.isEmpty() || !mSourceFrameCountExact
+            || mSegments.size() != 1 || mSegments.first().sourceStartFrame != 0
+            || mSegments.first().frameCount != mSourceFrameCount || mSegments.first().masked);
+    }
 
     const QList<VDQtTimelineSegment>& segments() const { return mSegments; }
     bool replaceSegments(const QList<VDQtTimelineSegment>& segments,
@@ -82,15 +91,21 @@ private:
     bool validateSegments(const QList<VDQtTimelineSegment>& segments,
                           QString *errorMessage) const;
     bool applyEdit(const QList<VDQtTimelineSegment>& segments,
-                   QString *errorMessage);
+                   QString *errorMessage, bool identity = false);
     QList<VDQtTimelineSegment> slice(qint64 startFrame,
                                      qint64 endFrameExclusive) const;
 
     qint64 mSourceFrameCount = 0;
     bool mSourceFrameCountExact = false;
+    bool mIdentity = true;
     QList<VDQtTimelineSegment> mSegments;
-    QList<QList<VDQtTimelineSegment>> mUndoStack; // Old segment snapshots.
-    QList<QList<VDQtTimelineSegment>> mRedoStack; // Cleared by a new edit.
+    struct State {
+        QList<VDQtTimelineSegment> segments;
+        bool identity = true;
+    };
+    void restoreState(const State& state);
+    QList<State> mUndoStack; // Segment snapshots and their mapping intent.
+    QList<State> mRedoStack; // Cleared by a new edit, not by preview metadata.
 };
 
 #endif // VDQTTIMELINE_H

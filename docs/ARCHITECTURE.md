@@ -115,8 +115,20 @@ frame/time entry dialog, exits timeline zoom when necessary, and then uses the
 ordinary `SetPosition()` path. Frame and time values in that dialog refer to the
 edited timeline, not necessarily the underlying source-frame number.
 
-Exports receive a copy of the timeline segments. An empty segment list in export
-options means identity mapping for backward compatibility.
+`VDQtTimeline` stores source-identity intent separately from its segment list.
+An unedited unknown/estimated source allows decoding beyond the provisional
+count; exact source lengths and explicit edits remain bounded. An intentionally
+empty edit never becomes identity when metadata changes. Undo/redo snapshots
+carry this intent, and unchanged preview metadata does not clear history.
+An explicit full-source list can retain ordinary recompression/copy eligibility
+when its length is verified, without losing its persistence intent.
+
+Exports, raw export, and frame serving carry `timelineExplicit`. Nonempty lists
+also imply explicit mapping for old API callers. Empty plus false means absent
+mapping/source identity; empty plus true means no output and must fail before
+rendering or FIFO creation. Controllers must forward that flag when all frames
+were deleted. Image/audio jobs and saves apply the same no-output rule, while
+source-only analysis can still inspect the original media.
 
 ## Filter pipelines
 
@@ -248,6 +260,16 @@ source graph; staged-output commit must still apply its own destination checks.
 
 Loaders parse into temporary values and commit only after full validation.
 Writers use `QSaveFile` so a crash cannot leave a half-written project or queue.
+
+Document version 7 stores timeline intent in projects/jobs and source-count
+accuracy in projects. The editor saves untouched sources as implicit identity,
+not as bounded segments derived from an estimate. Versions 1-6 still load using
+their original rules: missing/empty edit arrays mean identity, and nonempty arrays
+remain explicit. New-format missing/nonboolean/inconsistent intent is rejected.
+Older binaries cannot read newly saved version-7 files; retain older originals
+when a binary rollback is needed. Processing-settings files retain version 6
+because their schema is unchanged. This does not make project/recovery restore
+fully transactional or repair legacy estimated-identity ambiguity.
 
 Codec/filter/decompression choices intentionally persist only while the
 application is open. Recent-file and window UI history may use `QSettings`.

@@ -17,7 +17,10 @@
 
 namespace {
 
-constexpr int kDocumentVersion = 6;
+constexpr int kDocumentVersion = 7;
+// Processing settings contain no timeline intent and their schema is unchanged.
+// Keep writing their established version so older builds can still read them.
+constexpr int kProcessingSettingsVersion = 6;
 constexpr int kOldestSupportedDocumentVersion = 1;
 constexpr qint64 kMaximumDocumentBytes = qint64{4} * 1024 * 1024;
 
@@ -26,6 +29,24 @@ constexpr qint64 kMaximumDocumentBytes = qint64{4} * 1024 * 1024;
 // changes require a document-version bump and migration handling.
 void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
+}
+
+bool parseTimelineIntent(const QJsonObject& object, int version,
+                         bool *explicitTimeline, QString *errorMessage) {
+    const QJsonValue segments = object.value("timelineSegments");
+    if (version < 7) {
+        // Legacy empty/missing arrays meant source identity, not delete-all.
+        *explicitTimeline = !segments.toArray().isEmpty();
+        return true;
+    }
+    const QJsonValue intent = object.value("timelineExplicit");
+    if (!intent.isBool() || !segments.isArray()
+        || (!intent.toBool() && !segments.toArray().isEmpty())) {
+        setError(errorMessage, QStringLiteral("The saved timeline intent is missing or inconsistent."));
+        return false;
+    }
+    *explicitTimeline = intent.toBool();
+    return true;
 }
 
 bool isSafeImageExtension(const QString& extension) {
@@ -484,7 +505,7 @@ bool VDQtProjectFile::saveProcessingSettings(
     QString *errorMessage) {
     QJsonObject root;
     root["kind"] = QStringLiteral("VirtualDubQTProcessingSettings");
-    root["version"] = kDocumentVersion;
+    root["version"] = kProcessingSettingsVersion;
     root["processing"] = processingToJson(state);
     return writeDocument(path, root, errorMessage);
 }
@@ -557,6 +578,8 @@ bool VDQtProjectFile::saveProject(
         markers.append(static_cast<double>(marker));
     root["markers"] = markers;
     root["sourceFrameCount"] = static_cast<double>(state.sourceFrameCount);
+    root["sourceFrameCountExact"] = state.sourceFrameCountExact;
+    root["timelineExplicit"] = state.hasExplicitTimeline();
     QJsonArray timelineSegments;
     for (const VDQtTimelineSegment& segment : state.timelineSegments) {
         QJsonObject segmentObject;
@@ -586,6 +609,14 @@ bool VDQtProjectFile::loadProject(
         return false;
 
     VDQtProjectState result;
+    const int version = root.value("version").toInt();
+    if (!parseTimelineIntent(root, version, &result.timelineExplicit, errorMessage)) return false;
+    if (version >= 7 && !root.value("sourceFrameCountExact").isBool()) {
+        setError(errorMessage, QStringLiteral("The saved source-count accuracy is missing or invalid."));
+        return false;
+    }
+    // Older projects treated saved counts as exact; retain that migration rule.
+    result.sourceFrameCountExact = version < 7 || root.value("sourceFrameCountExact").toBool();
     QJsonArray serializedSources = root.value("sourcePaths").toArray();
     if (serializedSources.isEmpty() && root.value("sourcePath").isString())
         serializedSources.append(root.value("sourcePath"));
@@ -720,6 +751,12 @@ bool VDQtProjectFile::loadProject(
                  QStringLiteral("The saved position or selection is outside the edited timeline."));
         return false;
     }
+    if (result.timelineExplicit && result.timelineSegments.isEmpty()
+        && (result.position != 0 || result.hasSelection || result.selectionStart != 0
+            || result.selectionEnd != 0 || result.zoomEnabled)) {
+        setError(errorMessage, QStringLiteral("An empty edited timeline cannot contain a position, selection, or zoom range."));
+        return false;
+    }
     if (!parseProcessing(
             root.value("processing").toObject(), &result.processing, errorMessage))
         return false;
@@ -846,6 +883,7 @@ bool VDQtProjectFile::saveJobQueue(
         options["videoPixelFormatOverride"] = job.options.videoPixelFormatOverride;
         options["smartRendering"] = job.options.smartRendering;
         options["preserveEmptyFrames"] = job.options.preserveEmptyFrames;
+        options["timelineExplicit"] = job.options.hasExplicitTimeline();
         QJsonArray timelineSegments;
         for (const VDQtTimelineSegment& segment : job.options.timelineSegments) {
             QJsonObject segmentObject;
@@ -1010,6 +1048,8 @@ bool VDQtProjectFile::loadJobQueue(
         if (!outputPath.isEmpty() && !QFileInfo(outputPath).isAbsolute())
             outputPath = documentDirectory.absoluteFilePath(outputPath);
         const QJsonObject options = object.value("options").toObject();
+        if (!parseTimelineIntent(options, root.value("version").toInt(),
+                                 &job.options.timelineExplicit, errorMessage)) return false;
         job.options.inputPath = job.sourcePaths.first();
         job.options.outputPath = outputPath.isEmpty()
             ? QString() : QDir::cleanPath(outputPath);

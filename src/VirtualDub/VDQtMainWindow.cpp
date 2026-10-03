@@ -1579,7 +1579,9 @@ VDQtProjectState VDQtMainWindow::captureProjectState() const {
     project.zoomEnd = mPositionControl->GetZoomEnd();
     project.markers = mTimelineMarkers;
     project.sourceFrameCount = mTimeline.sourceFrameCount();
-    project.timelineSegments = mTimeline.segments();
+    project.sourceFrameCountExact = mTimeline.sourceFrameCountExact();
+    project.timelineExplicit = !mTimeline.isIdentity();
+    if (project.timelineExplicit) project.timelineSegments = mTimeline.segments();
     project.processing = captureProcessingState();
     return project;
 }
@@ -1692,7 +1694,8 @@ VDQtVideoExporter::ExportOptions VDQtMainWindow::currentExportOptions(
     options.smartRendering = mSmartRendering;
     options.preserveEmptyFrames = mPreserveEmptyFrames;
     options.includeAudio = !mAudioDisabled;
-    if (mTimeline.isModified()) options.timelineSegments = mTimeline.segments();
+    options.timelineExplicit = mTimeline.isModified();
+    if (options.timelineExplicit) options.timelineSegments = mTimeline.segments();
     return options;
 }
 
@@ -1883,9 +1886,11 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
         onAudioModeFullProcessing();
     }
 
-    if (!project.timelineSegments.isEmpty()) {
-        if (!ensureExactFrameRange(QStringLiteral("project edit list"))) return false;
-        if (project.sourceFrameCount > 0
+    if (project.hasExplicitTimeline()) {
+        if (!project.timelineSegments.isEmpty()
+            && !ensureExactFrameRange(QStringLiteral("project edit list"))) return false;
+        if (!project.timelineSegments.isEmpty() && project.sourceFrameCountExact
+            && project.sourceFrameCount > 0
             && project.sourceFrameCount != mVideoDecoder.getFrameCount()) {
             QMessageBox::critical(
                 this, "Load Project Error",
@@ -1905,7 +1910,7 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
     const qint64 requestedLast = std::max(
         project.position,
         project.hasSelection ? project.selectionEnd - 1 : 0);
-    if (!mVideoDecoder.isFrameCountExact()
+    if (!mTimeline.isEmpty() && !mVideoDecoder.isFrameCountExact()
         && requestedLast >= mVideoDecoder.getFrameCount()) {
         if (!ensureExactFrameRange(QStringLiteral("project timeline"))) return false;
     }
@@ -1935,6 +1940,8 @@ bool VDQtMainWindow::loadProjectFile(const QString& path) {
         std::unique(mTimelineMarkers.begin(), mTimelineMarkers.end()),
         mTimelineMarkers.end());
     refreshTimelineMarkers();
+    if (mTimeline.isEmpty()) updateTimelineView(0, true);
+    else updateEditActions();
     statusBar()->showMessage(
         QString("Project loaded: %1").arg(QFileInfo(path).fileName()));
     return true;
@@ -2049,6 +2056,10 @@ void VDQtMainWindow::onFileSaveAudio() {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
         QMessageBox::warning(this, "Save audio", "No video/audio source has been loaded to save.");
+        return;
+    }
+    if (mTimeline.isEmpty()) {
+        QMessageBox::warning(this, "Save audio", "The edited timeline contains no frames or audio to export.");
         return;
     }
 
@@ -2687,6 +2698,10 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
                                            bool raw,
                                            QString *errorMessage) {
     OperationScope operation(*this);
+    if (mTimeline.isEmpty()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The edited timeline contains no frames or audio to export.");
+        return false;
+    }
     auto sourceSafety = loadedSourceSnapshot(mVideoDecoder, mAudioPlayer, mTimelineSources);
     if (!sourceSafety.evaluateOutputPath(outputPath).isSafe()) {
         if (errorMessage) *errorMessage = QStringLiteral(
@@ -2876,7 +2891,8 @@ bool VDQtMainWindow::exportAutomationRawVideo(
     } else {
         options.endFrame = -1;
     }
-    if (mTimeline.isModified()) options.timelineSegments = mTimeline.segments();
+    options.timelineExplicit = mTimeline.isModified();
+    if (options.timelineExplicit) options.timelineSegments = mTimeline.segments();
     VDQtVideoExporter exporter;
     const bool result = exporter.exportRawVideo(
         options, &mVideoDecoder, &mAudioPlayer,
@@ -4451,6 +4467,11 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         if (errorMessage) *errorMessage = QStringLiteral("The job has no source file.");
         return false;
     }
+    if (job.operation != VDQtJobOperation::VideoAnalysis
+        && job.options.hasExplicitTimeline() && job.options.timelineSegments.isEmpty()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The queued timeline contains no frames.");
+        return false;
+    }
     if (job.operation != VDQtJobOperation::VideoAnalysis) {
         const QFileInfo output(job.options.outputPath);
         if ((output.exists() || output.isSymLink()) && !job.replaceExisting) {
@@ -4647,6 +4668,7 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         options.colorMatrix = job.processing.rawVideo.colorMatrix;
         options.fullRange = job.processing.rawVideo.fullRange;
         options.unattended = true;
+        options.timelineExplicit = job.options.timelineExplicit;
         options.timelineSegments = job.options.timelineSegments;
         QString queuedStage;
         if (!prepareQueuedStage(&queuedStage)) return false;
@@ -4773,7 +4795,7 @@ bool VDQtMainWindow::executeImageSequenceJob(
 
     VDQtTimeline timeline;
     timeline.reset(totalFrames, true);
-    if (!job.options.timelineSegments.isEmpty()
+    if (job.options.hasExplicitTimeline()
         && !timeline.replaceSegments(job.options.timelineSegments, errorMessage, true))
         return false;
     const int timelineFrames = static_cast<int>(timeline.frameCount());
@@ -4939,8 +4961,9 @@ void VDQtMainWindow::reloadQueuedJob(int row) {
     mRawInputHeight = job->rawHeight;
     mRawInputFrameRate = job->rawFrameRate;
     mRawInputByteOffset = job->rawByteOffset;
-    if (!job->options.timelineSegments.isEmpty()) {
-        if (!ensureExactFrameRange(QStringLiteral("queued edit list"))
+    if (job->options.hasExplicitTimeline()) {
+        if ((!job->options.timelineSegments.isEmpty()
+             && !ensureExactFrameRange(QStringLiteral("queued edit list")))
             || !mTimeline.replaceSegments(job->options.timelineSegments, &error, true)) {
             QMessageBox::critical(
                 this, QStringLiteral("Reload Job Error"),
@@ -5074,7 +5097,8 @@ bool VDQtMainWindow::startFrameServerAtPath(
     config.errorMode = mDecoderErrorModeConfig.errorMode;
     config.filters = VDQtFilterSystem::instance().getActiveChain();
     config.preserveEmptyFrames = mPreserveEmptyFrames;
-    if (mTimeline.isModified()) config.timelineSegments = mTimeline.segments();
+    config.timelineExplicit = mTimeline.isModified();
+    if (config.timelineExplicit) config.timelineSegments = mTimeline.segments();
 
     if (!mAudioDisabled && mAudioPlayer.hasAudio()) {
         if (!ensureExactFrameRange(QStringLiteral("frame-server audio range"))) {
@@ -5633,7 +5657,8 @@ void VDQtMainWindow::onFileExportRawVideo() {
     options.bottomUp = mRawVideoExportConfig.bottomUp;
     options.colorMatrix = mRawVideoExportConfig.colorMatrix;
     options.fullRange = mRawVideoExportConfig.fullRange;
-    if (mTimeline.isModified()) options.timelineSegments = mTimeline.segments();
+    options.timelineExplicit = mTimeline.isModified();
+    if (options.timelineExplicit) options.timelineSegments = mTimeline.segments();
 
     VDLogWindow::instance(this)->appendLog(
         QString("[Export] Rendering raw video to %1 (%2, alignment %3)...")
@@ -6246,7 +6271,8 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     options.animationGrayscale = grayscale && grayscale->isChecked();
     options.metadata = mTextMetadata;
     options.protectedSourcePaths = mTimelineSources;
-    if (mTimeline.isModified()) options.timelineSegments = mTimeline.segments();
+    options.timelineExplicit = mTimeline.isModified();
+    if (options.timelineExplicit) options.timelineSegments = mTimeline.segments();
 
     VDQtVideoExporter exporter;
     const bool success = exporter.exportVideo(
@@ -6621,7 +6647,16 @@ void VDQtMainWindow::updateTimelineView(qint64 preferredPosition,
     const qint64 position = count > 0
         ? std::clamp(preferredPosition, qint64(0), last) : 0;
     mPositionControl->SetPosition(position);
-    if (count <= 0) {
+    if (mTimeline.isEmpty()) {
+        // An outstanding decode belongs to the old edit mapping. It must not
+        // repaint source frames after delete-all or an empty project restore.
+        if (mFrameDecodeWorker) mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);
+        mFrameRequestPending = false;
+        mQueuedPlaybackFrame = -1;
+        mDecodedPreviewFrames.clear();
+        mDecodedPreviewTimelineFrame = -1;
+        mPositionControl->SetSelection(0, 0);
+        mPositionControl->ClearZoomRange();
         mInputDisplay->clearDisplay();
         mOutputDisplay->clearDisplay();
         statusBar()->showMessage(QStringLiteral("The edited timeline is empty"));
@@ -9044,6 +9079,10 @@ void VDQtMainWindow::onTransportAction(int actionCode) {
 
 void VDQtMainWindow::performTransportAction(int actionCode) {
     if (!mVideoDecoder.isOpen()) return;
+    if (mTimeline.isEmpty() && (actionCode == VDQT_PCN_PLAY || actionCode == VDQT_PCN_PLAYPREVIEW)) {
+        statusBar()->showMessage(QStringLiteral("The edited timeline contains no frames to play."));
+        return;
+    }
 
     switch (actionCode) {
     case VDQT_PCN_STOP: // 0 - Stop
@@ -9402,10 +9441,16 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
             mPlaybackFrameDurationSeconds = adjustedDuration;
     }
 
-    if (frameCount > 0) {
-        const bool exactFrameCount = frameCountStatus
-            == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Exact);
-        mTimeline.setSourceFrameCount(frameCount, exactFrameCount);
+    const bool workerExact = frameCountStatus
+        == static_cast<int>(VDQtVideoDecoder::FrameCountStatus::Exact);
+    const bool exactFrameCount = workerExact || mTimeline.sourceFrameCountExact();
+    if (frameCount > 0 || mTimeline.isIdentity()) {
+        // A decoded frame establishes a known prefix even if the container
+        // supplied no count. Keep the mapping provisional until verified EOF.
+        const qint64 knownFrames = workerExact ? frameCount
+            : mTimeline.sourceFrameCountExact() ? mTimeline.sourceFrameCount()
+            : std::max({qint64(frameCount), mTimeline.sourceFrameCount(), qint64(frameIndex) + 1});
+        mTimeline.setSourceFrameCount(knownFrames, exactFrameCount);
         // Provisional metadata may underestimate a stream. Keep an expanded
         // interactive range while playback is discovering frames; shrinking
         // it would clamp the slider backwards and enqueue a spurious seek on

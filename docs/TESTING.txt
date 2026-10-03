@@ -239,3 +239,59 @@ Validation of this checkpoint:
     Sanitizer leak detection remains disabled as documented above.
   - The regular build/VirtualDubQt is rebuilt and passes the generated VCF
     smoke check under isolated configuration/data directories.
+
+Provisional source identity and explicitly empty edits (S01/S03)
+--------------------------------------------------------------
+
+  ctest --preset release-checks -R 'timeline_contract|operation_.*timeline'
+  ctest --preset sanitizer-checks -R 'timeline_contract|operation_.*timeline'
+
+Before repair, all three new checks failed: unknown-count input never displayed
+frame zero, the real script/controller exported all 48 original frames after
+subset.Clear(), and unknown identity mapping rejected even frame zero.
+
+timeline_contract_tests checks unknown/underestimated identity mapping, exact
+boundaries, explicit empty edits, source-count refinement, intent-aware undo/redo,
+redo after unchanged metadata, and bounded genuine edits. Verified full-source
+lists retain the existing recompression/copy eligibility.
+
+operation_unknown_timeline creates raw H.264 without count metadata and a
+48-frame FFV1 AVI whose disposable header declares only four frames. A decoder
+probe verifies the underestimated count really is four. The actual main window
+must display frame zero and play past the provisional end with changing images.
+Both sources use one window and the application's real Close/Open lifecycle.
+No physical audio device is created and no full-source pre-index is added to
+source opening/playback.
+
+operation_empty_timeline verifies script/controller delete-all behavior, stale
+preview rejection, all four video modes, raw export, preservation of existing
+output, and frame-server refusal before FIFO creation. It saves/reloads an empty
+project through the real dialogs, round-trips empty video/raw/image/audio jobs,
+and verifies all four job types fail before preparing output. It checks legacy
+empty-array identity, strict new-format boolean intent, and reopening an untouched
+estimate as source identity. The Batch Wizard regression additionally verifies
+that full-source jobs clear both inherited edits and their explicit-mapping flag.
+
+Projects/jobs now use document version 7. Versions 1-6 remain readable with their
+old empty-array meaning; older binaries cannot read newly written version-7 files.
+Processing-settings files retain version 6 because their format has not changed.
+No user project, recovery snapshot, source media, or settings are modified by
+these tests. Decoder sparse-EOF/VFR/index correctness, stale nonempty-edit preview,
+fully transactional project/recovery restoration, and the progressive ProRes
+slowdown remain separate outstanding work.
+
+Additional deferred observation: a test that destroyed and recreated two main
+windows in one process reproduced an ASan use-after-free in VDLogWindow::instance
+(VDQtDialogs.cpp) via the MainWindow constructor. The static raw singleton still
+points to the log dialog after its parent window deletes it. The production app
+creates one main window per process, so the playback regression now follows that
+lifecycle; this singleton ownership issue is recorded, not repaired in S01/S03.
+
+Validation, 2026-10-03:
+  - Release preset: 28/28 checks passed, physical-device checks excluded.
+  - Sanitizer preset: 24/24 checks passed with address/undefined-behavior
+    diagnostics; allocation-limit checks are Release-only and leak detection
+    remains disabled as documented above.
+  - Regular build/VirtualDubQt rebuilt and passed generated-processing.vcf
+    through the real command-line entry point with isolated config/data paths.
+  - The codec troubleshooting suite was not included.

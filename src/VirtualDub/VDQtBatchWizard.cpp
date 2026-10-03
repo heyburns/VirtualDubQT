@@ -399,6 +399,7 @@ QList<VDQtJobState> VDQtBatchWizardDialog::buildJobs(
         job.options.startFrame = 0;
         job.options.endFrame = -1;
         job.options.timelineSegments.clear();
+        job.options.timelineExplicit = false;
         job.options.containerType = selectedContainer();
         job.options.fastStart = selectedContainer().contains(QStringLiteral("faststart"));
         job.options.includeAudio =

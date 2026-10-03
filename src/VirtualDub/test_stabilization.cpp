@@ -660,6 +660,7 @@ int main(int argc, char **argv) {
         batchTemplate.audioDisabled = true;
         batchTemplate.options.startFrame = 25;
         batchTemplate.options.endFrame = 40;
+        batchTemplate.options.timelineExplicit = true;
         batchTemplate.options.timelineSegments = {
             VDQtTimelineSegment{25, 16}
         };
@@ -674,6 +675,7 @@ int main(int argc, char **argv) {
                         && wizard.jobs().first().options.startFrame == 0
                         && wizard.jobs().first().options.endFrame == -1
                         && wizard.jobs().first().options.timelineSegments.isEmpty()
+                        && !wizard.jobs().first().options.hasExplicitTimeline()
                         && QFileInfo(wizard.jobs().first().options.outputPath).fileName()
                                == QStringLiteral("batch-source_output.mkv")
                         && wizard.jobs().first().audioDisabled

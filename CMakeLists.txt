@@ -204,6 +204,16 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    add_executable(timeline_contract_tests
+        tests/test_timeline_contract.cpp
+        src/VirtualDub/VDQtTimeline.cpp)
+    target_include_directories(timeline_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(timeline_contract_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(timeline_contract_tests)
+    add_test(NAME timeline_contract_tests COMMAND timeline_contract_tests)
+    set_tests_properties(timeline_contract_tests PROPERTIES
+        LABELS "timeline;contracts" TIMEOUT 30)
+
     add_executable(source_safety_tests
         tests/test_source_safety.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
@@ -250,7 +260,7 @@ if (BUILD_TESTING)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
-    foreach(operation_case IN ITEMS source snapshot audio queue outputs safety)
+    foreach(operation_case IN ITEMS source snapshot audio queue outputs safety empty_timeline unknown_timeline)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES

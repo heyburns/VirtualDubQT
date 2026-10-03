@@ -76,6 +76,10 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
         if (errorMessage) *errorMessage = QStringLiteral("A source and FIFO path are required.");
         return false;
     }
+    if (config.hasExplicitTimeline() && config.timelineSegments.isEmpty()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The edited timeline contains no frames to serve.");
+        return false;
+    }
     if (QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
         if (errorMessage) *errorMessage = QStringLiteral("The ffmpeg executable was not found in PATH.");
         return false;
@@ -155,7 +159,7 @@ void VDQtFrameServer::run(Config config) {
                 error = scan.errorMessage;
         }
         timeline.reset(decoder.getFrameCount(), true);
-        if (error.isEmpty() && !config.timelineSegments.isEmpty()
+        if (error.isEmpty() && config.hasExplicitTimeline()
             && !timeline.replaceSegments(config.timelineSegments, &error)) {
             if (error.isEmpty())
                 error = QStringLiteral("The frame-server timeline is invalid.");
