@@ -803,3 +803,26 @@ Validation: full Release 47/47 and ASan/UBSan 43/43 passed. Final dimension revi
 also covers the rotated intermediate and 64-bit format expansion; the focused
 filter/performance/parity/media gates reran 9/9 in both builds. The regular
 binary rebuilt and passed actual MP4/native-AVS export smoke.
+
+Native plugin clocks and lifetime (M17/C01)
+-----------------------------------------
+
+The native shared-module regression failed against the old zero-rate/local-counter
+host. Preparation and run callbacks now receive actual rational rate, stage
+ordinal and 100 ns timestamp boundaries. Legacy state retains independent source
+and output positions/times. Tests check 30000/1001 rate, a cropped/retimed context,
+post-Bob emitted phases and NEEDS_LAST history, including seek reset. Unsupported
+prefetch/rate-change/Windows drawing contracts report errors instead of pretending
+to process; high-depth input requires an explicit Convert Format stage rather
+than silent 8-bit quantization. Failed/replaced runtimes are torn down first.
+
+Discovery's unused module-owned definition list was the reverse edge of a strong
+cycle; removing it leaves definitions/runtimes retaining modules only. Twelve
+reloads test balanced module callbacks, zero surviving runtimes and rediscovery.
+This is static ownership proof plus lifecycle testing, not a leak-sanitizer result
+(our Qt sanitizer gate disables global leak checking). Arbitrary third-party
+plugins and their platform-specific assumptions are not covered by this fixture.
+
+Validation: focused Release 11/11 and ASan/UBSan 11/11 passed, including native
+module callbacks, filter/context contracts, stabilization and actual-app media
+smoke. The rebuilt regular app independently passed MP4/native-AVS export smoke.

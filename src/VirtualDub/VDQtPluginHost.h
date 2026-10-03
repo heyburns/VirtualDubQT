@@ -9,6 +9,8 @@
 
 #include <memory>
 
+struct VDFilterFrameContext;
+
 struct VDQtPluginFilterInfo {
     QString id;
     QString name;
@@ -38,7 +40,8 @@ public:
                             const QByteArray& serializedConfiguration,
                             const QImage& input,
                             QImage *output,
-                            QString *errorMessage = nullptr);
+                            QString *errorMessage = nullptr,
+                            const VDFilterFrameContext *context = nullptr);
     // Instance IDs correspond to entries in an active filter chain. Forgetting
     // them runs plug-in teardown and prevents configuration/state leaking into
     // a later chain that happens to use the same module.

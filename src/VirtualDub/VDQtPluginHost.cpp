@@ -2,6 +2,11 @@
 // module loading, small compatibility callbacks adapt VDX pixmaps to QImage,
 // and one runtime object is retained per filter-chain instance ID.
 #include "VDQtPluginHost.h"
+#include "VDQtFilterSystem.h"
+
+extern "C" {
+#include <libavutil/rational.h>
+}
 
 #include <vd2/system/vdtypes.h>
 #include <vd2/plugin/vdvideofilt.h>
@@ -20,6 +25,7 @@
 #include <QThread>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -49,7 +55,8 @@ struct PluginModule {
     std::unique_ptr<QLibrary> library;
     ModuleToken token;
     VDXFilterModuleDeinitProc deinitProc = nullptr;
-    QList<QSharedPointer<PluginDefinition>> filters;
+    // Definitions retain the module, never the reverse. The discovery map
+    // owns definitions; a module -> definition edge would make a strong cycle.
     QStringList metadata;
     int apiVersion = 0;
     bool initialized = false;
@@ -256,8 +263,27 @@ struct AlignedImage {
     }
 };
 
+template <typename Integer>
+Integer timingInteger(long double value) {
+    if (!std::isfinite(value)) return 0;
+    return static_cast<Integer>(std::round(std::clamp(value,
+        static_cast<long double>(std::numeric_limits<Integer>::min()),
+        static_cast<long double>(std::numeric_limits<Integer>::max()))));
+}
+
+double stageTimestamp(const VDFilterFrameContext& context, sint64 frameNumber) {
+    return std::isfinite(context.timestampSeconds) && context.timestampSeconds >= 0
+        ? context.timestampSeconds : context.frameRate > 0 ? frameNumber / context.frameRate : 0;
+}
+
+double stageDuration(const VDFilterFrameContext& context) {
+    return std::isfinite(context.inputDurationSeconds) && context.inputDurationSeconds > 0
+        ? context.inputDurationSeconds : context.frameRate > 0 ? 1 / context.frameRate : 0;
+}
+
 void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
-                VDXPixmap& pixmap, QImage& image, sint64 frameNumber) {
+                VDXPixmap& pixmap, QImage& image, sint64 frameNumber,
+                const VDFilterFrameContext& context) {
     std::memset(&bitmap, 0, sizeof bitmap);
     std::memset(&layout, 0, sizeof layout);
     std::memset(&pixmap, 0, sizeof pixmap);
@@ -271,10 +297,16 @@ void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
     bitmap.modulo = bitmap.pitch - static_cast<ptrdiff_t>(bitmap.w) * 4;
     bitmap.size = static_cast<ptrdiff_t>(stride) * bitmap.h;
     bitmap.offset = 0;
-    bitmap.mFrameRateHi = 0;
-    bitmap.mFrameRateLo = 0;
+    const AVRational rate = std::isfinite(context.frameRate) && context.frameRate > 0
+        ? av_d2q(context.frameRate, std::numeric_limits<int>::max()) : AVRational{0, 0};
+    bitmap.mFrameRateHi = rate.num;
+    bitmap.mFrameRateLo = rate.den;
     bitmap.mFrameCount = -1;
     bitmap.mFrameNumber = frameNumber;
+    const double timestamp = stageTimestamp(context, frameNumber);
+    bitmap.mFrameTimestampStart = timingInteger<sint64>(static_cast<long double>(timestamp) * 10000000);
+    bitmap.mFrameTimestampEnd = timingInteger<sint64>(
+        (static_cast<long double>(timestamp) + stageDuration(context)) * 10000000);
 
     layout.data = 0;
     layout.w = image.width();
@@ -302,13 +334,19 @@ public:
 
     ~VideoFilterRuntime() { shutdown(); }
 
-    bool matches(const QByteArray& configuration, const QImage& input) const {
+    bool matches(const QByteArray& configuration, const QImage& input,
+                 const VDFilterFrameContext& context) const {
         return initialized && serializedConfiguration == configuration
-            && sourceWidth == input.width() && sourceHeight == input.height();
+            && sourceWidth == input.width() && sourceHeight == input.height()
+            && input.depth() <= 32
+            && frameContext.frameRate == context.frameRate
+            && (context.frameNumber < 0 || previousContext.frameNumber < 0
+                || (previousContext.frameNumber < std::numeric_limits<qint64>::max()
+                    && previousContext.frameNumber + 1 == context.frameNumber));
     }
 
     bool initialize(const QByteArray& configuration, const QImage& input,
-                    QString *errorMessage) {
+                    QString *errorMessage, const VDFilterFrameContext& context) {
         shutdown();
         if (!plugin || input.isNull()) return setError(
             errorMessage, QStringLiteral("The plugin or source frame is unavailable."));
@@ -317,10 +355,19 @@ public:
             return setError(errorMessage,
                 QStringLiteral("This plugin requires multiple video inputs, which this host cannot supply."));
         }
+        if (plugin->definition.prefetchProc || plugin->definition.prefetchProc2)
+            return setError(errorMessage, QStringLiteral(
+                "This plugin requests frame prefetch; arbitrary upstream frame requests are not supported by this host."));
+        if (input.depth() > 32)
+            return setError(errorMessage, QStringLiteral(
+                "This native plugin host requires 32-bit RGB input; add Convert Format before the plugin to choose that precision explicitly."));
 
         sourceWidth = input.width();
         sourceHeight = input.height();
         serializedConfiguration = configuration;
+        frameContext = context;
+        previousContext = context;
+        frameNumber = context.frameNumber >= 0 ? context.frameNumber : 0;
         try {
             const int stateBytes = std::max(0, plugin->definition.inst_data_size);
             filterData.resize(static_cast<size_t>(stateBytes));
@@ -373,6 +420,7 @@ public:
             }
 
             if (!prepareBuffers(input, errorMessage)) return false;
+            updateStateInfo();
             if (plugin->definition.startProc
                 && plugin->definition.startProc(activation.get(), &gFilterFunctions)) {
                 return setError(errorMessage,
@@ -391,22 +439,20 @@ public:
         }
     }
 
-    bool process(const QImage& input, QImage *output, QString *errorMessage) {
+    bool process(const QImage& input, QImage *output, QString *errorMessage,
+                 const VDFilterFrameContext& context) {
         if (!initialized || !activation || !output)
             return setError(errorMessage, QStringLiteral("The plugin is not initialized."));
         try {
             const QImage converted = input.convertToFormat(QImage::Format_ARGB32);
+            if (converted.isNull()) return setError(errorMessage, QStringLiteral("Not enough memory for the plugin input frame."));
+            frameContext = context;
+            if (context.frameNumber >= 0) frameNumber = context.frameNumber;
             sourceImage.copyFrom(converted);
             if (swapBuffers) destinationImage.image.fill(Qt::transparent);
             else destinationImage.copyFrom(converted);
             updateFrameBindings();
-            stateInfo.lCurrentFrame = static_cast<sint32>(
-                std::min<sint64>(frameNumber, std::numeric_limits<sint32>::max()));
-            stateInfo.lCurrentSourceFrame = stateInfo.lCurrentFrame;
-            stateInfo.mOutputFrame = stateInfo.lCurrentFrame;
-            sourceBitmap.mFrameNumber = frameNumber;
-            destinationBitmap.mFrameNumber = frameNumber;
-            stateInfo.flags = kVDXVFEvent_None;
+            updateStateInfo();
             if (plugin->definition.runProc
                 && plugin->definition.runProc(activation.get(), &gFilterFunctions)) {
                 return setError(errorMessage,
@@ -417,9 +463,11 @@ public:
             if (needsLast) {
                 lastImage.copyFrom(converted);
                 fillBitmap(lastBitmap, lastLayout, lastPixmap,
-                           lastImage.image, frameNumber);
+                           lastImage.image, frameNumber, frameContext);
             }
-            ++frameNumber;
+            previousContext = frameContext;
+            previousContext.frameNumber = frameNumber;
+            if (frameNumber < std::numeric_limits<sint64>::max()) ++frameNumber;
             return !output->isNull();
         } catch (const std::exception& error) {
             return setError(errorMessage, QString::fromLocal8Bit(error.what()));
@@ -437,6 +485,7 @@ private:
 
     bool prepareBuffers(const QImage& input, QString *errorMessage) {
         QImage converted = input.convertToFormat(QImage::Format_ARGB32);
+        if (converted.isNull()) return setError(errorMessage, QStringLiteral("Not enough memory for the plugin input frame."));
         if (!sourceImage.allocate(converted.width(), converted.height(), 4))
             return setError(errorMessage, QStringLiteral("The plugin input frame is too large."));
         sourceImage.copyFrom(converted);
@@ -444,18 +493,27 @@ private:
             return setError(errorMessage, QStringLiteral("The plugin output frame is too large."));
         destinationImage.copyFrom(converted);
         fillBitmap(sourceBitmap, sourceLayout, sourcePixmap,
-                   sourceImage.image, frameNumber);
+                   sourceImage.image, frameNumber, frameContext);
         fillBitmap(destinationBitmap, destinationLayout, destinationPixmap,
-                   destinationImage.image, frameNumber);
+                   destinationImage.image, frameNumber, frameContext);
         pixmapProvider.source = &sourcePixmap;
         pixmapProvider.destination = &destinationPixmap;
 
         long flags = FILTERPARAM_SWAP_BUFFERS;
         if (plugin->definition.paramProc)
             flags = plugin->definition.paramProc(activation.get(), &gFilterFunctions);
+        if (plugin->hasFilterMod && plugin->filterMod.paramProc)
+            plugin->filterMod.paramProc(activation.get(), &gFilterFunctions);
         if (flags == FILTERPARAM_NOT_SUPPORTED)
             return setError(errorMessage,
                 QStringLiteral("The plugin does not support 32-bit RGB input."));
+        if (static_cast<uint64>(destinationBitmap.mFrameRateHi) * sourceBitmap.mFrameRateLo
+                != static_cast<uint64>(sourceBitmap.mFrameRateHi) * destinationBitmap.mFrameRateLo
+            || (sourceBitmap.mFrameRateHi && !destinationBitmap.mFrameRateLo))
+            return setError(errorMessage, QStringLiteral(
+                "This plugin changes frame rate; native plugin rate conversion is not supported by this host."));
+        if ((sourceBitmap.dwFlags | destinationBitmap.dwFlags) & VDXFBitmap::NEEDS_HDC)
+            return setError(errorMessage, QStringLiteral("This plugin requires a Windows drawing context."));
         const int lag = static_cast<int>(static_cast<unsigned long>(flags) >> 16);
         if (lag != 0)
             return setError(errorMessage,
@@ -506,18 +564,33 @@ private:
 
     void updateFrameBindings() {
         fillBitmap(sourceBitmap, sourceLayout, sourcePixmap,
-                   sourceImage.image, frameNumber);
+                   sourceImage.image, frameNumber, frameContext);
         QImage& outputBinding = swapBuffers ? destinationImage.image
                                             : sourceImage.image;
         fillBitmap(destinationBitmap, destinationLayout, destinationPixmap,
-                   outputBinding, frameNumber);
+                   outputBinding, frameNumber, frameContext);
         if (needsLast)
             fillBitmap(lastBitmap, lastLayout, lastPixmap,
-                       lastImage.image, std::max<sint64>(0, frameNumber - 1));
+                       lastImage.image, std::max<qint64>(0, previousContext.frameNumber), previousContext);
         pixmapProvider.source = &sourcePixmap;
         pixmapProvider.destination = &destinationPixmap;
         activation->x2 = static_cast<uint32>(destinationImage.image.width());
         activation->y2 = static_cast<uint32>(destinationImage.image.height());
+    }
+
+    void updateStateInfo() {
+        stateInfo = {};
+        stateInfo.lCurrentFrame = timingInteger<sint32>(frameNumber);
+        stateInfo.lCurrentSourceFrame = timingInteger<sint32>(frameContext.sourceFrameNumber >= 0
+            ? frameContext.sourceFrameNumber : frameNumber);
+        stateInfo.mOutputFrame = timingInteger<sint32>(frameContext.outputFrameNumber >= 0
+            ? frameContext.outputFrameNumber : frameNumber);
+        stateInfo.lMicrosecsPerFrame = timingInteger<sint32>(static_cast<long double>(stageDuration(frameContext)) * 1000000);
+        stateInfo.lMicrosecsPerSrcFrame = stateInfo.lMicrosecsPerFrame;
+        stateInfo.lSourceFrameMS = timingInteger<sint32>(static_cast<long double>(
+            std::isfinite(frameContext.sourceTimestampSeconds) && frameContext.sourceTimestampSeconds >= 0
+                ? frameContext.sourceTimestampSeconds : stageTimestamp(frameContext, frameNumber)) * 1000);
+        stateInfo.lDestFrameMS = timingInteger<sint32>(static_cast<long double>(stageTimestamp(frameContext, frameNumber)) * 1000);
     }
 
     void shutdown() noexcept {
@@ -566,6 +639,8 @@ private:
     int sourceWidth = 0;
     int sourceHeight = 0;
     sint64 frameNumber = 0;
+    VDFilterFrameContext frameContext;
+    VDFilterFrameContext previousContext;
     bool swapBuffers = true;
     bool needsLast = false;
     bool initCalled = false;
@@ -728,7 +803,6 @@ public:
                 module->initialized = true;
                 for (const auto& definition : context.definitions) {
                     definition->info.apiVersion = versionHigh;
-                    module->filters.append(definition);
                     definitions.insert(definition->info.id, definition);
                 }
                 reportLines << QStringLiteral("  %1 — loaded %2 video filter(s), VDX API %3")
@@ -852,7 +926,7 @@ void VDQtPluginHost::reload() {
 bool VDQtPluginHost::processVideoFilter(
     const QString& filterId, const QString& instanceId,
     const QByteArray& serializedConfiguration, const QImage& input,
-    QImage *output, QString *errorMessage) {
+    QImage *output, QString *errorMessage, const VDFilterFrameContext *context) {
     if (!output) return false;
     QMutexLocker locker(&d->mutex);
     d->ensureLoaded();
@@ -864,14 +938,21 @@ bool VDQtPluginHost::processVideoFilter(
     }
     const QString runtimeKey = filterId + QLatin1Char(':') + instanceId + QLatin1Char('@')
         + QString::number(reinterpret_cast<quintptr>(QThread::currentThreadId()), 16);
+    const VDFilterFrameContext actualContext = context ? *context : VDFilterFrameContext{};
     auto runtime = d->runtimes.value(runtimeKey);
-    if (!runtime || !runtime->matches(serializedConfiguration, input)) {
+    if (!runtime || !runtime->matches(serializedConfiguration, input, actualContext)) {
+        // End the old instance before starting its replacement. Some modules
+        // keep a global resource and cannot safely overlap two configurations.
+        d->runtimes.remove(runtimeKey);
+        runtime.clear();
         runtime = QSharedPointer<VideoFilterRuntime>::create(definition);
-        if (!runtime->initialize(serializedConfiguration, input, errorMessage))
+        if (!runtime->initialize(serializedConfiguration, input, errorMessage, actualContext))
             return false;
         d->runtimes.insert(runtimeKey, runtime);
     }
-    return runtime->process(input, output, errorMessage);
+    const bool success = runtime->process(input, output, errorMessage, actualContext);
+    if (!success) d->runtimes.remove(runtimeKey);
+    return success;
 }
 
 void VDQtPluginHost::forgetInstance(const QString& instanceId) {

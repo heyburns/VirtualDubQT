@@ -796,7 +796,7 @@ QImage VDQtFilterSystem::processFilterForPhase(
             QString errorMessage;
             if (!VDQtPluginHost::instance().processVideoFilter(
                     filter.pluginId, runtimeInstanceId(filter.id), filter.pluginConfiguration,
-                    result, &pluginResult, &errorMessage)) {
+                    result, &pluginResult, &errorMessage, &context)) {
                 return failProcessing(errorMessage.isEmpty()
                     ? QStringLiteral("The native plugin could not process this frame.") : errorMessage, &filter);
             }

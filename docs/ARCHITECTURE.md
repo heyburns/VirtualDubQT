@@ -416,6 +416,14 @@ Legacy filters may assume padded/aligned XRGB storage and mutable state. The hos
 adapts QImages through aligned buffers, serializes instance callbacks, and runs
 ABI teardown in the required order.
 
+Bitmap timing describes the current stage (including emitted Bob phases); legacy
+state also exposes the original source identity/time. Known seeks reset temporal
+instances. Definitions own module lifetime tokens, never the reverse. The host
+supports sequential NEEDS_LAST history, not arbitrary prefetch, native rate
+conversion or Windows drawing contexts; these contracts fail explicitly. Its
+32-bit RGB boundary requires an explicit precision conversion for high-depth
+chains, so the host cannot silently reduce their precision.
+
 ## Testing and change checklist
 
 The CTest targets intentionally divide concerns:
