@@ -260,6 +260,9 @@ private:
     QImage renderAvsFrame(int frameIndex);
 };
 
+// Qt 6.4 inspects the shared pointer's pointee during metatype registration.
+// The snapshot is private implementation data, never a QObject.
+Q_DECLARE_OPAQUE_POINTER(const VDQtVideoDecoder::FrameIndexSnapshot*)
 Q_DECLARE_METATYPE(VDQtVideoDecoder::FrameIndexSnapshotPtr)
 
 #endif // VDQTVIDEODECODER_H
