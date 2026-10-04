@@ -63,10 +63,12 @@ Remaining execution sequence
 [x] M04: continuous fallback from ended/failed/nonadvancing audio clocks.
     Physical sink/short-track playback verification remains a hardware gate.
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
-[ ] Selected-audio export follow-up: enforce the GUI's existing Full-processing
-    policy for external/nondefault selected audio in every exporter entry point.
-    Native AVS Direct audio must bypass UI audio effects consistently. Existing
-    tests do not cover these combinations; focused reproduction is in progress.
+[x] Selected-audio export follow-up: external/nondefault selections follow the
+    GUI's existing Full-processing policy across exporter entry points. Queues
+    retain explicit default/aliased-source intent and fail invalid selections
+    before staging. Native AVS Direct bypasses UI effects, borrows native PCM
+    when no player is supplied, and avoids separate Fast audio-script evaluation.
+    Default Direct, selected-audio two-pass, cancellation and aliases are tested.
 [x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
     Effects run once after edit assembly; source precision is retained until encoding.
 [x] Video-audio follow-up: shared preparation joins cuts before effects, preserves
@@ -82,10 +84,14 @@ Remaining execution sequence
     with PCM fixtures; physical listening/device negotiation remains a hardware gate.
 [x] Audio follow-up: separate held-picture and advancing audio mappings, including
     masked VFR playback intervals. Physical continuous-sound verification is pending.
-[ ] Masked VFR export duration follow-up: held-picture mapping still selects
-    video duration metadata in the exporter, shortening the composed clock and
-    truncating final audio. Use the advancing timeline interval for timing;
-    preserve the documented edited-output average-CFR policy.
+[x] Masked VFR export duration follow-up: advancing intervals determine duration
+    and audio boundaries; held pictures no longer shorten the composed clock.
+    Explicit conversion samples cumulative edited time, including reordered
+    masks and nonzero selections. Deliberate gap collapse retains nominal CFR
+    timing; unsupported VFR collapse with audio fails safely before staging.
+    Default edited-output average-CFR policy and exact CFR audio remain intact.
+[x] Audio-disabled video-offset follow-up: Direct/Fast/smart selection still
+    probes container-to-video timing instead of shifting pictures when muted.
 [x] M08: consistent BT.2020 matrix conversion, separate valid color tags and saved settings.
 [x] M12: source/per-frame matrices and ranges precede resolution guesses in RGB decoding.
     Explicit user overrides remain authoritative; unsupported matrices report an error.
@@ -183,17 +189,24 @@ Remaining execution sequence
     independent logging-script sanitizer probe; correctly disabled autoload
     passes. No application source is needed for reproduction. Diagnose installed
     runtime/plugin compatibility separately; no plugins/system files were changed.
-[ ] Final supported-source/export matrix, full sanitizers and measured performance;
-    physical audio/capture and arbitrary external plugin coverage reported separately.
-    Orthogonal tests are not a full Cartesian matrix. Outstanding bounded cases
-    include encoded raw/image inputs, AVI PCM copy/fast selections, jointly
-    edited/masked VFR video+audio and actual session-only output defaults.
+[x] Bounded final workflow matrix: encoded raw/image inputs, packet-aligned AVI
+    PCM Direct/Fast selections, jointly edited/masked VFR video+audio, selected
+    soundtracks and actual session-only output/processing defaults are covered.
+    Independent pixels/PTS/PCM and fresh-process reset checks pass in Release
+    and sanitizers, followed by regular-binary media smoke tests.
+[ ] Extended supported-runtime matrix: orthogonal workflow tests are not a full
+    Cartesian matrix across FFmpeg versions or arbitrary external plugins.
+    Physical audio/capture and clean installed-package checks remain separate.
+    Arbitrary nonzero AVI packet-copy starts may retain container/audio preroll;
+    packet-aligned controls do not establish sample-exact compressed copying.
 
-Latest verified checkpoint: Release 193/193, ASan/UBSan 89/89 and independently
+Latest verified checkpoint: Release 197/197, ASan/UBSan 93/93 and independently
 rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. This includes
 100 native allocation-failure cases, joined-audio precision/cancellation, exact
 blur/interpolation/six-axis and actual waveform/export-preview/playback controls.
 VFR packed RGB24, RGBA8 and RGBA16 round trips compare exact pixels/timestamps.
+Selected-source policy, held-mask duration/rate conversion, unsafe gap-collapse
+refusal and session-only output/processing reset also pass real workflow checks.
 Two uncontended 12-cycle MP4/AAC -> native-AVS/audio -> ProRes/PCM runs, with and
 without effects, show stable throughput and post-Close threads/FD/test-owned
 disk sizes. This does not cover the user's third-party AVS plugin chain.

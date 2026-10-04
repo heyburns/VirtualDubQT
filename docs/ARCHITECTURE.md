@@ -453,6 +453,29 @@ Arbitrary edit lists require frame-accurate rendering unless smart rendering can
 prove a clean copyable range. Two-pass output first creates a replayable lossless
 intermediate because a streaming pipe cannot be consumed twice.
 
+Audio source intent is resolved before preparation and smart-copy eligibility.
+Explicit external/nondefault selections follow the editor's existing Full audio
+processing policy in the exporter; the queue additionally preserves an explicit
+default-stream or pathname-alias selection, which cannot be inferred from file
+identity alone. A failed explicit selection fails the job before output staging,
+not by substituting the video's default soundtrack. Disabled audio ignores stale
+audio selections. Ordinary embedded Direct audio bypasses application effects.
+For native AVS Direct audio, an omitted player uses a local offline adapter that
+borrows the decoder's clip and mutex; its destruction precedes decoder teardown.
+Fast Recompress prepares those native samples without reevaluating the audio
+script in a second process. It retains the native-planar video path.
+
+Held pictures and advancing intervals have separate mappings: use
+`mapOutputToSource()` for pixels and `mapOutputToAudioSource()` for duration and
+audio boundaries. Edited output retains its existing average-CFR default, while
+explicit duration-preserving conversion binary-searches cumulative edited
+boundaries, including reordered sources and held masks. Deliberate gap collapse
+instead follows the nominal CFR clock. Collapsing variable-rate gaps with audio
+is rejected until matching audio cuts can be represented; the check also covers
+edited and uniformly long selected intervals. Audio-disabled packet/fast/smart
+exports still inspect the container-to-video start offset: removing audio must
+not change selected pictures.
+
 Exports stage output beside the destination, recheck source alias safety after
 rendering, and atomically rename only on success. Preserve that ordering: source
 files must survive cancellation, encoder failure, script ambiguity, and path
@@ -511,6 +534,11 @@ source graph; staged-output commit must still apply its own destination checks.
 `VDQtProjectState` adds sources, position, timeline, selection, and markers.
 `VDQtJobState` adds durable queue status and output instructions.
 `VDQtProjectFile` is the versioned JSON boundary for all three.
+
+The preferred output directory and processing choices are session-only state.
+Source replacement and Close Video retain them; process exit does not save them
+as future defaults. A restart returns to factory processing and the new source's
+directory. Projects and queued jobs still retain their explicit saved settings.
 
 Loaders parse into temporary values and commit only after full validation.
 Writers use `QSaveFile` so a crash cannot leave a half-written project or queue.

@@ -4638,6 +4638,20 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         audioPrepared = audioPlayer.openFile(inputPath);
     }
 
+    // A failed explicit selection must never fall back to the video's default
+    // soundtrack, even when an imported job requests direct audio copy. Once
+    // openFile() fails, the closed player no longer carries the requested path
+    // or stream index, so the exporter cannot distinguish that failure from an
+    // automatic selection. Reject it before creating any output staging file.
+    const bool explicitlySelectedAudio = !job.audioSourcePath.isEmpty()
+        || job.audioStreamIndex >= 0;
+    if (needsAudio && !job.audioDisabled && explicitlySelectedAudio
+        && !audioPrepared) {
+        if (errorMessage) *errorMessage = QStringLiteral(
+            "The selected audio source or stream could not be opened.");
+        return false;
+    }
+
     QElapsedTimer progressClock;
     progressClock.start();
     VDQtUiUpdateThrottle progressUpdates(100);
@@ -4664,6 +4678,11 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
         }
         VDQtVideoExporter::ExportOptions options = job.options;
         options.includeAudio = options.includeAudio && !job.audioDisabled;
+        // Match the interactive Save Video policy even for an explicitly
+        // selected default stream or an external pathname alias of the source.
+        // The exporter can infer identity, but not the user's selection intent.
+        if (options.includeAudio && explicitlySelectedAudio)
+            options.audioMode = AudioMode_FullProcessing;
         options.processing = processingSnapshotForState(job.processing);
         options.inputPath = inputPath;
         options.protectedSourcePaths = allQueueSources;

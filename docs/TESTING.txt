@@ -1545,3 +1545,72 @@ plugin-chain throughput remain separate gates. Final-matrix review uncovered
 selected-audio Direct-mode policy and disabled-audio video-offset follow-ups;
 those are not fixed by this successful checkpoint. Original temporal/warp
 contracts are tracked explicitly in docs/NATIVE_FILTER_FOLLOWUPS.txt.
+
+Selected soundtracks, edited clocks and session/export matrix
+------------------------------------------------------------
+
+  ctest --preset release-checks -R 'selected_audio_exports|selected_audio_queue|session_output_directory|output_matrix'
+
+Run the same selection with sanitizer-checks. Baseline comparisons reproduce
+selected-source substitution, application effects applied to native Direct
+audio, disabled-audio video start-offset errors, and shortened held-mask VFR
+duration. Fixtures, settings, queues and output destinations are privately owned.
+Native scripts explicitly clear plugin autoload; no physical audio device is used.
+
+selected_audio_exports_tests exercises every video mode with separate WAV audio,
+silent/embedded video, nondefault embedded audio and multi-stream external media.
+Independent audio-only references compare final PCM and video/audio stream counts.
+Default Direct ignores configured gain; selected audio follows the existing Full
+policy. Smart edited fallback, protected literal/symbolic/hard-link aliases,
+preparation cancellation and selected-audio two-pass output are checked. Native
+AVS Direct bypasses effects, works with a borrowed or omitted player, and rejects
+an explicitly supplied unusable player without creating/replacing output. Video-
+only Direct/Fast/smart selections retain their source's actual start offset.
+
+selected_audio_queue_tests runs seven serialized, actual GUI jobs. Invalid
+explicit external/embedded audio choices fail before staging and preserve existing
+destinations. Disabled-audio controls succeed without sound. Explicitly choosing
+the default stream, including a pathname alias of the source, retains the GUI's
+Full-processing gain policy rather than silently becoming ordinary Direct audio.
+
+output_matrix_tests checks actual queued raw RGB24 imports with a byte offset and
+PNG sequences at 30000/1001, selected Fast/Full lossless outputs, source immutability,
+exact decoded pixels, counts and independently probed presentation timestamps.
+An AVI/PCM fixture covers packet-aligned Direct/Fast selections. Reordered and
+masked VFR edits are exercised through both actual queue and script entry points;
+the soundtrack advances through held pictures, while edited output retains its
+existing average-CFR policy. Whole, nonzero-start and mask-only selections cover
+explicit Raw/Full rate conversion against independent cumulative-clock oracles,
+including deliberate audio-disabled gap collapse. Gap collapse with mixed VFR
+audio or uniformly long selected intervals fails clearly before output; exact-
+grid edited CFR with audio still succeeds with exact pixels, timestamps and PCM.
+
+session_output_directory_tests uses the actual Save Video dialog and queues an
+unrun job. Its chosen folder, codecs and filters survive a different source and
+Close Video/reopen. A fresh process using the same isolated configuration verifies
+factory processing and source-folder defaults, rather than persisting the old
+export folder. This closes a workflow regression gap; no new persistence feature
+or processing-setting behavior was introduced.
+
+Limitations: packet-copy AVI audio can have codec/container seek preroll at
+arbitrary nonzero starts; the safe packet-boundary control is not a promise of
+sample-exact compressed copying. Edited default output remains average CFR, not
+original VFR timestamps. These orthogonal workflow cases are not a full Cartesian
+matrix across FFmpeg versions, arbitrary plugins or physical devices. Original
+filter algorithm contracts and the user's unreproduced progressive ProRes slowdown
+remain separately tracked.
+
+Validation, 2026-10-03 local date: focused Release 14/14 and ASan/UBSan 14/14,
+then full Release 197/197 (128.13 s) and ASan/UBSan 93/93 (238.12 s). Release
+includes 100 restricted-memory destination/recovery cases; those RLIMIT-based
+cases are excluded from sanitizers, whose address space conflicts with the cap.
+The separately rebuilt build/VirtualDubQt passed both actual-binary smoke checks:
+
+  build-release-checks/cli_media_smoke_tests /home/alan/Desktop/VirtualDub_Port/build/VirtualDubQt
+  python3 packaging/smoke-runtime.py --application /home/alan/Desktop/VirtualDub_Port/build/VirtualDubQt --runtime-path /usr/bin:/bin
+
+The runtime smoke uses the regular executable with a restricted executable PATH,
+not clean installed package libraries. Hardware and leak detection remain excluded.
+Final frozen exporter review found no further blocker; all source changes were
+frozen during shared builds. These results do not resolve the unchecked items in
+docs/AUDIT_STATUS.txt or claim complete native filter parity.

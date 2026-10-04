@@ -400,6 +400,18 @@ if (BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
     endforeach()
 
+    foreach(workflow_contract IN ITEMS selected_audio_exports selected_audio_queue
+                                      session_output_directory output_matrix)
+        add_executable(${workflow_contract}_tests
+            tests/test_${workflow_contract}.cpp tests/support/VDQtTestFixtures.cpp)
+        target_link_libraries(${workflow_contract}_tests PRIVATE vdqt_core)
+        vdqt_enable_diagnostics(${workflow_contract}_tests)
+        add_test(NAME ${workflow_contract}_tests COMMAND ${workflow_contract}_tests)
+        set_tests_properties(${workflow_contract}_tests PROPERTIES
+            LABELS "export;integration;contracts;matrix" TIMEOUT 120
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    endforeach()
+
     foreach(geometry_contract IN ITEMS filter_geometry filter_geometry_table filter_resampling filter_channel_lut)
         add_executable(${geometry_contract}_tests tests/test_${geometry_contract}.cpp)
         target_link_libraries(${geometry_contract}_tests PRIVATE vdqt_core)
