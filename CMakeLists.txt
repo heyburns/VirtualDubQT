@@ -389,6 +389,17 @@ if (BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
     endforeach()
 
+    foreach(audio_followup_contract IN ITEMS avs_audio_padding manual_export_results)
+        add_executable(${audio_followup_contract}_tests
+            tests/test_${audio_followup_contract}.cpp tests/support/VDQtTestFixtures.cpp)
+        target_link_libraries(${audio_followup_contract}_tests PRIVATE vdqt_core)
+        vdqt_enable_diagnostics(${audio_followup_contract}_tests)
+        add_test(NAME ${audio_followup_contract}_tests COMMAND ${audio_followup_contract}_tests)
+        set_tests_properties(${audio_followup_contract}_tests PROPERTIES
+            LABELS "audio;export;integration;contracts" TIMEOUT 120
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+    endforeach()
+
     foreach(geometry_contract IN ITEMS filter_geometry filter_geometry_table filter_resampling filter_channel_lut)
         add_executable(${geometry_contract}_tests tests/test_${geometry_contract}.cpp)
         target_link_libraries(${geometry_contract}_tests PRIVATE vdqt_core)
@@ -416,6 +427,24 @@ if (BUILD_TESTING)
     add_test(NAME filter_interpolate_tests COMMAND filter_interpolate_tests)
     set_tests_properties(filter_interpolate_tests PROPERTIES
         LABELS "filters;temporal;contracts" TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    add_executable(filter_sixaxis_tests tests/test_filter_sixaxis.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(filter_sixaxis_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(filter_sixaxis_tests)
+    add_test(NAME filter_sixaxis_tests COMMAND filter_sixaxis_tests)
+    set_tests_properties(filter_sixaxis_tests PROPERTIES
+        LABELS "filters;color;precision;contracts" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
+
+    add_executable(audio_session_benchmark tests/benchmark_audio_sessions.cpp
+        tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(audio_session_benchmark PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(audio_session_benchmark)
+    add_test(NAME audio_session_smoke COMMAND audio_session_benchmark --smoke --effects)
+    set_tests_properties(audio_session_smoke PROPERTIES
+        LABELS "audio;avs;export;lifetime;contracts" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
 
     add_executable(codec_controls_tests tests/test_codec_controls.cpp

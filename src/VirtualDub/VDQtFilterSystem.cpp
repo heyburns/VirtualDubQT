@@ -1750,6 +1750,22 @@ QImage VDQtFilterSystem::processFilterForPhase(
         }
 
         case VDFilterType::SixAxis: {
+            // A neutral correction must be a true identity, including alpha
+            // and native low bits. Skip its table and image detachment, but
+            // still run the common clipping/opacity/metadata processing tail.
+            // Check stored controls exactly; do not treat small real changes
+            // as neutral or let unrelated script metadata affect this choice.
+            if (filter.params.value("intensity", 1.0) == 1.0
+                && filter.params.value("red_green", 0.0) == 0.0
+                && filter.params.value("yellow_blue", 0.0) == 0.0
+                && filter.params.value("saturation", 1.0) == 1.0
+                && filter.params.value("red", 1.0) == 1.0
+                && filter.params.value("orange", 1.0) == 1.0
+                && filter.params.value("lime", 1.0) == 1.0
+                && filter.params.value("emerald", 1.0) == 1.0
+                && filter.params.value("blue", 1.0) == 1.0
+                && filter.params.value("purple", 1.0) == 1.0) break;
+
             float intensity = static_cast<float>(filter.params.value("intensity", 1.0));
             float redGreen = static_cast<float>(filter.params.value("red_green", 0.0));
             float yellowBlue = static_cast<float>(filter.params.value("yellow_blue", 0.0));
@@ -1888,9 +1904,17 @@ QImage VDQtFilterSystem::processFilterForPhase(
                     const int ri = r >> 3;
                     const int gi = g >> 3;
                     const int bi = b >> 3;
-                    const int rf = r == 255 ? 8 : (r & 7);
-                    const int gf = g == 255 ? 8 : (g & 7);
-                    const int bf = b == 255 ? 8 : (b & 7);
+                    const int rf = r & 7;
+                    const int gf = g & 7;
+                    const int bf = b & 7;
+                    // Lattice nodes are 0,8,...,248,255. The final cell spans
+                    // seven values, not eight; treating it as eight dims 253
+                    // and 254 even with neutral controls. Mixed cells need the
+                    // product of their actual spans, with one final rounding.
+                    const int rSpan = ri == 31 ? 7 : 8;
+                    const int gSpan = gi == 31 ? 7 : 8;
+                    const int bSpan = bi == 31 ? 7 : 8;
+                    const int divisor = rSpan * gSpan * bSpan;
                     const int base = ri * gridStrideR
                                    + gi * gridStrideG + bi * 3;
                     for (int channel = 0; channel < 3; ++channel) {
@@ -1903,14 +1927,16 @@ QImage VDQtFilterSystem::processFilterForPhase(
                         const int c101 = lut[upper + 3 + channel];
                         const int c110 = lut[upper + gridStrideG + channel];
                         const int c111 = lut[upper + gridStrideG + 3 + channel];
-                        const int c00 = c000 * (8 - bf) + c001 * bf;
-                        const int c01 = c010 * (8 - bf) + c011 * bf;
-                        const int c10 = c100 * (8 - bf) + c101 * bf;
-                        const int c11 = c110 * (8 - bf) + c111 * bf;
-                        const int c0 = c00 * (8 - gf) + c01 * gf;
-                        const int c1 = c10 * (8 - gf) + c11 * gf;
-                        scan[x * bpp + channel] = static_cast<uchar>(
-                            (c0 * (8 - rf) + c1 * rf + 256) >> 9);
+                        const int c00 = c000 * (bSpan - bf) + c001 * bf;
+                        const int c01 = c010 * (bSpan - bf) + c011 * bf;
+                        const int c10 = c100 * (bSpan - bf) + c101 * bf;
+                        const int c11 = c110 * (bSpan - bf) + c111 * bf;
+                        const int c0 = c00 * (gSpan - gf) + c01 * gf;
+                        const int c1 = c10 * (gSpan - gf) + c11 * gf;
+                        const int weighted = c0 * (rSpan - rf) + c1 * rf;
+                        scan[x * bpp + channel] = static_cast<uchar>(divisor == 512
+                            ? (weighted + 256) >> 9
+                            : (weighted + divisor / 2) / divisor);
                     }
                 }
             });

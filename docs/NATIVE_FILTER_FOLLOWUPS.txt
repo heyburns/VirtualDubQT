@@ -1,0 +1,105 @@
+Original filter algorithm follow-ups
+===================================
+
+Status: open. This records remaining differences, not implemented capabilities.
+Based on the retained Windows sources in src/VDFilters/source and the live Qt
+pipeline. Existing offered controls must continue working during any migration;
+do not replace one approximation with another or claim parity from a sizing fix.
+
+Scheduling prerequisite
+-----------------------
+
+The current sequence API emits a positive, fixed integer number of images per
+input. It supports Bob expansion, but not queued zero-output calls, arbitrary
+rational rates, centered lookahead or EOF flushing. The exporter, frame server,
+decode worker and several MainWindow consumers depend on this assumption.
+
+A complete temporal repair needs:
+  - A shared immutable stage timing/count plan. Compose each stage's finite
+    count rounding, rather than multiplying only the final rate ratio.
+  - Images carrying output ordinals, timestamps and durations through stages.
+  - A bounded upstream frame provider, preferably output-centric like native
+    Prefetch2; or an explicit streaming queue/flush and separate seek contract.
+  - Edited-timeline pairing before filters, including cuts, reorder and masks.
+  - Preview, rendered/raw/image export, serving and queue consumers using the
+    same output count, geometry, rate and end boundary for audio.
+  - Checked counts, source ownership, cancellation, allocation failure and
+    retained-image budgets through lookahead and random seeking.
+
+Bob followed by Interlace produces N outputs, but Interlace followed by Bob
+produces 2*floor(N/2). Equal net rate ratios do not imply equal finite counts.
+A local kernel change or codec FPS flag cannot safely repair these contracts.
+The temporal migration spans roughly 8-10 production files and needs separately
+reviewed foundation/consumer/algorithm checkpoints, not a one-function patch.
+
+Interlace -- VFInterlace.cpp
+----------------------------
+
+Original Config(laceFields, oddFieldFirst) has progressive-frame versus
+alternating-half-height-field input modes and TFF/BFF ordering. Output k uses
+disjoint upstream inputs 2*k and 2*k+1, FPS is divided by two, and count is
+floor(N/2). Progressive mode truncates odd input height; field mode doubles it.
+The current port performs sliding adjacent-frame field weaving at unchanged
+rate and lacks the half-height field mode. Correct incoming history does not
+fix original pairing/rate behavior.
+
+Tests must cover both modes/orders, exact pairs, odd dimensions/counts,
+30000/1001 rates, low bits/alpha, Bob ordering, edited selections, random seek,
+EOF and cancellation, plus matching actual preview/export/server output.
+
+Interpolate -- VFInterpolate.cpp
+--------------------------------
+
+Original Config(rateScaleBool, factorOrTargetFPS, linearBool) supports arbitrary
+rate or target FPS and nearest/linear sampling; default is x2 linear. Output
+count rounds N*ratio. Centered fixed-point sampling uses
+round(((output+0.5)/ratio)*256) - (linear ? 128 : 0), with upstream lookahead.
+The repaired port amount control blends incoming adjacent images at the same
+rate; this is useful existing behavior, not the native rate-changing filter.
+
+Inverse telecine -- VFIVTC.cpp
+------------------------------
+
+Original field modes include auto, TFF, BFF, blurred and duplicated, with
+offset -1..4 and optional blend weight. It examines 11 upstream images around
+the mapped position, scores cadence/field matches and optionally reduces rate
+to 4/5 with ceil(N/5)*4 outputs and native boundary clamping. The port's vertical
+comb interpolation lacks cadence scoring and decimation. This needs the same
+timing/provider foundation, not a threshold adjustment.
+
+Temporal Smoother -- VFTemporalSmoother.cpp
+------------------------------------------
+
+Original strength 0..10 controls a centered seven-frame weighted kernel with
+three-frame lag and squared color-difference weighting. Current strength and
+threshold controls recursively gate/blend previous output. Full original
+behavior requires seven incoming images and explicit startup/EOF handling.
+
+Warp Sharp -- VFWarpSharp.cpp
+-----------------------------
+
+Original depth/blurLevel controls produce a Sobel-like gradient bump map,
+blurLevel+1 blur passes, gradient displacement and cubic A=-0.60 sampling.
+The current unsharp kernel has no displacement map; its threshold control is
+unused and is not a substitute for blurLevel. This is an independent single-
+image algorithm candidate: extract an original scalar reference, then implement
+bounded scratch, border/small-image safety, precision/alpha extensions and
+compatible option/script mapping. Do not invent a threshold effect as parity.
+
+Warp Resize -- VFWarpResize.cpp
+-------------------------------
+
+Original width/height/showGradientMap controls default to 640x480/map off;
+dimensions never shrink below the input. It resamples a gradient map, applies
+cubic A=-0.75 and warps the final image. The current plain smooth resize can
+shrink and has no gradient/map mode. It needs complete kernel/reference and
+geometry/control work, not just clamping a functioning resize control.
+
+Performance and compatibility gates
+-----------------------------------
+
+Compare independent pixels, native option imports, chain geometry/rates,
+actual rendered output and random-seek preview before optimization. Retain
+working high-depth/alpha behavior and saved port configurations deliberately.
+Measure uncontended paired filter times after correctness; hardware playback
+and user-specific AVS plugin retention remain separate evidence gates.

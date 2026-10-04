@@ -243,6 +243,11 @@ usable after a seek. At each stage boundary, channel layout and alpha are normal
 to straight RGB888/RGBA8888/RGBA64; image depth alone cannot identify transformed
 ARGB/premultiplied storage safely.
 
+The exact remaining original-algorithm contracts and their scheduling dependency
+are recorded in `docs/NATIVE_FILTER_FOLLOWUPS.txt`. Do not implement half-rate
+Interlace by dropping images from this fixed-expansion interface: preview,
+export, serving, finite counts and audio boundaries must share a timing plan.
+
 `processFrameSequence()` is the authoritative API. Rate-changing filters such as
 bob deinterlacing may emit multiple temporal phases for one source image.
 `processFrame()` exists for older single-image callers and returns only phase
@@ -284,6 +289,12 @@ Transient chain replacement resets temporal history and private plugin runtimes,
 but retains immutable parameter-keyed six-axis tables (at most eight). Gamma,
 sRGB conversion, Curves and Levels also use bounded immutable channel tables,
 computed with their original integer-level formulas at 8/16-bit precision.
+Six-axis correction checks all ten affecting controls for an exact neutral
+configuration and skips only its kernel, preserving the common clipping,
+opacity, range and metadata tail. Its 8-bit cube uses actual cell spans: eight
+for interior nodes, seven for 248..255, with one final weighted rounding. The
+nonneutral 16-bit path still evaluates the existing formula per pixel; it is
+not silently narrowed or replaced with the coarse 8-bit cube.
 Box Blur uses rolling sums and contiguous 64-pixel column bands in its vertical
 pass; RGBA64's horizontal pass processes all RGB channels together. Its integer
 rounding, repeated-pass order, edge extension and untouched alpha are unchanged.
@@ -357,6 +368,12 @@ Offline audio export uses the same conversion rules but writes transactionally
 through a staged file. Small timestamp jitter is smoothed; genuine gaps remain
 silence.
 
+Positive finite video/timeline audio requests retain their requested duration
+when native AviSynth audio ends early. Native reads are bounded to the clip's
+declared sample domain; bounded chunks synthesize only the trailing silence in
+the original format (unsigned 8-bit uses 128). EOF and explicit nonpadding
+requests remain source-bounded, and a window starting at/after EOF still fails.
+
 `VDQtAudioExportRequest` captures codec/conversion settings, filters and ordered
 source-sample ranges for manual Save Audio, scripts and jobs. Range resolution
 indexes bounded edits and rounds source timestamp boundaries, not each duration
@@ -417,6 +434,9 @@ frame/size/interpolation/alpha settings. Expose, pan and badge repaints reuse it
 Clear releases it and oversized results are drawn without retained caching.
 If Fast Recompress falls back to frame rendering for edits, delivered callbacks
 still update Input and the edited playhead. Only Full Processing updates Output.
+Manual Save Video reports cancellation separately and logs/statuses the specific
+failure. The exporter owns its phase-specific error dialogs; the controller
+does not append a second generic warning or an error warning on cancellation.
 Two-pass space estimates include checked coexisting extracted, filtered and
 concatenated PCM files as well as video, allowing eight bytes per PCM channel
 and one composed effect tail; this is a preflight, not a reservation.

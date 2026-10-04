@@ -1465,3 +1465,83 @@ Native-AVS padding, neutral six-axis endpoint rounding and manual Save Video's
 generic failure dialog are documented next-gate follow-ups, not solved by these
 passing tests. Native algorithm parity and user-specific ProRes slowdown remain
 separately open.
+
+Native audio windows, six-axis identity and manual export outcomes
+------------------------------------------------------------------
+
+  ctest --preset release-checks -R 'avs_audio_padding|manual_export_results|filter_sixaxis|audio_session_smoke'
+
+Run the same focused selection with sanitizer-checks. Baseline copies reproduce
+all five native PCM padding failures, neutral 8-bit near-white color changes,
+and duplicate cancellation/staging-error warnings. Fixtures, configuration and
+destinations are private; native scripts explicitly clear plugin autoload.
+
+avs_audio_padding_tests checks unsigned8/integer16/24/32/float32 source-prefix
+bytes and actual trailing silence, positive/offset windows, EOF/nonpadding,
+start-at/after-EOF failures, cancellation during silence and checked huge sizes.
+The ordinary prefix/tail comparisons are byte-exact; a separately requested
+floating Tone phase-origin comparison allows 1e-6 for that fixture only. Finite
+video waveform requests and real Full/Fast exports retain two seconds when
+native audio lasts one second. Audio-only nonpadding remains one second.
+
+filter_sixaxis_tests uses an independent eight-corner Cartesian cube oracle,
+all shortened endpoint cells, unchanged interior pixels, ten distinct neutral
+controls, tiny real nonneutral changes, alpha, caller storage, crop/range/
+opacity, parameter cache invalidation and sample aspect. The native16 formula
+is independently checked and actual RGBAP12 -> neutral filter -> raw export
+preserves every normalized byte, including alpha and low bits. A default filter
+must be exact identity, not gray253->252 or254->253. All 100 restricted-memory
+allocation/recovery cases still use genuinely nonneutral SixAxis settings.
+
+Eight-worker uncontended old/new filter timings used one warm image and median
+nine frames at1080p/4K for RGB888/RGBA8888/RGBA64, with both run orders. Neutral
+processing was approximately6-89ms before and0.002-0.003ms after. This is shared
+image identity work, not a changing-video playback speed claim. Nonneutral4K
+RGBA8888 interior was +8.3% in the first pair and +1.0% in the reverse pair;
+endpoint changes ranged +3.8-7.1% for that layout, and unchanged native16 varied
+too. No adjusted-filter speedup is claimed; no extra kernel duplication was
+introduced on noisy timings. The 8-bit cube remains an approximation of the
+existing formula, and native16 nonneutral calculations are unchanged.
+
+manual_export_results_tests invokes actual Save Video with a timed modal
+responder: failed staging shows one specific error, cancellation preserves an
+existing destination without a failure warning, and a discoverable encoder
+with an invalid private interpreter reports its start failure through status/
+log even when that phase has no modal dialog. Controls recover on every path.
+
+  build-release-checks/audio_session_benchmark --cycles 12 --report NEW_REPORT.json
+  build-release-checks/audio_session_benchmark --cycles 12 --effects --report ANOTHER_NEW_REPORT.json
+
+Reports are opened with NewOnly and never overwrite an existing measurement. CTest's small
+audio_session_smoke runs two cycles, including effects, without speed assertions.
+The benchmark alternates one persistent decoder/player between synthetic
+1080p MP4/AAC and core-only AVS/native audio, scrubs MP4 trim points, actually
+decodes MP4 audio, primes/pulls the real native producer/filter graph without a
+hardware sink, prepares composed audio and exports96frames of ProRes/PCM.
+Independent output checks count every video frame and decode a non-silent
+soundtrack of exactly192000samples, or176400after44.1kHz effects. Preparation
+retains a single Chorus tail; final video intentionally trims it at four seconds.
+MP4 extraction, standalone preparation and final integrity scans are outside
+the timed export, which includes its own audio preparation and encoder startup.
+
+Two uncontended12-cycle observations, 2026-10-03 local date:
+  - Plain:82.0-89.5fps; first/last three averages86.56/86.94fps.
+  - Gain/resample/Chorus:94.6-98.8fps; averages96.08/95.72fps.
+  - Both:29parent threads after export,5after Close,9FDs after Close.
+  - Test-owned disk after Close stayed6521349bytes in every cycle.
+  - RSS after Close rose146.7->253.3MiB plain and135.9->262.4MiB with effects;
+    observed export-boundary maxima were326.7/327.8MiB respectively.
+These order-separated results do not mean effects make encoding faster. Neither
+run reproduces the user's repeated30% drop. Parent boundary snapshots exclude
+external FFmpeg peak resources; allocator/cache warmup and RSS are observational,
+not leak proof. Disk counts exclude temporary audio outside the fixture tree.
+Core-only AVS does not reproduce LSMASH or other installed-plugin retention.
+Local reports: build-release-checks/audio-session-gate4.QzaA6S/{plain,effects}.json.
+
+Validation: focused9/9, full Release193/193(119.52s), ASan/UBSan89/89(233.01s),
+and both independently rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke
+checks pass. Hardware, leak detection, clean package libraries and real-user
+plugin-chain throughput remain separate gates. Final-matrix review uncovered
+selected-audio Direct-mode policy and disabled-audio video-offset follow-ups;
+those are not fixed by this successful checkpoint. Original temporal/warp
+contracts are tracked explicitly in docs/NATIVE_FILTER_FOLLOWUPS.txt.

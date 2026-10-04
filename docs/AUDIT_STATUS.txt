@@ -63,6 +63,10 @@ Remaining execution sequence
 [x] M04: continuous fallback from ended/failed/nonadvancing audio clocks.
     Physical sink/short-track playback verification remains a hardware gate.
 [x] M05/S10: consistent inclusion/disable and silent automatic sources.
+[ ] Selected-audio export follow-up: enforce the GUI's existing Full-processing
+    policy for external/nondefault selected audio in every exporter entry point.
+    Native AVS Direct audio must bypass UI audio effects consistently. Existing
+    tests do not cover these combinations; focused reproduction is in progress.
 [x] S08: shared codec/conversion/range-aware manual/script/queued audio export.
     Effects run once after edit assembly; source precision is retained until encoding.
 [x] Video-audio follow-up: shared preparation joins cuts before effects, preserves
@@ -70,14 +74,18 @@ Remaining execution sequence
     and forwards outer abort during preparation. Edited Full/Normal/Fast fallback
     and real nonedited Fast/FPS retiming match final-codec PCM references.
     Unsupported signed64 extraction fails without replacing existing output.
-[ ] Native AVS audio follow-up: exact-count normalization still truncates positive
-    padded windows to source EOF. Read only available native samples, then write
-    bounded explicit trailing silence; preserve nonpadding and beyond-EOF errors.
+[x] Native AVS audio follow-up: positive padded windows retain their requested
+    duration. Native reads stay source-bounded, followed by bounded explicit
+    silence in the actual PCM format; nonpadding and beyond-EOF errors remain.
 [x] M14/M15: matching audio effects and device-boundary conversion without bypass.
     All ten effects, EOF tails, seek resets and supported sink formats tested
     with PCM fixtures; physical listening/device negotiation remains a hardware gate.
 [x] Audio follow-up: separate held-picture and advancing audio mappings, including
     masked VFR playback intervals. Physical continuous-sound verification is pending.
+[ ] Masked VFR export duration follow-up: held-picture mapping still selects
+    video duration metadata in the exporter, shortening the composed clock and
+    truncating final audio. Use the advancing timeline interval for timing;
+    preserve the documented edited-output average-CFR policy.
 [x] M08: consistent BT.2020 matrix conversion, separate valid color tags and saved settings.
 [x] M12: source/per-frame matrices and ranges precede resolution guesses in RGB decoding.
     Explicit user overrides remain authoritative; unsupported matrices report an error.
@@ -128,9 +136,13 @@ Remaining execution sequence
     no evidence justifies a speculative buffer rewrite. Hardware remains separate.
 [x] P04 Blur: exact contiguous vertical bands and packed 16-bit horizontal RGB,
     independent scalar/alpha/rounding contracts and controlled paired benchmarks.
+[x] Six-axis identity/endpoint follow-up: neutral controls skip only the kernel;
+    all ten controls, clipping/opacity/range/SAR and native low bits are tested.
+    The last 8-bit cube cell uses seven-value weights, not eight. Independent
+    Cartesian references, native12 raw output and 100 allocator cases pass.
 [ ] P04 remaining measured filter work: benchmark other kernels before changing
-    precision or thread budgets. A neutral six-axis probe newly reproduced
-    gray253->252 and254->253 from the last cube cell's incorrect denominator.
+    precision or thread budgets. Nonneutral native SixAxis still uses its
+    existing per-pixel formula; adjusted-filter acceleration is not claimed.
     Offline audio-device avoidance is already fixed; full playback gains are not implied.
 [x] Audio EOF follow-up: both producers include QIODevice read-ahead in EOF;
     exact byte totals, tiny/unaligned reads, restarts and seek-to-EOF now pass.
@@ -145,12 +157,16 @@ Remaining execution sequence
     recursive output; Motion Blur unchanged, including ordered downstream Bob phases.
 [ ] M19: original temporal/IVTC/interpolation/warp algorithms remain separate work;
     rate/lookahead contracts and native algorithm parity are not claimed by sizing fixes.
+    Exact original contracts and the coordinated consumer migration are recorded
+    in docs/NATIVE_FILTER_FOLLOWUPS.txt.
 [x] C06: share identical application/controller-test compilation in a static core.
 [x] C02/C03: temporary preview-menu action ownership and confirmed unused state.
 [x] C04/C07 substep: shared Play/Play Preview setup, exporter failure diagnostics,
     distinct cancellation and rendered preview updates after Fast fallback.
-[ ] C04/C07: remaining duplication and manual export result presentation.
-    Manual Save Video still adds a generic failure dialog even on cancellation.
+[x] Manual export result presentation: cancellation is distinct; phase-specific
+    errors are not followed by a generic warning, and failures without a modal
+    dialog retain specific status/log details. Real Save Video controls tested.
+[ ] C04/C07: remaining justified duplication review, not a whole-controller rewrite.
     Common multi-output transactions and audio-save processing are already extracted.
     Geometry, native path identity and process diagnostic helpers are now also shared.
 [x] Waveform follow-up: ordered edits/masks, rendered duration/rate/precision,
@@ -169,12 +185,18 @@ Remaining execution sequence
     runtime/plugin compatibility separately; no plugins/system files were changed.
 [ ] Final supported-source/export matrix, full sanitizers and measured performance;
     physical audio/capture and arbitrary external plugin coverage reported separately.
+    Orthogonal tests are not a full Cartesian matrix. Outstanding bounded cases
+    include encoded raw/image inputs, AVI PCM copy/fast selections, jointly
+    edited/masked VFR video+audio and actual session-only output defaults.
 
-Latest verified checkpoint: Release 189/189, ASan/UBSan 85/85 and independently
+Latest verified checkpoint: Release 193/193, ASan/UBSan 89/89 and independently
 rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. This includes
 100 native allocation-failure cases, joined-audio precision/cancellation, exact
-blur/interpolation and actual waveform/export-preview/playback controls.
+blur/interpolation/six-axis and actual waveform/export-preview/playback controls.
 VFR packed RGB24, RGBA8 and RGBA16 round trips compare exact pixels/timestamps.
+Two uncontended 12-cycle MP4/AAC -> native-AVS/audio -> ProRes/PCM runs, with and
+without effects, show stable throughput and post-Close threads/FD/test-owned
+disk sizes. This does not cover the user's third-party AVS plugin chain.
 This does not resolve the unchecked follow-ups above.
 
 Checkpoint evidence and limitations live in docs/TESTING.txt.

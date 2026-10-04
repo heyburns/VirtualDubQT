@@ -5368,9 +5368,20 @@ void VDQtMainWindow::onFileSaveAVI() {
         if (ok) {
             VDLogWindow::instance(this)->appendLog(QString("[Export] Video export successfully completed: %1").arg(savePath));
             QMessageBox::information(this, "Export Complete", QString("Video file successfully exported to:\n%1").arg(savePath));
+        } else if (exporter.wasCancelled()) {
+            const QString message = QStringLiteral("Video export cancelled.");
+            VDLogWindow::instance(this)->appendLog(QStringLiteral("[Export] ") + message);
+            statusBar()->showMessage(message);
         } else {
-            VDLogWindow::instance(this)->appendLog(QString("[Export] Video export failed or was cancelled."));
-            QMessageBox::warning(this, "Export Failed", "Video export failed or was cancelled.");
+            const QString detail = exporter.lastError().trimmed();
+            const QString message = detail.isEmpty()
+                ? QStringLiteral("Video export failed.")
+                : QStringLiteral("Video export failed: ") + detail;
+            VDLogWindow::instance(this)->appendLog(QStringLiteral("[Export] ") + message);
+            statusBar()->showMessage(message);
+            // Exporter owns phase-specific modal errors. Keep failures without
+            // a dialog visible in the status/log; do not add a second generic
+            // warning, and never treat a user cancellation as an error dialog.
         }
     }
 }

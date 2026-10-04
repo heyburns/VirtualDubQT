@@ -2954,7 +2954,10 @@ bool VDQtAudioPlayer::exportAudioToFile(
     const int64_t maximumAvailable = mTotalSamplesExact && mTotalSamples > 0
         ? std::max<int64_t>(0, mTotalSamples - startSample)
         : -1;
-    if (sampleCount > 0 && maximumAvailable >= 0) {
+    // A positive video/timeline request keeps its requested clock by default,
+    // even when native audio ends first. Explicit nonpadding and EOF requests
+    // remain source-bounded; a window beginning at/after EOF still fails below.
+    if (sampleCount > 0 && maximumAvailable >= 0 && !padToRequestedLength) {
         sampleCount = std::min(sampleCount, maximumAvailable);
     } else if (sampleCount <= 0 && maximumAvailable >= 0) {
         sampleCount = maximumAvailable;
@@ -3045,11 +3048,24 @@ bool VDQtAudioPlayer::exportAudioToFile(
                 break;
             }
             QByteArray buffer(static_cast<int>(byteCount), Qt::Uninitialized);
-            bool decoded = false;
-            {
+            // Never ask a native filter for samples outside its declared audio
+            // domain: some source plugins cannot safely handle an EOF overread.
+            // Only the trailing portion is synthesized, in the original PCM
+            // format (unsigned 8-bit silence is 128, not zero).
+            const int64_t readableCount = currentSample < mVi->num_audio_samples
+                ? std::min(count, mVi->num_audio_samples - currentSample) : 0;
+            bool decoded = true;
+            if (readableCount > 0) {
                 QMutexLocker<QRecursiveMutex> avsLock(mAvsAccessMutex);
                 decoded = avs_get_audio(
-                    mClip, buffer.data(), currentSample, count) == 0;
+                    mClip, buffer.data(), currentSample, readableCount) == 0;
+            }
+            if (readableCount < count) {
+                const qsizetype readableBytes = static_cast<qsizetype>(
+                    readableCount * bytesPerFrame);
+                std::memset(buffer.data() + readableBytes,
+                            mVi->sample_type == AVS_SAMPLE_INT8 ? 0x80 : 0,
+                            static_cast<size_t>(byteCount - readableBytes));
             }
             if (!decoded || !writer.write(buffer.constData(), buffer.size())) {
                 ok = false;
