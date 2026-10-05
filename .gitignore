@@ -4,6 +4,7 @@ build-*/
 bin/
 out/
 cmake-build-*/
+/dist/
 
 # Compiled Objects and Libraries
 *.o

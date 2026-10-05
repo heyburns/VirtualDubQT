@@ -71,12 +71,15 @@ class PackageLauncherTests(unittest.TestCase):
                 self.script(bundled, contents)
 
     def test_deployment_hooks_are_sourced_before_application(self):
-        hooks = self.root / "apprun-hooks"
-        hooks.mkdir()
-        self.script(hooks / "test.sh", 'export VDQT_TEST_HOOK="hook-applied"\n')
-        child = self.launch(self.empty)
-        self.assertEqual(child.returncode, 0, child.stderr)
-        self.assertEqual(child.stdout.splitlines()[2], "hook-applied")
+        for directory in ("apprun-hooks", "vdqt-apprun-hooks"):
+            with self.subTest(directory=directory):
+                hooks = self.root / directory
+                hooks.mkdir()
+                self.script(hooks / "test.sh", 'export VDQT_TEST_HOOK="hook-applied"\n')
+                child = self.launch(self.empty)
+                self.assertEqual(child.returncode, 0, child.stderr)
+                self.assertEqual(child.stdout.splitlines()[2], "hook-applied")
+                shutil.rmtree(hooks)
 
 
 if __name__ == "__main__":

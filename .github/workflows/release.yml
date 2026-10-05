@@ -16,6 +16,7 @@ concurrency:
 
 env:
   AVISYNTH_VERSION: "3.7.5"
+  FFMPEG_VERSION: "6.1.6"
 
 jobs:
   # Ubuntu supplies the portable AppImage build environment as well as the
@@ -43,7 +44,9 @@ jobs:
             build-essential cmake curl desktop-file-utils dpkg-dev ffmpeg file git \
             libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
             libfuse2t64 libswresample-dev libswscale-dev ninja-build pkg-config \
-            python3 qt6-base-dev qt6-multimedia-dev
+            python3 qt6-base-dev qt6-multimedia-dev nasm \
+            libaom-dev libmp3lame-dev libopus-dev libsvtav1enc-dev \
+            libvorbis-dev libvpx-dev libx264-dev libx265-dev
 
       - name: Build AviSynth+ runtime
         run: |
@@ -90,6 +93,19 @@ jobs:
                 --application /usr/bin/VirtualDubQt --runtime-path /usr/bin:/bin
             '
 
+      - name: Build AviSynth-enabled FFmpeg tools for AppImage
+        run: |
+          git clone --branch "n${FFMPEG_VERSION}" --depth 1 \
+            https://github.com/FFmpeg/FFmpeg.git /tmp/FFmpeg
+          cd /tmp/FFmpeg
+          ./configure --prefix="${RUNNER_TEMP}/ffmpeg" \
+            --disable-doc --disable-debug --disable-shared --enable-static \
+            --enable-gpl --enable-avisynth --enable-libx264 --enable-libx265 \
+            --enable-libvpx --enable-libmp3lame --enable-libopus \
+            --enable-libvorbis --enable-libaom --enable-libsvtav1
+          make -j2
+          make install
+
       - name: Build and validate AppImage
         shell: bash
         run: |
@@ -104,12 +120,13 @@ jobs:
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
 
           export QMAKE="$(command -v qmake6)"
+          export EXTRA_PLATFORM_PLUGINS=libqoffscreen.so
           export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable build-release/VirtualDubQt \
-            --executable "$(command -v ffmpeg)" \
-            --executable "$(command -v ffprobe)" \
+            --executable "${RUNNER_TEMP}/ffmpeg/bin/ffmpeg" \
+            --executable "${RUNNER_TEMP}/ffmpeg/bin/ffprobe" \
             --desktop-file packaging/virtualdubqt.desktop \
             --icon-file packaging/virtualdubqt.png \
             --custom-apprun packaging/AppRun \
@@ -117,15 +134,28 @@ jobs:
           install -Dm644 LICENSE AppDir/usr/share/licenses/virtualdubqt/LICENSE
           install -Dm644 /usr/share/doc/ffmpeg/copyright \
             AppDir/usr/share/licenses/ffmpeg/copyright
-          ffmpeg -version > AppDir/usr/share/licenses/ffmpeg/build-configuration.txt
+          install -Dm644 /tmp/FFmpeg/COPYING.GPLv2 \
+            AppDir/usr/share/licenses/ffmpeg/COPYING.GPLv2
+          "${RUNNER_TEMP}/ffmpeg/bin/ffmpeg" -version \
+            > AppDir/usr/share/licenses/ffmpeg/build-configuration.txt
           test -x AppDir/usr/bin/ffmpeg
           test -x AppDir/usr/bin/ffprobe
+          # FFmpeg loads AviSynth dynamically by its unversioned library name.
+          avisynth_soname="$(basename "$(readlink /usr/local/lib/libavisynth.so)")"
+          test -f "AppDir/usr/lib/${avisynth_soname}"
+          ln -s "${avisynth_soname}" AppDir/usr/lib/libavisynth.so
+
+          # Our launcher sources these hooks itself. Leaving the reserved name
+          # makes linuxdeploy wrap it in a stub that needs host shell utilities.
+          mv AppDir/apprun-hooks AppDir/vdqt-apprun-hooks
+          rm -f AppDir/AppRun.wrapped
 
           version="${GITHUB_REF_NAME#v}"
           export VERSION="${version}"
           export OUTPUT="${GITHUB_WORKSPACE}/dist/VirtualDubQT-${version}-x86_64.AppImage"
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --custom-apprun packaging/AppRun --output appimage
+          cmp packaging/AppRun AppDir/AppRun
           test -x "${OUTPUT}"
           # No host FFmpeg, Qt or AviSynth packages in this runtime. Desktop
           # platform basics are retained; hardware/display/audio are not tested.
@@ -136,7 +166,8 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install --no-install-recommends -y \
-                python3 libgl1 libegl1 libdbus-1-3
+                python3 libgl1 libegl1 libopengl0 libdbus-1-3 \
+                libfontconfig1 libharfbuzz0b libfribidi0 libasound2t64
               test ! -e /usr/bin/ffmpeg
               test ! -e /usr/bin/ffprobe
               test_root="$(mktemp -d)"
@@ -149,7 +180,8 @@ jobs:
                 --ffmpeg "${test_root}/squashfs-root/usr/bin/ffmpeg" \
                 --ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
                 --runtime-ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
-                --runtime-library-path "${test_root}/squashfs-root/usr/lib"
+                --runtime-library-path "${test_root}/squashfs-root/usr/lib" \
+                --check-fast-recompress
             '
 
       - name: Upload Ubuntu packages

@@ -186,10 +186,12 @@ Remaining execution sequence
     tools, and native 16-bit Interpolate/Motion Blur alpha composition repaired.
     Fresh Ubuntu 24.04 Release passes 197/197 plus the application smoke test;
     the four affected regressions also pass under workstation ASan/UBSan.
-    These local rechecks are separate from hosted workflow confirmation.
-[ ] Q03 clean package execution: new Ubuntu/Fedora clean-runtime release gates
-    await execution; local container/linuxdeploy/DEB tooling is unavailable.
-    Staged AppRun/tool smoke passes with an empty host PATH, not clean libraries.
+    Hosted Release and sanitizer jobs also pass (run 37249513953).
+[x] Q03 clean package execution: 0.1.2 DEB and RPM install and export successfully
+    in fresh Ubuntu 24.04/Fedora 43 roots using declared runtime dependencies.
+    AppImage passes with no host Qt/FFmpeg/AviSynth and an empty application PATH,
+    including native AVS Fast Recompress. Launcher/hooks, offscreen platform,
+    desktop runtime prerequisites and the dynamic AviSynth library alias fixed.
 [ ] Dependency follow-up: the installed AviSynth autoload environment fails an
     independent logging-script sanitizer probe; correctly disabled autoload
     passes. No application source is needed for reproduction. Diagnose installed
@@ -201,7 +203,7 @@ Remaining execution sequence
     and sanitizers, followed by regular-binary media smoke tests.
 [ ] Extended supported-runtime matrix: orthogonal workflow tests are not a full
     Cartesian matrix across FFmpeg versions or arbitrary external plugins.
-    Physical audio/capture and clean installed-package checks remain separate.
+    Physical audio/capture and broader distribution coverage remain separate.
     Arbitrary nonzero AVI packet-copy starts may retain container/audio preroll;
     packet-aligned controls do not establish sample-exact compressed copying.
 

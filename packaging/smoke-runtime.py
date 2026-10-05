@@ -90,32 +90,33 @@ def smoke(args):
                           'pixel_type="RGB24", audio_rate=0, color=$204080)\n',
                           encoding="utf-8")
         for index, input_path in enumerate((source, script)):
-            raw = root / f"export-{index}.bgra"
-            encoded = root / f"export-{index}.mkv"
-            command = ('VirtualDub.audio.SetSource(0);VirtualDub.video.SetMode(3);'
-                       'VirtualDub.video.SetCompression(0x31564646);'
-                       f'VirtualDub.SaveRawVideo("{sylia_path(raw)}",8,4,0,0);'
-                       f'VirtualDub.SaveAVI("{sylia_path(encoded)}");')
-            run([app, str(input_path), "--command", command, "--exit"], environment)
-            if not raw.is_file() or raw.stat().st_size != 8 * 64 * 48 * 4:
-                raise RuntimeError(f"Wrong raw frame count/size for {input_path.name}")
-            if index == 1 and raw.read_bytes() != bytes.fromhex("804020ff") * (8 * 64 * 48):
-                raise RuntimeError("Native AviSynth export changed its known BGRA pixels")
-            # The app must produce an actual encoded file, not just return zero.
-            # Inspect with the runtime ffprobe, not an accidental PATH fallback.
-            metadata = json.loads(run([runtime_ffprobe, "-v", "error", "-count_frames",
-                                       "-select_streams", "v:0", "-show_entries",
-                                       "stream=codec_name,width,height,nb_read_frames",
-                                       "-of", "json", str(encoded)], environment))
-            streams = metadata.get("streams", [])
-            if len(streams) != 1 or streams[0] != {
-                "codec_name": "ffv1", "width": 64, "height": 48, "nb_read_frames": "8"
-            }:
-                raise RuntimeError(f"Unexpected packaged export: {metadata}")
-            # Independently decode the complete output; a valid header alone
-            # does not establish that every exported frame is usable.
-            run([fixture_ffmpeg, "-nostdin", "-v", "error", "-i", str(encoded),
-                 "-map", "0:v:0", "-f", "null", "-"])
+            for mode in ([3, 1] if args.check_fast_recompress else [3]):
+                raw = root / f"export-{index}-{mode}.bgra"
+                encoded = root / f"export-{index}-{mode}.mkv"
+                command = (f'VirtualDub.audio.SetSource(0);VirtualDub.video.SetMode({mode});'
+                           'VirtualDub.video.SetCompression(0x31564646);'
+                           f'VirtualDub.SaveRawVideo("{sylia_path(raw)}",8,4,0,0);'
+                           f'VirtualDub.SaveAVI("{sylia_path(encoded)}");')
+                run([app, str(input_path), "--command", command, "--exit"], environment)
+                if not raw.is_file() or raw.stat().st_size != 8 * 64 * 48 * 4:
+                    raise RuntimeError(f"Wrong raw frame count/size for {input_path.name}")
+                if index == 1 and raw.read_bytes() != bytes.fromhex("804020ff") * (8 * 64 * 48):
+                    raise RuntimeError("Native AviSynth export changed its known BGRA pixels")
+                # The app must produce an actual encoded file, not just return zero.
+                # Inspect with the runtime ffprobe, not an accidental PATH fallback.
+                metadata = json.loads(run([runtime_ffprobe, "-v", "error", "-count_frames",
+                                           "-select_streams", "v:0", "-show_entries",
+                                           "stream=codec_name,width,height,nb_read_frames",
+                                           "-of", "json", str(encoded)], environment))
+                streams = metadata.get("streams", [])
+                if len(streams) != 1 or streams[0] != {
+                    "codec_name": "ffv1", "width": 64, "height": 48, "nb_read_frames": "8"
+                }:
+                    raise RuntimeError(f"Unexpected packaged export: {metadata}")
+                # Independently decode the complete output; a valid header alone
+                # does not establish that every exported frame is usable.
+                run([fixture_ffmpeg, "-nostdin", "-v", "error", "-i", str(encoded),
+                     "-map", "0:v:0", "-f", "null", "-"])
         print("Packaged application decoded FFV1/native AVS and exported 8-frame raw/FFV1 outputs")
         print(f"Application runtime PATH: {environment['PATH']}")
         print(f"Runtime ffprobe: {runtime_ffprobe}")
@@ -129,6 +130,8 @@ def main():
     parser.add_argument("--runtime-ffprobe", help="Packaged probe; mandatory in AppImage CI")
     parser.add_argument("--runtime-path", help="Application-only PATH; default is empty directory")
     parser.add_argument("--runtime-library-path", help="Explicit packaged library search path")
+    parser.add_argument("--check-fast-recompress", action="store_true",
+                        help="Also verify Fast Recompress, including native AviSynth input")
     args = parser.parse_args()
     try:
         smoke(args)

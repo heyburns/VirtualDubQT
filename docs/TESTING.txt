@@ -60,6 +60,32 @@ and the real-application raw/FFV1/native-AVS smoke test. The expanded interpolat
 regression also passes against the workstation's newer Qt. The focused
 workstation ASan/UBSan follow-up passes all four previously failing regressions.
 
+Version 0.1.2 package validation, 2026-10-04
+------------------------------------------
+
+Built x86_64 packages using isolated official distribution roots, with separate
+fresh roots for installation/runtime checks:
+  - Ubuntu 24.04 DEB: Qt 6.4.2, FFmpeg 6.1 libraries, bundled AviSynth+ 3.7.5.
+  - Fedora 43 RPM: Qt 6.10.3, FFmpeg 7.1 libraries, bundled AviSynth+ 3.7.5.
+  - AppImage: Ubuntu build plus FFmpeg 6.1.6 command-line tools with AviSynth
+    support, Qt offscreen platform plugin, and the custom AppRun launcher.
+
+DEB/RPM dependency-only installations pass the real-application FFV1/native-AVS
+raw and encoded export checks. AppImage passes those checks plus Fast Recompress
+for both ordinary media and AVS, with an empty application PATH and no installed
+host Qt, FFmpeg or AviSynth. Standard desktop libraries (graphics, fonts, ALSA,
+and D-Bus) are present. Physical display/audio/capture hardware is not exercised.
+
+The first clean AppImage runs exposed linuxdeploy wrapping the custom launcher
+in a host-PATH-dependent bash script, an omitted offscreen platform plugin, and
+FFmpeg's need for an unversioned libavisynth.so runtime alias. The workflow now
+preserves the custom launcher, moves and sources the Qt hooks, includes the
+plugin/alias, and checks the completed AppImage. Launcher regression checks pass.
+
+The prior code checkpoint's hosted Release and sanitizer jobs both passed:
+https://github.com/heyburns/VirtualDubQT/actions/runs/37249513953
+Local artifacts, checksums and build details are in the ignored dist/0.1.2/.
+
 Fixtures
 --------
 

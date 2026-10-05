@@ -20,7 +20,9 @@ export PATH LD_LIBRARY_PATH
 # Qt 6 is configured by linuxdeploy's qt.conf. Honor any additional deployment
 # hooks without using external dirname/readlink utilities: this also works when
 # the caller deliberately removes every host executable from PATH.
-for hook in "$APPDIR"/apprun-hooks/*.sh; do
+# The release builder moves hooks out of linuxdeploy's reserved directory so
+# it cannot wrap this launcher in a bash/readlink/dirname-dependent stub.
+for hook in "$APPDIR"/vdqt-apprun-hooks/*.sh "$APPDIR"/apprun-hooks/*.sh; do
     if [ -f "$hook" ]; then
         . "$hook"
     fi
