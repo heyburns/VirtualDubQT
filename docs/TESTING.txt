@@ -30,6 +30,36 @@ They can return skip code 77 when no usable device is available. Offscreen check
 do not establish real speaker/capture behavior. Do not run performance benchmarks
 alongside other heavy tests when comparing timing results.
 
+Ubuntu CI compatibility follow-up, 2026-10-04
+--------------------------------------------
+
+The Ubuntu 24.04 runner uses Qt 6.4.2 and FFmpeg 6.1 libraries. The earlier
+incomplete-frame-index metatype build failure is fixed by declaring the opaque,
+non-QObject snapshot pointer before registering its shared-pointer metatype.
+
+Three export regressions reproduced with Ubuntu's FFmpeg command: its build
+omits the AviSynth demuxer, although the application's native AviSynth decoder
+works. CI now builds pinned FFmpeg 6.1.6 tools with --enable-avisynth and the
+codec libraries exercised by the tests, while retaining Ubuntu's FFmpeg library
+build dependency. A real BlankClip decode checks the command/runtime combination
+before the application build. Regression and application smoke checks use these
+tools through PATH; no export regressions are disabled.
+
+A separate Qt-only reproduction exposed Qt 6.4's AVX2 straight-RGBA64 fetch
+multiplying alpha by itself. Interpolate and Motion Blur now perform native
+16-bit source-over arithmetic with checked destination detachment and bounded
+row tasks, retaining the amount control's Qt coverage quantization. The test
+reference paints explicitly premultiplied images to avoid that Qt fetch path,
+compares exact RGBA pixels, and separately asserts source-over never reduces
+destination alpha. Coverage includes tiny/fractional opacity, zero opacity,
+seek/reset, incoming versus recursive history, upstream filters and Bob phases.
+
+Validation: a fresh Ubuntu 24.04 build with Qt 6.4.2, distro FFmpeg 6.1 libraries,
+AviSynth+ 3.7.5 and the new FFmpeg tools passes all 197 non-hardware regressions
+and the real-application raw/FFV1/native-AVS smoke test. The expanded interpolation
+regression also passes against the workstation's newer Qt. The focused
+workstation ASan/UBSan follow-up passes all four previously failing regressions.
+
 Fixtures
 --------
 

@@ -182,6 +182,11 @@ Remaining execution sequence
 [x] Q02: accurate CMake minimum, Release instructions and optimized default builds.
 [x] Q01: native-package command dependencies and bundled AppImage ffmpeg/ffprobe.
 [x] Q03 CI infrastructure: PR Release/sanitizer checks and actual package smoke gates.
+[x] Q03 Ubuntu compatibility: Qt 6.4 snapshot metatypes, AviSynth-enabled FFmpeg
+    tools, and native 16-bit Interpolate/Motion Blur alpha composition repaired.
+    Fresh Ubuntu 24.04 Release passes 197/197 plus the application smoke test;
+    the four affected regressions also pass under workstation ASan/UBSan.
+    These local rechecks are separate from hosted workflow confirmation.
 [ ] Q03 clean package execution: new Ubuntu/Fedora clean-runtime release gates
     await execution; local container/linuxdeploy/DEB tooling is unavailable.
     Staged AppRun/tool smoke passes with an empty host PATH, not clean libraries.

@@ -1099,11 +1099,44 @@ QImage VDQtFilterSystem::processFilterForPhase(
                            || filter.type == VDFilterType::MotionBlur) {
                     const double opacity = std::clamp(
                         filter.params.value("amount", 0.5), 0.0, 1.0);
-                    checkedImageBits(result);
-                    QPainter painter;
-                    if (!painter.begin(&result)) throw std::bad_alloc();
-                    painter.setOpacity(opacity);
-                    painter.drawImage(0, 0, previous);
+                    if (highPrecision) {
+                        // Qt 6.4's AVX2 straight RGBA64 fetch also multiplies
+                        // alpha by itself. Compose native 16-bit pixels here
+                        // so alpha and rounding do not depend on Qt's SIMD path.
+                        // Match QPainter's 8-bit coverage for this amount control.
+                        if (opacity > 0.0) {
+                            const quint32 coverage = (255 * static_cast<int>(opacity * 256)) >> 8;
+                            const auto scale = [](quint32 value, quint32 alpha) -> quint16 {
+                                const quint32 product = value * alpha;
+                                return (product + (product >> 16) + 0x8000) >> 16;
+                            };
+                            uchar *destination = checkedImageBits(result);
+                            const qsizetype stride = result.bytesPerLine();
+                            const uchar *prior = previous.constBits();
+                            const qsizetype priorStride = previous.bytesPerLine();
+                            const int width = result.width();
+                            parallelFor(result.height(), qint64(width) * result.height(), [=](int y) {
+                                auto *row = reinterpret_cast<QRgba64*>(destination + y * stride);
+                                const auto *source = reinterpret_cast<const QRgba64*>(prior + y * priorStride);
+                                for (int x = 0; x < width; ++x) {
+                                    const QRgba64 s = source[x].premultiplied();
+                                    const QRgba64 d = row[x].premultiplied();
+                                    const quint32 alpha = scale(s.alpha(), coverage * 257);
+                                    row[x] = QRgba64::fromRgba64(
+                                        scale(s.red(), coverage * 257) + scale(d.red(), 65535 - alpha),
+                                        scale(s.green(), coverage * 257) + scale(d.green(), 65535 - alpha),
+                                        scale(s.blue(), coverage * 257) + scale(d.blue(), 65535 - alpha),
+                                        alpha + scale(d.alpha(), 65535 - alpha)).unpremultiplied();
+                                }
+                            });
+                        }
+                    } else {
+                        checkedImageBits(result);
+                        QPainter painter;
+                        if (!painter.begin(&result)) throw std::bad_alloc();
+                        painter.setOpacity(opacity);
+                        painter.drawImage(0, 0, previous);
+                    }
                 } else {
                     const int threshold = std::clamp(
                         static_cast<int>(filter.params.value("threshold", 12)), 0, 255);

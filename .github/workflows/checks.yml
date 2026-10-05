@@ -15,6 +15,7 @@ concurrency:
 
 env:
   AVISYNTH_VERSION: "3.7.5"
+  FFMPEG_VERSION: "6.1.6"
 
 jobs:
   regressions:
@@ -33,9 +34,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake ffmpeg git pkg-config python3 \
+            build-essential cmake ffmpeg git nasm pkg-config python3 \
             libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
-            libswresample-dev libswscale-dev qt6-base-dev qt6-multimedia-dev
+            libswresample-dev libswscale-dev qt6-base-dev qt6-multimedia-dev \
+            libaom-dev libmp3lame-dev libopus-dev libsvtav1enc-dev \
+            libvorbis-dev libvpx-dev libx264-dev libx265-dev
 
       - name: Build pinned AviSynth+ runtime
         run: |
@@ -47,6 +50,26 @@ jobs:
           cmake --build /tmp/AviSynthPlus/build --parallel 2
           sudo cmake --install /tmp/AviSynthPlus/build
           sudo ldconfig
+
+      - name: Build pinned FFmpeg tools with AviSynth support
+        run: |
+          # Ubuntu's FFmpeg libraries remain the application's build dependency.
+          # Its CLI lacks the AviSynth demuxer needed by Fast Recompress tests.
+          git clone --branch "n${FFMPEG_VERSION}" --depth 1 \
+            https://github.com/FFmpeg/FFmpeg.git /tmp/FFmpeg
+          cd /tmp/FFmpeg
+          ./configure --prefix="${RUNNER_TEMP}/ffmpeg" \
+            --disable-doc --disable-debug --disable-shared --enable-static \
+            --enable-gpl --enable-avisynth --enable-libx264 --enable-libx265 \
+            --enable-libvpx --enable-libmp3lame --enable-libopus \
+            --enable-libvorbis --enable-libaom --enable-libsvtav1
+          make -j2
+          make install
+          echo "${RUNNER_TEMP}/ffmpeg/bin" >> "${GITHUB_PATH}"
+          printf 'BlankClip(length=1, width=16, height=16, pixel_type="YV12")\n' \
+            > "${RUNNER_TEMP}/ffmpeg-avisynth-check.avs"
+          "${RUNNER_TEMP}/ffmpeg/bin/ffmpeg" -nostdin -hide_banner -loglevel error \
+            -i "${RUNNER_TEMP}/ffmpeg-avisynth-check.avs" -f null -
 
       - name: Configure and build maintained regressions
         run: |
@@ -61,7 +84,7 @@ jobs:
         run: |
           python3 packaging/smoke-runtime.py \
             --application "${GITHUB_WORKSPACE}/build-release-checks/VirtualDubQt" \
-            --runtime-path /usr/bin:/bin
+            --runtime-path "${RUNNER_TEMP}/ffmpeg/bin:/usr/bin:/bin"
 
       - name: Retain failed test diagnostics
         if: failure()

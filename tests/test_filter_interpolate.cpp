@@ -43,13 +43,33 @@ QImage source(QImage::Format format, int frame) {
 }
 QImage adjacentReference(const QImage& current, const QImage& previous, double amount) {
     if (previous.isNull() || previous.size() != current.size()) return current;
+    if (amount == 0.0 && current.format() == QImage::Format_RGBA64) return current;
     QImage output = current.copy();
-    // Keep the current control's Qt opacity/straight-alpha composition exactly;
-    // the independent reference owns only the preceding unblended input value.
+    QImage source = previous;
+    const bool highPrecision = current.format() == QImage::Format_RGBA64;
+    if (highPrecision) {
+        source = previous.copy();
+        // Avoid Qt 6.4's broken straight RGBA64 fetch/conversion. QPainter
+        // still supplies an independent source-over composition reference.
+        for (QImage *image : {&output, &source}) {
+            for (int y = 0; y < image->height(); ++y) {
+                auto *row = reinterpret_cast<QRgba64*>(image->scanLine(y));
+                for (int x = 0; x < image->width(); ++x) row[x] = row[x].premultiplied();
+            }
+            image->reinterpretAsFormat(QImage::Format_RGBA64_Premultiplied);
+        }
+    }
     QPainter painter(&output);
     painter.setOpacity(amount);
-    painter.drawImage(0, 0, previous);
+    painter.drawImage(0, 0, source);
     painter.end();
+    if (highPrecision) {
+        for (int y = 0; y < output.height(); ++y) {
+            auto *row = reinterpret_cast<QRgba64*>(output.scanLine(y));
+            for (int x = 0; x < output.width(); ++x) row[x] = row[x].unpremultiplied();
+        }
+        output.reinterpretAsFormat(QImage::Format_RGBA64);
+    }
     return output;
 }
 void configure(VDQtFilterSystem& filters, int index, double amount) {
@@ -81,8 +101,18 @@ bool adjacentInputs(QImage::Format format, double amount) {
     if (!check(interpolation.processFrame(sought, {100, 4, 25}) == sought,
                "a seek does not blend with stale interpolation history")) return false;
     const QImage next = source(format, 7);
-    if (!check(interpolation.processFrame(next, {101, 4.04, 25})
-                   == adjacentReference(next, sought, amount),
+    const QImage resumed = interpolation.processFrame(next, {101, 4.04, 25});
+    if (format == QImage::Format_RGBA64 && !resumed.isNull()) {
+        for (int y = 0; y < next.height(); ++y) {
+            const auto *input = reinterpret_cast<const QRgba64*>(next.constScanLine(y));
+            const auto *output = reinterpret_cast<const QRgba64*>(resumed.constScanLine(y));
+            for (int x = 0; x < next.width(); ++x) {
+                if (!check(output[x].alpha() >= input[x].alpha(),
+                           "16-bit source-over composition never reduces destination alpha")) return false;
+            }
+        }
+    }
+    if (!check(resumed == adjacentReference(next, sought, amount),
                "interpolation resumes with the new incoming image after a seek")) return false;
     interpolation.resetRuntimeState();
     if (!check(interpolation.processFrame(next, {101, 4.04, 25}) == next,
@@ -144,7 +174,7 @@ bool bobPhases(QImage::Format format, double amount) {
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
     for (const auto format : {QImage::Format_RGB888, QImage::Format_RGBA8888, QImage::Format_RGBA64}) {
-        for (double amount : {0.0, 0.125, 0.5, 1.0}) {
+        for (double amount : {0.0, 0.001, 0.125, 0.333, 0.5, 0.998, 1.0}) {
             if (!adjacentInputs(format, amount) || !upstreamImages(format, amount)
                 || !bobPhases(format, amount)) {
                 std::cerr << "format=" << format << " amount=" << amount << '\n';
