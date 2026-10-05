@@ -10,11 +10,36 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
 
 ---
 
-### Important Requirements & Codec Dependencies
+## Download and requirements
 
-* **FFmpeg Dependency**: VirtualDubQT relies almost exclusively on **FFmpeg** (`libavcodec`, `libavformat`, `libavutil`, `libavfilter`, `libswscale`, `libswresample`) for opening, processing, and saving media. **Any video or audio codecs you plan on using (such as `libx264`, `libx265`, `libmp3lame`, `libopus`, `libvorbis`, or ProRes) must be included in your system's FFmpeg installation.**
-* **AviSynth+ Script Support**: If you plan to import and process **AviSynth (`.avs`) scripts**, your FFmpeg build **must** be compiled with AviSynth support enabled (`--enable-avisynth`), and native **[AviSynth+ for Linux](https://github.com/AviSynth/AviSynthPlus)** (`libavisynth`) must be compiled and installed on your Linux system. For some native Linux-compatible AviSynth plugins and filters (such as MaskTools2, RgTools, NNEDI3, TIVTC, etc.), refer to **[pinterf's ported plugin repositories](https://github.com/pinterf)**.
-* **VapourSynth Script Support**: Opening **VapourSynth (`.vpy`) scripts** is available when the installed FFmpeg libraries and command-line executable provide the `vapoursynth` input module. If they do not, VirtualDubQT reports that dependency explicitly instead of treating the script as ordinary media.
+Get the packages from the [releases page](https://github.com/heyburns/VirtualDubQT/releases).
+For version 0.1.2, choose the **AppImage** for a bundled setup, the **DEB** for
+Ubuntu 24.04, or the **RPM** for Fedora 43. All three are for 64-bit Intel/AMD
+Linux. Native packages are tied to their distribution's libraries; a newer
+distribution does not automatically accept an older package.
+
+The project targets reasonably current Linux desktops, roughly the last couple
+of years. This is a support target, not a claim that every distribution has been
+tested. Package checks currently cover Ubuntu 24.04 and Fedora 43. The AppImage
+needs glibc 2.38 or newer plus the usual desktop libraries.
+
+- **FFmpeg and codecs:** The AppImage includes FFmpeg and ffprobe. Native installs
+  use the tools and libraries on your system. The encoders you want must be
+  available in the FFmpeg build the application uses.
+- **AviSynth:** VirtualDubQT opens `.avs` scripts directly through AviSynth+.
+  **Fast Recompress of `.avs` scripts also needs an FFmpeg executable
+  built with `--enable-avisynth`.** Distro FFmpeg packages may omit this. If yours does, use
+  the AppImage or build a suitable FFmpeg. The AppImage already includes it.
+- **Plugins:** Install any extra AviSynth plugins your scripts require yourself.
+  They must be compatible native Linux plugins; Windows DLLs do not work here.
+- **VapourSynth:** `.vpy` support requires the `vapoursynth` input module in both
+  the FFmpeg libraries and command-line tools. The supplied custom FFmpeg recipe
+  does not enable it.
+
+See the [installation and FFmpeg guide](docs/INSTALLATION.md) for package
+commands, the tested AviSynth/FFmpeg build recipe, checks, and bug-report
+requirements. Users are expected to manage their Linux dependencies and script
+plugins; general system setup is outside the project's support scope.
 
 ---
 
@@ -56,42 +81,45 @@ VirtualDub is one of those indispensible video editing apps that simply has no e
 
 ## Build Instructions
 
-Use CMake 3.19 or newer. The optional regression-test presets require CMake 3.21.
+Building from source requires a C++17 compiler, CMake 3.19 or newer, Qt 6,
+FFmpeg 6 or newer development libraries, and AviSynth+ headers and runtime.
+The optional regression-test presets require CMake 3.21. The 0.1.2 builds were
+tested with Qt 6.4/FFmpeg 6.1 on Ubuntu 24.04 and Qt 6.10/FFmpeg 7.1 on Fedora 43.
 
-### Prerequisites (Ubuntu / Debian / Linux Mint)
+### Prerequisites (Ubuntu 24.04)
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake qt6-base-dev qt6-multimedia-dev \
-    libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev libswresample-dev \
-    libavisynth-dev yasm
+sudo apt install build-essential cmake git ninja-build pkg-config ffmpeg \
+    qt6-base-dev qt6-multimedia-dev libavcodec-dev libavformat-dev \
+    libavutil-dev libavfilter-dev libswscale-dev libswresample-dev
 ```
 
-### Prerequisites (Arch Linux / Manjaro)
+### Prerequisites (Fedora 43)
 
 ```bash
-sudo pacman -S base-devel cmake qt6-base qt6-multimedia ffmpeg avisynthplus yasm
+sudo dnf install gcc-c++ cmake git ninja-build pkgconf-pkg-config \
+    qt6-qtbase-devel qt6-qtmultimedia-devel ffmpeg-free ffmpeg-free-devel
 ```
 
-### Prerequisites (Fedora / RHEL)
+For either distro, also [build and install AviSynth+](docs/INSTALLATION.md#build-and-install-avisynth).
+These commands do not assume an AviSynth development package exists in your
+distro's repositories. Other distros need equivalent development packages.
+The custom FFmpeg command-line build is a separate step if you need it;
+it does not replace the FFmpeg development libraries above.
+
+### Compile and run
+
+Run these commands from the VirtualDubQT source directory:
 
 ```bash
-sudo dnf install gcc-c++ cmake qt6-qtbase-devel qt6-qtmultimedia-devel \
-    ffmpeg-free-devel avisynthplus-devel yasm
-```
-
-### Compiling
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-```
-
-### Running
-
-```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build --parallel 2
 ./build/VirtualDubQt
 ```
+
+To use custom FFmpeg tools, launch the application from a terminal with the
+[configured PATH](docs/INSTALLATION.md#use-the-custom-tools-with-virtualdubqt).
 
 ### Maintainer Notes
 
