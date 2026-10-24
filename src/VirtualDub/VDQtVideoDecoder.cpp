@@ -50,6 +50,20 @@ QImage::Format decodedOutputImageFormat(const QString& forcedFormat,
 std::atomic<int> gFrameCacheBudgetMiB{64};
 std::atomic<int> gDecoderThreadCount{0};
 
+// Opening a codec and changing its mode must use the same policy. Reporting
+// decoding failures is not the same as enforcing extra bitstream-compliance
+// checks: AV_EF_BITSTREAM can make otherwise decodable MPEG-2 picture stuffing
+// trigger concealment of the entire bottom macroblock row. Keep ordinary CRC
+// checking and error recovery without turning harmless padding into bad pixels.
+void configureDecoderErrorMode(AVCodecContext *context, int mode) {
+    if (!context) return;
+    context->err_recognition = mode == 1 ? 0
+        : mode == 2 ? AV_EF_IGNORE_ERR : AV_EF_CRCCHECK;
+    context->error_concealment = mode == 2 ? 0 : FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+    if (mode == 2) context->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+    else context->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
+}
+
 QString avErrorString(int errorCode) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
     av_strerror(errorCode, buffer, sizeof(buffer));
@@ -874,23 +888,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
 
     // Apply the selected policy before opening the codec. setErrorMode() also
     // updates an already-open context for subsequent frames.
-    switch (mErrorMode) {
-    case 1:
-        newCodecContext->err_recognition = 0;
-        newCodecContext->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
-        newCodecContext->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
-        break;
-    case 2:
-        newCodecContext->err_recognition = AV_EF_IGNORE_ERR;
-        newCodecContext->error_concealment = 0;
-        newCodecContext->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
-        break;
-    default:
-        newCodecContext->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER;
-        newCodecContext->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
-        newCodecContext->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
-        break;
-    }
+    configureDecoderErrorMode(newCodecContext, mErrorMode);
 
     error = avcodec_open2(newCodecContext, codec, nullptr);
     if (error < 0) {
@@ -1891,21 +1889,7 @@ double VDQtVideoDecoder::getFrameDurationSeconds(int frameIndex) {
 }
 
 void VDQtVideoDecoder::applyErrorMode() {
-    if (!mCodecCtx) return;
-
-    if (mErrorMode == 1) {
-        mCodecCtx->err_recognition = 0;
-        mCodecCtx->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
-        mCodecCtx->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
-    } else if (mErrorMode == 2) {
-        mCodecCtx->err_recognition = AV_EF_IGNORE_ERR;
-        mCodecCtx->error_concealment = 0;
-        mCodecCtx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
-    } else {
-        mCodecCtx->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER;
-        mCodecCtx->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
-        mCodecCtx->flags &= ~AV_CODEC_FLAG_OUTPUT_CORRUPT;
-    }
+    configureDecoderErrorMode(mCodecCtx, mErrorMode);
 }
 
 void VDQtVideoDecoder::setErrorMode(int errorMode) {
@@ -2041,7 +2025,11 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
         }
         decodedCount = decodedIndex + 1;
         if (mFrame->flags & AV_FRAME_FLAG_KEY) ++res.keyFrames;
-        if (mFrame->flags & AV_FRAME_FLAG_CORRUPT) {
+        // A decoder can return a recovered picture without AV_FRAME_FLAG_CORRUPT
+        // while still marking damaged slices/references in decode_error_flags.
+        // Count that genuine damage too; normal viewing need not enable strict
+        // bitstream-compliance checks just to make the health scan notice it.
+        if ((mFrame->flags & AV_FRAME_FLAG_CORRUPT) || mFrame->decode_error_flags) {
             ++res.badFrames;
             ++res.maskedFrames;
         }

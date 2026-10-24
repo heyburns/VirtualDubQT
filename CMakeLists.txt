@@ -248,6 +248,14 @@ if (BUILD_TESTING)
     set_tests_properties(decoder_index_tests PROPERTIES
         LABELS "decoder;index;performance" TIMEOUT 60)
 
+    add_executable(decoder_error_policy_tests
+        tests/test_decoder_error_policy.cpp tests/support/VDQtTestFixtures.cpp)
+    target_link_libraries(decoder_error_policy_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(decoder_error_policy_tests)
+    add_test(NAME decoder_error_policy_tests COMMAND decoder_error_policy_tests)
+    set_tests_properties(decoder_error_policy_tests PROPERTIES
+        LABELS "decoder;export;contracts" TIMEOUT 120)
+
     add_executable(color_contract_tests
         tests/test_color_contracts.cpp tests/support/VDQtTestFixtures.cpp)
     target_link_libraries(color_contract_tests PRIVATE vdqt_core)

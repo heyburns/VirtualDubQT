@@ -1670,3 +1670,55 @@ not clean installed package libraries. Hardware and leak detection remain exclud
 Final frozen exporter review found no further blocker; all source changes were
 frozen during shared builds. These results do not resolve the unchecked items in
 docs/AUDIT_STATUS.txt or claim complete native filter parity.
+
+MPEG-2 bottom-band decoding repair (2026-10-23)
+---------------------------------------------
+
+The normal decoder policy enabled AV_EF_BITSTREAM, an extra compliance check
+that made FFmpeg conceal the last macroblock row of otherwise decodable MPEG-2
+pictures with trailing zero stuffing. This changed the actual decoded pixels,
+not just their display, so processed exports could inherit the bottom-band smear.
+
+Opening a codec and changing error modes now share one policy helper. Normal
+mode retains CRC checks and ordinary recovery without the extra strict
+bitstream/buffer checks. Conceal/ignore modes and real decoding-failure handling
+remain available. The health scan also checks AVFrame.decode_error_flags:
+FFmpeg can return a recovered, genuinely damaged picture without setting
+AV_FRAME_FLAG_CORRUPT, and that damage must still be counted.
+
+The new decoder_error_policy_tests generates its own small MPEG-2 fixture and
+adds picture-boundary zero stuffing; no user video is stored in the repository.
+Independent normal FFmpeg decoding first confirms the padded and original
+fixtures have identical pixels. The old implementation fails this regression
+at row 48 of a 64-row frame, reproducing the damaged final 16-row macroblock.
+The corrected implementation passes every-row comparisons for sequential
+decoding, all three error modes, indexed forward/backward seeks, runtime mode
+changes, reopening, and lossless Full Processing/Normal Recompress exports.
+Unreadable input still fails, and deliberately destroyed slice contents are
+still reported by the health scan.
+
+Validation:
+
+- Release CTest: 203/203 non-hardware tests pass (64.82 seconds):
+
+    QT_QPA_PLATFORM=offscreen VD_DISABLE_AUDIO_OUTPUT=1 \
+      ctest --test-dir build-bundled-checks --output-on-failure --parallel 2 -LE hardware
+
+- The focused regression passes with an ASan/UBSan-instrumented application
+  core in build-sanitizer-checks (ASAN_OPTIONS=detect_leaks=0). External FFmpeg,
+  Qt and AviSynth libraries are not sanitizer-instrumented by that build.
+- Twenty frames from a stream-copy excerpt of the reported 720x576 interlaced
+  MPEG-2 source now match normal bundled FFmpeg decoding byte-for-byte. The
+  corrected native decoder and a headless raw export through the rebuilt
+  desktop application both match the reference RGB SHA-256:
+  4eb81398fa124efad84b4b55483106d6ca58d7b1adb03d550dc6f18571a67a36
+- The tested Release executable was installed atomically at build/VirtualDubQt.
+  A repeat export from that path matches the tested candidate exactly, and
+  --runtime-info confirms the same exclusive private FFmpeg runtime.
+
+The previous executable is preserved as
+build/VirtualDubQt.before-mpeg2-error-policy-20261023. Restart the application to
+use the correction; running editor/export processes were not stopped. Original
+media, user configuration, plugins and bundled libraries were not modified.
+Physical audio/video output and interactive playback were not manually tested.
+No commit, push or public package update was performed.
