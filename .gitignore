@@ -5,6 +5,8 @@ bin/
 out/
 cmake-build-*/
 /dist/
+/.release-media/
+/media-sdk.tar.xz
 
 # Compiled Objects and Libraries
 *.o

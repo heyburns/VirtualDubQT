@@ -1,0 +1,85 @@
+diff --git a/avs_core/core/audio.cpp b/avs_core/core/audio.cpp
+index 49c5539d..c57893b0 100644
+--- a/avs_core/core/audio.cpp
++++ b/avs_core/core/audio.cpp
+@@ -1532,4 +1532,5 @@ AVSValue __cdecl MixAudio::Create(AVSValue args, void*, IScriptEnvironment* env)
+ static int Amasktab[Amask+1];
+ static SFLOAT fAmasktab[Amask+1];
++static std::once_flag Amasktab_once, fAmasktab_once;
+ 
+ ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_d, IScriptEnvironment*)
+@@ -1561,6 +1562,8 @@ ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_
+ 
+   // Load interpolate ratio table
+-  for (int i=0; i<=Amask; i++)
++  std::call_once(Amasktab_once, [] {
++    for (int i=0; i<=Amask; i++)
+       Amasktab[i] = (i<<16) | (Amask+1-i);   /* a is between 0 and 1 */
++  });
+ 
+   // generate filter coefficients
+@@ -1586,6 +1589,8 @@ ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_
+ 
+   // Load interpolate ratio table
+-  for (int i=0; i<=Amask; i++)
+-    fAmasktab[i] = float(i) / (Amask+1);   /* a is between 0 and 1 */
++  std::call_once(fAmasktab_once, [] {
++    for (int i=0; i<=Amask; i++)
++      fAmasktab[i] = float(i) / (Amask+1);   /* a is between 0 and 1 */
++  });
+ 
+   /* Account for increased filter gain when using factors less than 1 */
+@@ -1617,4 +1622,7 @@ ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_
+ 
+ void __stdcall ResampleAudio::GetAudio(void* buf, int64_t start, int64_t count, IScriptEnvironment* env) {
++  // Include skip_conversion: the directly-owned ConvertAudio child may have
++  // mutable audio scratch state even when no rate conversion is necessary.
++  std::lock_guard<std::mutex> lock(audio_mutex);
+   if (skip_conversion) {
+     child->GetAudio(buf, start, count, env);
+@@ -1646,8 +1654,7 @@ void __stdcall ResampleAudio::GetAudio(void* buf, int64_t start, int64_t count,
+   if ((offset < 0) || (overlap <= 0))                             // Is there any overlap?
+     overlap = 0;
+-  else if (offset*ch >= 2)  // Assume 32bit separation is okay    // Yes, copy to start of buffer
+-    memcpy(srcbuffer, srcbuffer+offset*ch, overlap*ch<<1);  // fast
+   else if (offset > 0)
+-    memmove(srcbuffer, srcbuffer+offset*ch, overlap*ch<<1); // slow
++    // Retained input can overlap its new position regardless of alignment.
++    memmove(srcbuffer, srcbuffer+offset*ch, overlap*ch<<1);
+ 
+   last_samples= max<int64_t>(overlap, source_samples);                     // Samples for next time
+@@ -1796,5 +1803,5 @@ nofix:
+     overlap = 0;
+   else if (offset > 0)
+-    memcpy(fsrcbuffer, fsrcbuffer+offset*ch, overlap*ch<<2);
++    memmove(fsrcbuffer, fsrcbuffer+offset*ch, overlap*ch<<2);
+   last_samples= max<int64_t>(overlap, source_samples);
+ 
+@@ -1830,5 +1837,7 @@ int __stdcall ResampleAudio::SetCacheHints(int cachehints, int frame_range) {
+   switch (cachehints) {
+   case CACHE_GET_MTMODE:
+-    return MT_SERIALIZED;
++    // Video is GenericVideoFilter's stateless pass-through. Audio protects
++    // its own state above, so video need not queue behind the audio lock.
++    return MT_NICE_FILTER;
+   default:
+     break;
+diff --git a/avs_core/core/audio.h b/avs_core/core/audio.h
+index 92faff08..86b28206 100644
+--- a/avs_core/core/audio.h
++++ b/avs_core/core/audio.h
+@@ -37,4 +37,5 @@
+ #include <avisynth.h>
+ #include <cmath>
++#include <mutex>
+ 
+ // ------- Channels, only 0..17, SPEAKER_ALL not handled here
+@@ -421,4 +422,8 @@ public:
+ 
+ private:
++  // Only GetAudio mutates the resampling history and scratch buffers. Locking
++  // the whole clip through MT_SERIALIZED also locks the inherited video
++  // pass-through, unintentionally serializing every video filter upstream.
++  std::mutex audio_mutex;
+   int64_t FilterUD(short  *Xp, short Ph, short Inc);
+   SFLOAT  FilterUD(SFLOAT *Xp, short Ph, short Inc);

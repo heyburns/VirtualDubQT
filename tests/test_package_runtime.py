@@ -16,6 +16,9 @@ class PackageLauncherTests(unittest.TestCase):
         self.root = Path(self.directory.name) / "AppDir with spaces"
         self.bin = self.root / "usr" / "bin"
         self.bin.mkdir(parents=True)
+        self.runtime = self.root / "usr" / "lib" / "virtualdubqt" / "ffmpeg-runtime"
+        self.media_bin = self.runtime / "bin"
+        self.media_bin.mkdir(parents=True)
         self.launcher = self.root / "AppRun"
         shutil.copy2(LAUNCHER, self.launcher)
         self.host = Path(self.directory.name) / "host"
@@ -26,7 +29,7 @@ class PackageLauncherTests(unittest.TestCase):
                     'printf "%s\\n" "$APPDIR" "$LD_LIBRARY_PATH" "$VDQT_TEST_HOOK" "$@"\n'
                     'ffmpeg -version\nffprobe -version\n')
         for tool in ("ffmpeg", "ffprobe"):
-            self.script(self.bin / tool, f'#!/bin/sh\nprintf "%s\\n" "bundled-{tool}"\n')
+            self.script(self.media_bin / tool, f'#!/bin/sh\nprintf "%s\\n" "bundled-{tool}"\n')
             self.script(self.host / tool, f'#!/bin/sh\nprintf "%s\\n" "host-{tool}"\n')
 
     def tearDown(self):
@@ -47,7 +50,7 @@ class PackageLauncherTests(unittest.TestCase):
         child = self.launch(self.empty)
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(child.stdout.splitlines(), [
-            str(self.root), f"{self.root}/usr/lib:{self.root}/usr/lib/virtualdubqt:/explicit-user-library",
+            str(self.root), f"{self.runtime}/lib:{self.root}/usr/lib:{self.root}/usr/lib64:/explicit-user-library",
             "unset", "--command", "argument with spaces", "bundled-ffmpeg", "bundled-ffprobe"
         ])
 
@@ -61,12 +64,12 @@ class PackageLauncherTests(unittest.TestCase):
     def test_missing_bundle_tool_cannot_fall_back_to_host(self):
         for tool in ("ffmpeg", "ffprobe"):
             with self.subTest(tool=tool):
-                bundled = self.bin / tool
+                bundled = self.media_bin / tool
                 contents = bundled.read_text(encoding="utf-8")
                 bundled.unlink()
                 child = self.launch(self.host)
                 self.assertEqual(child.returncode, 127)
-                self.assertIn(f"missing {tool}", child.stderr)
+                self.assertIn(f"missing bundled {tool}", child.stderr)
                 self.assertEqual(child.stdout, "")
                 self.script(bundled, contents)
 

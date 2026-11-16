@@ -1,0 +1,50 @@
+{
+  "sources": {
+    "ffmpeg": {"url": "https://github.com/FFmpeg/FFmpeg.git", "tag": "n6.1.6", "commit": "f1e3a2bf7a2f2cde936d1ed97f09a26853d20125"},
+    "avisynth": {"url": "https://github.com/AviSynth/AviSynthPlus.git", "tag": "v3.7.5", "commit": "6c7c26617a6675eec89e4d4a3565ed709df6511f"},
+    "vapoursynth": {"url": "https://github.com/vapoursynth/vapoursynth.git", "tag": "R70", "commit": "03c8b6719f202b162284f53efc5b50632f70f72e"}
+  },
+  "build_tools": {"cython": "3.0.12"},
+  "deployment": {"frameworks_bundled": false, "python_bundled": false, "vapoursynth_api": "3.2"},
+  "configure": [
+    "--disable-doc", "--disable-debug", "--disable-ffplay",
+    "--enable-shared", "--disable-static", "--disable-autodetect",
+    "--enable-gpl", "--enable-version3", "--disable-nonfree",
+    "--enable-pthreads", "--enable-runtime-cpudetect",
+    "--enable-avisynth", "--enable-vapoursynth",
+    "--enable-libx264", "--enable-libx265", "--enable-libvpx",
+    "--enable-libaom", "--enable-libdav1d", "--enable-libsvtav1", "--enable-librav1e",
+    "--enable-libmp3lame", "--enable-libopus", "--enable-libvorbis",
+    "--enable-libxvid", "--enable-libtheora", "--enable-libwebp",
+    "--enable-libopenjpeg", "--enable-libjxl", "--enable-libcodec2",
+    "--enable-libgsm", "--enable-libtwolame", "--enable-libshine", "--enable-libspeex",
+    "--enable-libsnappy", "--enable-zlib", "--enable-bzlib", "--enable-lzma",
+    "--enable-gnutls", "--enable-libzimg",
+    "--enable-alsa", "--enable-indev=alsa", "--enable-indev=v4l2",
+    "--enable-ffnvcodec", "--enable-cuda", "--enable-cuvid", "--enable-nvdec", "--enable-nvenc",
+    "--enable-vaapi", "--enable-libvpl", "--enable-libdrm", "--enable-v4l2-m2m"
+  ],
+  "encoders": [
+    "rawvideo", "prores_ks", "ffv1", "huffyuv", "cfhd", "mjpeg", "mpeg1video", "mpeg2video", "mpeg4",
+    "png", "gif", "apng", "libx264", "libx265", "libvpx", "libvpx-vp9", "libsvtav1", "libaom-av1",
+    "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "aac", "ac3", "flac", "libmp3lame", "libopus", "libvorbis",
+    "hap", "libcodec2", "libgsm", "libgsm_ms", "libjxl", "libopenjpeg", "librav1e", "libshine", "libspeex",
+    "libtheora", "libtwolame", "libwebp_anim", "libwebp", "libxvid",
+    "av1_nvenc", "av1_qsv", "av1_vaapi", "h264_nvenc", "h264_qsv", "h264_vaapi",
+    "hevc_nvenc", "hevc_qsv", "hevc_vaapi", "mjpeg_qsv", "mjpeg_vaapi", "mpeg2_qsv", "mpeg2_vaapi",
+    "vp8_vaapi", "vp9_vaapi", "vp9_qsv"
+  ],
+  "hardware_encoders": [
+    "av1_nvenc", "av1_qsv", "av1_vaapi", "h264_nvenc", "h264_qsv", "h264_vaapi",
+    "hevc_nvenc", "hevc_qsv", "hevc_vaapi", "mjpeg_qsv", "mjpeg_vaapi", "mpeg2_qsv", "mpeg2_vaapi",
+    "vp8_vaapi", "vp9_vaapi", "vp9_qsv"
+  ],
+  "demuxers": ["avisynth", "vapoursynth", "concat", "rawvideo", "image2", "image2pipe", "nut", "mov", "matroska", "wav"],
+  "muxers": ["avi", "mov", "mp4", "matroska", "webm", "nut", "wav", "gif", "apng", "image2", "image2pipe", "segment", "null"],
+  "devices": ["alsa", "v4l2"],
+  "protocols": ["file", "pipe", "https"],
+  "filters": [
+    "abuffer", "abuffersink", "aformat", "anull", "aresample", "volume", "lowpass", "highpass", "pan", "asetrate",
+    "atempo", "chorus", "apad", "ebur128", "scale", "format", "setparams", "trim", "select", "setpts", "setsar"
+  ]
+}

@@ -1,0 +1,200 @@
+diff --git a/AviSynth/lsmashsource.cpp b/AviSynth/lsmashsource.cpp
+index 2c3c412..efc13be 100644
+--- a/AviSynth/lsmashsource.cpp
++++ b/AviSynth/lsmashsource.cpp
+@@ -61,7 +61,7 @@ extern "C" AVS_EXPORT const char* __stdcall AvisynthPluginInit3(IScriptEnvironme
+     /* LWLibavVideoSource */
+     env->AddFunction("LWLibavVideoSource",
+         "[source]s[stream_index]i[threads]i[cache]b[cachefile]s[seek_mode]i[seek_threshold]i[dr]b[fpsnum]i[fpsden]i[repeat]b[dominance]i["
+-        "format]s[decoder]s[prefer_hw]i[ff_loglevel]i[cachedir]s[indexingpr]b[ff_options]s[rap_verification]b",
++        "format]s[decoder]s[prefer_hw]i[ff_loglevel]i[cachedir]s[indexingpr]b[ff_options]s[rap_verification]b[prefetch_cache]i",
+         CreateLWLibavVideoSource, 0);
+     /* LWLibavAudioSource */
+     env->AddFunction("LWLibavAudioSource",
+diff --git a/AviSynth/lwlibav_source.cpp b/AviSynth/lwlibav_source.cpp
+index 9dd0f06..b88a52c 100644
+--- a/AviSynth/lwlibav_source.cpp
++++ b/AviSynth/lwlibav_source.cpp
+@@ -22,6 +22,8 @@
+  * However, when distributing its binary file, it will be under LGPL or GPL. */
+ 
+ #include <cstdio>
++#include <algorithm>
++#include <limits>
+ #include <vector>
+ 
+ extern "C" {
+@@ -84,9 +86,10 @@ static void prepare_video_decoding(lwlibav_video_decode_handler_t* vdhp, lwlibav
+ 
+ LWLibavVideoSource::LWLibavVideoSource(lwlibav_option_t* opt, int seek_mode, uint32_t forward_seek_threshold, int direct_rendering,
+     enum AVPixelFormat pixel_format, const char* preferred_decoder_names, int prefer_hw_decoder, bool progress, const char* ff_options,
+-    IScriptEnvironment* env)
++    int prefetch_cache, IScriptEnvironment* env)
+     : LWLibavVideoSource {}
+ {
++    frame_cache_budget = static_cast<size_t>(prefetch_cache) * 1024 * 1024;
+     memset(&vi, 0, sizeof(VideoInfo));
+     memset(&lwh, 0, sizeof(lwlibav_file_handler_t));
+     lwlibav_video_decode_handler_t* vdhp = this->vdhp.get();
+@@ -173,6 +176,95 @@ LWLibavVideoSource::~LWLibavVideoSource()
+ }
+ 
+ PVideoFrame __stdcall LWLibavVideoSource::GetFrame(int n, IScriptEnvironment* env)
++{
++    std::lock_guard<std::mutex> lock(frame_mutex);
++    n = std::clamp(n, 0, vi.num_frames - 1);
++    if (n == 0 && first_frame)
++        return first_frame;
++
++    const size_t workers = has_at_least_v8 ? env->GetEnvProperty(AEP_FILTERCHAIN_THREADS) : 1;
++    if (workers <= 1 || frame_cache_budget == 0 || frame_cache_too_small) {
++        PVideoFrame frame = get_frame_uncached(n, env);
++        // MVTools and other consumers read frame zero for metadata even while
++        // processing a later part of a clip. Do not disturb decoder position
++        // when that immutable frame is requested again.
++        if (n == 0 && static_cast<size_t>(frame->GetFrameBuffer()->GetDataSize()) <= frame_cache_budget)
++            first_frame = frame;
++        return frame;
++    }
++
++    try {
++        if (!first_frame) {
++            PVideoFrame frame = get_frame_uncached(0, env);
++            if (static_cast<size_t>(frame->GetFrameBuffer()->GetDataSize()) > frame_cache_budget) {
++                frame_cache_too_small = true;
++                return n == 0 ? frame : get_frame_uncached(n, env);
++            }
++            first_frame = frame;
++        }
++        if (n == 0)
++            return first_frame;
++
++        const size_t first_bytes = static_cast<size_t>(first_frame->GetFrameBuffer()->GetDataSize());
++        // Bound both bytes and entries. A tiny video must not turn an ordinary
++        // seek into a huge pre-roll; a high-bit-depth/4K video must not reserve
++        // workers*frames unconditionally. The pin counts toward the byte cap.
++        const size_t desired = std::min<size_t>(128, std::min<size_t>(workers, 128) * 4 + 32);
++        frame_cache_capacity = first_bytes ? std::min(desired, (frame_cache_budget - first_bytes) / first_bytes) : 0;
++        if (frame_cache_capacity < 2)
++            return get_frame_uncached(n, env);
++
++        const auto found = std::find_if(frame_cache.begin(), frame_cache.end(),
++            [n](const CachedFrame& entry) { return entry.number == n; });
++        if (found != frame_cache.end())
++            return found->frame; // A hit must NOT lower the decoder high-water mark.
++
++        int start = last_decoded_frame + 1;
++        if (last_decoded_frame < 0 || n <= last_decoded_frame || n - last_decoded_frame > static_cast<int>(frame_cache_capacity)) {
++            clear_frame_cache();
++            const size_t behind = std::min(frame_cache_capacity / 2, std::min<size_t>(workers, 128) * 2 + 4);
++            start = std::max(0, n - static_cast<int>(behind));
++        }
++        // Return the requested frame from a local reference even when its
++        // allocation is unexpectedly larger than the remaining cache budget.
++        PVideoFrame result;
++        for (int index = start; index <= n; ++index) {
++            result = index == 0 ? first_frame : get_frame_uncached(index, env);
++            cache_frame(index, result);
++            last_decoded_frame = index;
++        }
++        return result;
++    } catch (...) {
++        // A failed decode may already have moved codec state. Rebase next time
++        // rather than trusting the last successfully cached position.
++        clear_frame_cache();
++        throw;
++    }
++}
++
++void LWLibavVideoSource::clear_frame_cache()
++{
++    frame_cache.clear();
++    frame_cache_bytes = 0;
++    last_decoded_frame = -1;
++}
++
++void LWLibavVideoSource::cache_frame(int n, const PVideoFrame& frame)
++{
++    const size_t bytes = static_cast<size_t>(frame->GetFrameBuffer()->GetDataSize());
++    const size_t pinned_bytes = first_frame ? static_cast<size_t>(first_frame->GetFrameBuffer()->GetDataSize()) : 0;
++    while (!frame_cache.empty() && (frame_cache.size() >= frame_cache_capacity
++        || bytes > frame_cache_budget - pinned_bytes - frame_cache_bytes)) {
++        frame_cache_bytes -= frame_cache.front().bytes;
++        frame_cache.pop_front();
++    }
++    if (bytes <= frame_cache_budget - pinned_bytes - frame_cache_bytes) {
++        frame_cache.push_back({ n, frame, bytes });
++        frame_cache_bytes += bytes;
++    }
++}
++
++PVideoFrame LWLibavVideoSource::get_frame_uncached(int n, IScriptEnvironment* env)
+ {
+     uint32_t frame_number = n + 1; /* frame_number is 1-origin. */
+     lwlibav_video_decode_handler_t* vdhp = this->vdhp.get();
+@@ -491,6 +583,11 @@ AVSValue __cdecl CreateLWLibavVideoSource(AVSValue args, void* user_data, IScrip
+     const bool progress = args[17].AsBool(true);
+     const char* ff_options = args[18].AsString(nullptr);
+     const bool rap_verification = args[19].AsBool(false);
++    const int prefetch_cache = args[20].AsInt(256);
++    if (prefetch_cache < 0 || prefetch_cache > 4096)
++        env->ThrowError("LWLibavVideoSource: prefetch_cache must be between 0 and 4096 MiB.");
++    if (static_cast<uint64_t>(prefetch_cache) * 1024 * 1024 > std::numeric_limits<size_t>::max())
++        env->ThrowError("LWLibavVideoSource: prefetch_cache exceeds this platform's address range.");
+     /* Set LW-Libav options. */
+     lwlibav_option_t opt;
+     opt.file_path = source;
+@@ -515,7 +612,7 @@ AVSValue __cdecl CreateLWLibavVideoSource(AVSValue args, void* user_data, IScrip
+     prefer_hw_decoder = CLIP_VALUE(prefer_hw_decoder, 0, 7);
+     set_av_log_level(ff_loglevel);
+     return new LWLibavVideoSource(&opt, seek_mode, forward_seek_threshold, direct_rendering, pixel_format, preferred_decoder_names,
+-        prefer_hw_decoder, progress, ff_options, env);
++        prefer_hw_decoder, progress, ff_options, prefetch_cache, env);
+ }
+ 
+ AVSValue __cdecl CreateLWLibavAudioSource(AVSValue args, void* user_data, IScriptEnvironment* env)
+diff --git a/AviSynth/lwlibav_source.h b/AviSynth/lwlibav_source.h
+index 35d61c7..c6e27d8 100644
+--- a/AviSynth/lwlibav_source.h
++++ b/AviSynth/lwlibav_source.h
+@@ -32,6 +32,8 @@
+ #include "../common/lwlibav_video.h"
+ #include "../common/progress.h"
+ #include "lsmashsource.h"
++#include <deque>
++#include <mutex>
+ 
+ class LWLibavSource : public LSMASHSource {
+ protected:
+@@ -71,11 +73,30 @@ private:
+     LWLibavVideoSource() = default;
+     bool has_at_least_v8;
+     AVFrame* av_frame;
++    struct CachedFrame {
++        int number;
++        PVideoFrame frame;
++        size_t bytes;
++    };
++    // One decoder is still serialized. Cache *returned* AviSynth frames, with
++    // their properties/lifetimes intact, so Prefetch's unordered consumers do
++    // not force a new GOP decode for every backward request.
++    std::mutex frame_mutex;
++    std::deque<CachedFrame> frame_cache;
++    PVideoFrame first_frame;
++    size_t frame_cache_budget = 0;
++    size_t frame_cache_bytes = 0;
++    size_t frame_cache_capacity = 0;
++    bool frame_cache_too_small = false;
++    int last_decoded_frame = -1;
++    PVideoFrame get_frame_uncached(int n, IScriptEnvironment* env);
++    void clear_frame_cache();
++    void cache_frame(int n, const PVideoFrame& frame);
+ 
+ public:
+     LWLibavVideoSource(lwlibav_option_t* opt, int seek_mode, uint32_t forward_seek_threshold, int direct_rendering,
+         enum AVPixelFormat pixel_format, const char* preferred_decoder_names, int prefer_hw_decoder, bool progress, const char* ff_options,
+-        IScriptEnvironment* env);
++        int prefetch_cache, IScriptEnvironment* env);
+     ~LWLibavVideoSource();
+     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
+     bool __stdcall GetParity(int n);

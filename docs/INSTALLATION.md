@@ -1,5 +1,23 @@
 # Install and start using VirtualDubQT
 
+## What the packages include
+
+Every package includes its own matching FFmpeg tools and libraries. The app
+always uses this private backend and never falls back to system FFmpeg. The
+AppImage also includes Qt; native packages install Qt through your package manager.
+
+**AviSynth+ 3.7.5 must be installed separately before starting the app**, even for
+ordinary video files. Follow [Install AviSynth](BUILDING.md#install-avisynth) if
+you do not already have it. The packages do not install AviSynth, VapourSynth,
+Python, or script plugins. VapourSynth is optional, for `.vpy` input.
+
+Graphics, fonts, audio-system libraries and the C++ runtime come from your system
+so the app and separately installed script plugins can use a compatible platform.
+
+Use **Tools → System Information** to see the backend version and full paths.
+A missing or mismatched bundle produces an error instead of selecting another
+FFmpeg. Changing your shell's `PATH` does not change the app's backend.
+
 You do not need to write code to use VirtualDubQT or follow the build guide.
 You will need to download files and run a few terminal commands. The steps below
 explain which commands to use, what they do, and what success looks like.
@@ -7,7 +25,7 @@ explain which commands to use, what they do, and what success looks like.
 Choose one route:
 
 - **Run the app:** [download a package](#choose-a-package). The AppImage includes
-  the main dependencies and is the simplest starting point.
+  Qt and the media backend; AviSynth remains a separate requirement.
 - **Build the app yourself:** follow [Building VirtualDubQT](BUILDING.md).
 - **Already installed, but AviSynth Fast Recompress fails:** see
   [FFmpeg and AviSynth](#ffmpeg-and-avisynth).
@@ -28,15 +46,15 @@ terminal shell on Ubuntu and Fedora. If you use another shell, type `bash` first
 
 ## Choose a package
 
-Open the [0.1.2 release](https://github.com/heyburns/VirtualDubQT/releases/tag/v0.1.2)
+Open the [0.1.3 release](https://github.com/heyburns/VirtualDubQT/releases/tag/v0.1.3)
 and expand **Assets** if necessary. Download **one** of the files below. GitHub's
 “Source code” ZIP and tar.gz files are for building, not ready-to-run programs.
 
 | Download | Choose this when | What it supplies |
 | --- | --- | --- |
-| `VirtualDubQT-0.1.2-x86_64.AppImage` | You want the bundled version | Qt, FFmpeg/ffprobe with AviSynth support, and AviSynth+ |
-| `virtualdubqt_0.1.2_amd64.deb` | You use Ubuntu 24.04 or matching packages | AviSynth+; your package manager installs Qt and FFmpeg |
-| `virtualdubqt-0.1.2-1.x86_64.rpm` | You use Fedora 43 or matching packages | AviSynth+; your package manager installs Qt and FFmpeg |
+| `VirtualDubQT-0.1.3-x86_64.AppImage` | You want the bundled version | Qt and private FFmpeg/ffprobe with script-reader support |
+| `virtualdubqt_0.1.3_amd64.deb` | You use Ubuntu 24.04 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
+| `virtualdubqt-0.1.3-1.x86_64.rpm` | You use Fedora 43 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
 
 All three are for 64-bit Intel/AMD computers. `amd64` and `x86_64` mean the same
 architecture here; neither is an ARM build. If you are unsure of your system,
@@ -65,8 +83,8 @@ choose **Open in Terminal**. Alternatively, use `cd "$HOME/Downloads"` if you
 saved it in Downloads. Run:
 
 ```bash
-chmod +x VirtualDubQT-0.1.2-x86_64.AppImage
-./VirtualDubQT-0.1.2-x86_64.AppImage
+chmod +x VirtualDubQT-0.1.3-x86_64.AppImage
+./VirtualDubQT-0.1.3-x86_64.AppImage
 ```
 
 `chmod +x` marks the file as a program you can run. `./` means “the file in this
@@ -76,18 +94,18 @@ run it from; it does not install a separate copy of the application.
 If it reports missing FUSE support, this command runs it without FUSE:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./VirtualDubQT-0.1.2-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./VirtualDubQT-0.1.3-x86_64.AppImage
 ```
 
 Next, try [your first open and export](#your-first-open-and-export). There is no
-need to build FFmpeg or AviSynth for the bundled setup.
+need to build FFmpeg. Complete the separate AviSynth setup before launching.
 
 ### DEB on Ubuntu 24.04
 
 Open a terminal in the folder containing the downloaded `.deb`, then run:
 
 ```bash
-sudo apt install ./virtualdubqt_0.1.2_amd64.deb
+sudo apt install ./virtualdubqt_0.1.3_amd64.deb
 VirtualDubQt
 ```
 
@@ -100,7 +118,7 @@ open **VirtualDubQT** from your desktop's application menu. Next, try
 Open a terminal in the folder containing the downloaded `.rpm`, then run:
 
 ```bash
-sudo dnf install ./virtualdubqt-0.1.2-1.x86_64.rpm
+sudo dnf install ./virtualdubqt-0.1.3-1.x86_64.rpm
 VirtualDubQt
 ```
 
@@ -153,45 +171,39 @@ typed as terminal commands. A plugin's instructions may use a line such as
 `LoadPlugin("/full/path/to/plugin.so")` inside the `.avs` file. Replace that
 example path with the actual Linux plugin file. Windows plugin DLLs do not work.
 
-## FFmpeg and AviSynth
+## FFmpeg, AviSynth and VapourSynth
 
-FFmpeg reads and writes media. `ffmpeg` is its conversion command, `ffprobe`
-reports information about media, and its *libraries* are supporting files loaded
-by the application. Qt supplies the application's windowing and controls.
+The private backend supplies FFmpeg 6.1.6, ffprobe, expanded software codecs,
+and readers for AviSynth and VapourSynth. All packages use the same configuration.
+You do not need to install, replace, or build system FFmpeg for the app.
 
-VirtualDubQT opens `.avs` scripts directly through AviSynth+. **Fast Recompress
-of an `.avs` script also asks the FFmpeg command to read that script.** This
-mode skips VirtualDubQT's RGB/filter processing, and requires FFmpeg built with
-`--enable-avisynth`. A distro's FFmpeg may omit that feature. This is why a
-script can open successfully but fail in Fast Recompress.
+AviSynth+ is a separate requirement. VirtualDubQT opens `.avs` scripts directly,
+while Fast Recompress also uses the bundled command's AviSynth reader. Both need
+a working native Linux AviSynth installation and whatever extra plugins the
+script calls. Windows plugin DLLs do not work.
 
-- **AppImage:** includes matching FFmpeg tools and AviSynth+. Extra script
-  plugins are still yours to install.
-- **Native package or source build:** can use the distro's FFmpeg for ordinary
-  work. If you need AviSynth Fast Recompress, run the
-  [FFmpeg/AviSynth check](BUILDING.md#check-ffmpeg-and-avisynth-together). If it
-  fails, use the AppImage or follow the [custom FFmpeg recipe](BUILDING.md#optional-build-custom-ffmpeg).
+VapourSynth is separate and optional. The bundled reader uses VSScript API 3.2;
+installations that remove that legacy API are not supported by this reader.
+The packages do not supply Python or VapourSynth.
 
-Replacing the `ffmpeg` command does not replace a native package's library
-dependencies. If a package cannot find the library version it needs, choose a
-matching package, use the AppImage, or [build the app for your system](BUILDING.md).
-Renaming library files or forcing an install will not make versions compatible.
-
-VapourSynth `.vpy` scripts need the `vapoursynth` input module in both the FFmpeg
-libraries and commands. The custom FFmpeg recipe does not enable it.
+To inspect the selected backend, use **Tools → System Information**, or run
+`VirtualDubQt --runtime-info` for a native package. For an AppImage, run
+`./VirtualDubQT-0.1.3-x86_64.AppImage --runtime-info`. An AppImage also needs the
+separately installed AviSynth library to start.
 
 ## Common problems
 
 | What you see | What to do next |
 | --- | --- |
 | Downloaded filename: “No such file or directory” | Open a terminal in the download folder. Run `pwd` to show the current folder and `ls` to list its files; use the filename that is actually there. |
-| AppImage: “Permission denied” | Run its `chmod +x` command above, then launch it again. |
+| Startup: missing `libavisynth` | Follow the separate [AviSynth setup](BUILDING.md#install-avisynth), then run `sudo ldconfig`. |\n| AppImage: “Permission denied” | Run its `chmod +x` command above, then launch it again. |
 | AppImage: FUSE or `libfuse.so.2` error | Use the `APPIMAGE_EXTRACT_AND_RUN=1` command above. |
 | AppImage: `GLIBC_2.38 not found` | Your system's glibc is below this package's requirement. Use an appropriate system or a source build with compatible dependencies. |
 | APT/DNF: dependencies cannot be satisfied | Check that the package matches your distro/version. Use the AppImage or a source build if it does not. |
-| Missing encoder, or “Unknown encoder” | For native installs, run `ffmpeg -encoders` to see what your FFmpeg supplies. Select an available encoder such as FFV1, or use a build containing the encoder you want. |
+| Missing encoder, or “Unknown encoder” | Check the bundled backend paths in System Information. Hardware encoders also need compatible hardware/drivers; try a software encoder such as FFV1. |
 | Script: missing function or plugin | Try `blank.avs` first. If it works, check the failing script's plugin requirements and file paths. |
-| Script opens, but Fast Recompress fails | Run the linked FFmpeg/AviSynth check. Use **Full processing mode** for the initial test export. |
+| AviSynth becomes much slower with Prefetch or after repeated script loads | Some Linux AviSynth/L-SMASH builds need dependency fixes. See the [Prefetch performance notes](patches/README.md#avisynth-prefetch-performance); disabling Prefetch is not the permanent fix. |
+| Script opens, but Fast Recompress fails | Check the separate native AviSynth installation and script dependencies. Use **Full processing mode** for the initial test export. |
 
 ## Getting help and reporting bugs
 
@@ -207,9 +219,9 @@ Use the [issue tracker](https://github.com/heyburns/VirtualDubQT/issues) and inc
 - For script problems, the smallest failing script and any required plugin versions.
 
 For a build failure, include the first actual error and the preceding lines, not
-just the final “build failed” message. For a native install, include
-`command -v ffmpeg ffprobe` and `ffmpeg -version`. For the AppImage, identify the
-AppImage version; system FFmpeg does not describe its bundled tools.
+just the final “build failed” message. Include the app's `--runtime-info` report
+or System Information. System `ffmpeg -version` does not describe the app's
+private backend.
 
 Users maintain their own distro packages, custom FFmpeg builds, and third-party
 plugins. The project documents a working setup and accepts reproducible app and

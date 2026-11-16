@@ -3,6 +3,7 @@
 // timeline editing, view/processing controls, tools/capture, then asynchronous
 // preview and playback. Heavy media work is delegated to subsystem classes.
 #include "VDQtMainWindow.h"
+#include "VDQtMediaRuntime.h"
 #include "VDQtTemporaryStorage.h"
 #include "VDQtProcessDiagnosticTail.h"
 #include "VDQtFilterFrameContext.h"
@@ -1352,7 +1353,7 @@ bool VDQtMainWindow::materializeRawVideo(
               << QStringLiteral("-y") << materializedPath;
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(QStringLiteral("ffmpeg"), arguments);
+    process.start(VDQtMediaRuntime::ffmpeg(), arguments);
     if (!process.waitForStarted(5000)) {
         if (errorMessage) *errorMessage = process.errorString();
         return false;
@@ -2712,7 +2713,7 @@ bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
                   << QStringLiteral("-c:a") << QStringLiteral("copy")
                   << QStringLiteral("-y") << stagedPath;
         QProcess process;
-        process.start(QStringLiteral("ffmpeg"), arguments);
+        process.start(VDQtMediaRuntime::ffmpeg(), arguments);
         if (!process.waitForStarted(3000)) {
             QFile::remove(stagedPath);
             if (errorMessage) *errorMessage = QStringLiteral(
@@ -5987,7 +5988,7 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
     setName->addItems(names);
     if (names.isEmpty()) {
         setName->setCurrentText(QStringLiteral("FFmpeg H.264"));
-        program->setText(QStringLiteral("ffmpeg"));
+        program->setText(VDQtMediaRuntime::ffmpeg());
         arguments->setText(QStringLiteral(
             "-y -i {input} -c:v libx264 -crf 20 -c:a aac {output}"));
         extension->setText(QStringLiteral("mp4"));
@@ -5997,7 +5998,8 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
         QSettings values;
         values.beginGroup(QStringLiteral("ExternalEncoderSets/%1").arg(name));
         if (values.contains(QStringLiteral("program"))) {
-            program->setText(values.value(QStringLiteral("program")).toString());
+            program->setText(VDQtMediaRuntime::encoderProgram(
+                values.value(QStringLiteral("program")).toString()));
             arguments->setText(values.value(QStringLiteral("arguments")).toString());
             extension->setText(values.value(QStringLiteral("extension")).toString());
         }
@@ -6028,7 +6030,7 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
 
     const auto saveCurrentSet = [&]() -> bool {
         const QString name = setName->currentText().trimmed();
-        const QString command = program->text().trimmed();
+        const QString command = VDQtMediaRuntime::encoderProgram(program->text().trimmed());
         const QString templateText = arguments->text().trimmed();
         QString suffix = extension->text().trimmed();
         if (name.isEmpty() || name.contains(QLatin1Char('/'))
@@ -6044,6 +6046,7 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
         QSettings values;
         values.beginGroup(QStringLiteral("ExternalEncoderSets/%1").arg(name));
         values.setValue(QStringLiteral("program"), command);
+        program->setText(command);
         values.setValue(QStringLiteral("arguments"), templateText);
         values.setValue(QStringLiteral("extension"), suffix);
         values.endGroup();
@@ -6106,7 +6109,8 @@ bool VDQtMainWindow::exportViaEncoderSet(
     }
     QSettings settings;
     settings.beginGroup(QStringLiteral("ExternalEncoderSets/%1").arg(setName));
-    const QString program = settings.value(QStringLiteral("program")).toString().trimmed();
+    const QString program = VDQtMediaRuntime::encoderProgram(
+        settings.value(QStringLiteral("program")).toString().trimmed());
     const QString argumentTemplate = settings.value(
         QStringLiteral("arguments")).toString().trimmed();
     settings.endGroup();
@@ -8372,7 +8376,7 @@ void VDQtMainWindow::onToolsMediaInspector() {
     }
     const QString path = mVideoDecoder.getFilePath();
     QProcess probe;
-    probe.start(QStringLiteral("ffprobe"),
+    probe.start(VDQtMediaRuntime::ffprobe(),
                 {QStringLiteral("-v"), QStringLiteral("error"),
                  QStringLiteral("-show_format"), QStringLiteral("-show_streams"),
                  QStringLiteral("-show_chapters"), QStringLiteral("-show_programs"),
@@ -8502,7 +8506,7 @@ void VDQtMainWindow::onToolsBackendCatalog() {
 
     const auto commandOutput = [](const QStringList& arguments) {
         QProcess process;
-        process.start(QStringLiteral("ffmpeg"), arguments);
+        process.start(VDQtMediaRuntime::ffmpeg(), arguments);
         if (!process.waitForStarted(3000) || !process.waitForFinished(10000)) {
             process.kill();
             process.waitForFinished();
@@ -8604,8 +8608,9 @@ void VDQtMainWindow::onToolsSystemInformation() {
         "  Kernel/architecture: %7 / %8\n"
         "  Logical CPU threads: %9\n"
         "  Default audio output: %10\n"
-        "  ffmpeg executable: %11\n"
-        "  ffprobe executable: %12\n\n"
+        "  Bundled ffmpeg executable: %11\n"
+        "  Bundled ffprobe executable: %12\n"
+        "  System FFmpeg fallback: disabled\n\n"
         "Configured video encoders\n%13\n\n"
         "Configured audio encoders\n%14")
         .arg(QString::fromLatin1(qVersion()),
@@ -8617,8 +8622,8 @@ void VDQtMainWindow::onToolsSystemInformation() {
         .arg(QThread::idealThreadCount())
         .arg(outputDevice.isNull() ? QStringLiteral("none")
                                    : outputDevice.description())
-        .arg(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")),
-             QStandardPaths::findExecutable(QStringLiteral("ffprobe")),
+        .arg(VDQtMediaRuntime::ffmpeg(),
+             VDQtMediaRuntime::ffprobe(),
              videoCodecs.join(QLatin1Char('\n')),
              audioCodecs.join(QLatin1Char('\n')));
     QDialog dialog(this);
@@ -8628,7 +8633,7 @@ void VDQtMainWindow::onToolsSystemInformation() {
     auto *text = new QPlainTextEdit(&dialog);
     text->setReadOnly(true);
     text->setLineWrapMode(QPlainTextEdit::NoWrap);
-    text->setPlainText(report);
+    text->setPlainText(report + QStringLiteral("\n\n") + VDQtMediaRuntime::report());
     layout->addWidget(text);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -8639,9 +8644,9 @@ void VDQtMainWindow::onToolsSystemInformation() {
 void VDQtMainWindow::onCaptureVideo() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
-    if (QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
+    if (!QFileInfo(VDQtMediaRuntime::ffmpeg()).isExecutable()) {
         QMessageBox::critical(this, "Capture Error",
-                              "The ffmpeg executable is required for Linux capture.");
+                              "The bundled ffmpeg executable is missing or unusable. System FFmpeg will not be used.");
         return;
     }
     QDialog dialog(this);
@@ -8750,7 +8755,7 @@ void VDQtMainWindow::onCaptureVideo() {
                 text = QString::fromLocal8Bit(probe.readAllStandardOutput())
                      + QString::fromLocal8Bit(probe.readAllStandardError());
         } else {
-            probe.start(QStringLiteral("ffmpeg"),
+            probe.start(VDQtMediaRuntime::ffmpeg(),
                         {QStringLiteral("-hide_banner"), QStringLiteral("-f"),
                          QStringLiteral("v4l2"), QStringLiteral("-list_formats"),
                          QStringLiteral("all"), QStringLiteral("-i"),
@@ -8917,7 +8922,7 @@ void VDQtMainWindow::onCaptureVideo() {
 
     QProcess capture;
     capture.setProcessChannelMode(QProcess::SeparateChannels);
-    capture.start(QStringLiteral("ffmpeg"), arguments, QIODevice::ReadWrite);
+    capture.start(VDQtMediaRuntime::ffmpeg(), arguments, QIODevice::ReadWrite);
     if (!capture.waitForStarted(5000)) {
         if (!stagedPath.isEmpty()) QFile::remove(stagedPath);
         QMessageBox::critical(this, "Capture Error", capture.errorString());

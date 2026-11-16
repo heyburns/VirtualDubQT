@@ -6,9 +6,12 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QTextStream>
+#include <QMessageBox>
+#include <QDebug>
 #include <algorithm>
 #include "VirtualDub/VDQtApplicationIcon.h"
 #include "VirtualDub/VDQtMainWindow.h"
+#include "VirtualDub/VDQtMediaRuntime.h"
 
 namespace {
 
@@ -45,6 +48,7 @@ void printUsage() {
         << "  VirtualDubQt --save-avi <source|*> <destination> [--exit]\n"
         << "  VirtualDubQt --analysis <source|*> [--exit]\n"
         << "  VirtualDubQt --external-encoder <source|*> <destination> <set> [--exit]\n"
+        << "  VirtualDubQt --runtime-info (verify and print private FFmpeg paths/versions)\n"
         << "\nCompatible aliases: /s, /cmd, /SaveAVI, /x\n"
         << "--exit/--no-ui runs without leaving the editor window open.\n";
 }
@@ -67,7 +71,8 @@ int main(int argc, char *argv[]) {
         printUsage();
         return 0;
     }
-    const bool unattended = std::any_of(
+    const bool runtimeInformation = startupArguments.contains(QStringLiteral("--runtime-info"));
+    const bool unattended = runtimeInformation || std::any_of(
         startupArguments.cbegin(), startupArguments.cend(), [](const QString& value) {
             return isOption(value, {QStringLiteral("--exit"), QStringLiteral("--no-ui"),
                                     QStringLiteral("-x"), QStringLiteral("/x")});
@@ -79,6 +84,18 @@ int main(int argc, char *argv[]) {
     app.setApplicationName("VirtualDub");
     app.setOrganizationName("VirtualDub Port");
     app.setWindowIcon(vdqtApplicationIcon());
+
+    QString runtimeError;
+    if (!VDQtMediaRuntime::validate(&runtimeError)) {
+        QTextStream(stderr) << runtimeError << '\n';
+        if (!unattended) QMessageBox::critical(nullptr, QStringLiteral("FFmpeg Runtime Error"), runtimeError);
+        return 78;
+    }
+    if (runtimeInformation) {
+        QTextStream(stdout) << VDQtMediaRuntime::report() << '\n';
+        return 0;
+    }
+    qInfo().noquote() << VDQtMediaRuntime::report();
 
     VDQtMainWindow w;
     w.setAutomationUnattended(unattended);

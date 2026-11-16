@@ -1,0 +1,162 @@
+diff --git a/configure b/configure
+index 3c39ff3..9264ade 100755
+--- a/configure
++++ b/configure
+@@ -3467,6 +3467,7 @@ libxavs_encoder_deps="libxavs"
+ libxavs2_encoder_deps="libxavs2"
+ libxvid_encoder_deps="libxvid"
+ libzvbi_teletext_decoder_deps="libzvbi"
++vapoursynth_deps="libdl"
+ vapoursynth_demuxer_deps="vapoursynth"
+ videotoolbox_suggest="coreservices"
+ videotoolbox_deps="corefoundation coremedia corevideo"
+@@ -6937,7 +6938,9 @@ enabled rkmpp             && { require_pkg_config rkmpp rockchip_mpp  rockchip/r
+                                { enabled libdrm ||
+                                  die "ERROR: rkmpp requires --enable-libdrm"; }
+                              }
+-enabled vapoursynth       && require_pkg_config vapoursynth "vapoursynth-script >= 42" VSScript.h vsscript_init
++enabled vapoursynth       && { require_headers "vapoursynth/VapourSynth.h vapoursynth/VSScript.h" &&
++                               test_cpp_condition vapoursynth/VSScript.h "VSSCRIPT_API_MAJOR == 3 && VSSCRIPT_API_MINOR >= 2" ||
++                               die "ERROR: VapourSynth API 3.2 development headers are required"; }
+ 
+ 
+ if enabled gcrypt; then
+diff --git a/libavformat/vapoursynth.c b/libavformat/vapoursynth.c
+index 965d36d..b28737b 100644
+--- a/libavformat/vapoursynth.c
++++ b/libavformat/vapoursynth.c
+@@ -24,9 +24,10 @@
+ */
+ 
+ #include <limits.h>
++#include <dlfcn.h>
+ 
+-#include <VapourSynth.h>
+-#include <VSScript.h>
++#include <vapoursynth/VapourSynth.h>
++#include <vapoursynth/VSScript.h>
+ 
+ #include "libavutil/avassert.h"
+ #include "libavutil/avstring.h"
+@@ -40,6 +41,17 @@
+ 
+ struct VSState {
+     VSScript *vss;
++    void *library;
++    int initialized;
++    int (*init)(void);
++    int (*finalize)(void);
++    int (*createScript)(VSScript **handle);
++    void (*freeScript)(VSScript *handle);
++    int (*evaluateScript)(VSScript **handle, const char *script, const char *filename, int flags);
++    const char *(*getError)(VSScript *handle);
++    const VSAPI *(*getVSApi2)(int version);
++    VSCore *(*getCore)(VSScript *handle);
++    VSNodeRef *(*getOutput)(VSScript *handle, int index);
+ };
+ 
+ typedef struct VSContext {
+@@ -73,9 +85,50 @@ static void free_vss_state(void *opaque, uint8_t *data)
+     struct VSState *vss = opaque;
+ 
+     if (vss->vss) {
+-        vsscript_freeScript(vss->vss);
+-        vsscript_finalize();
++        vss->freeScript(vss->vss);
+     }
++    if (vss->initialized)
++        vss->finalize();
++    if (vss->library)
++        dlclose(vss->library);
++    av_free(vss);
++}
++
++/* Like AviSynth, load the independently installed framework only for scripts.
++ * Keep code resident: Python extension objects can survive a script/context.
++ * The AVBufferRef owns the loader handle until the final output frame dies.
++ */
++static int load_vss_library(AVFormatContext *s, struct VSState *vss)
++{
++    int flags = RTLD_NOW | RTLD_GLOBAL;
++#ifdef RTLD_NODELETE
++    flags |= RTLD_NODELETE;
++#endif
++    vss->library = dlopen("libvapoursynth-script.so", flags);
++    if (!vss->library)
++        vss->library = dlopen("libvapoursynth-script.so.0", flags);
++    if (!vss->library) {
++        av_log(s, AV_LOG_ERROR, "VapourSynth is not installed or cannot be loaded: %s\n", dlerror());
++        return AVERROR_EXTERNAL;
++    }
++#define LOAD_VSS_FUNC(member, symbol) do {                                    \
++    *(void **)(&vss->member) = dlsym(vss->library, symbol);                    \
++    if (!vss->member) {                                                      \
++        av_log(s, AV_LOG_ERROR, "VapourSynth API 3.2 symbol missing: %s\n", symbol); \
++        return AVERROR_EXTERNAL;                                            \
++    }                                                                       \
++} while (0)
++    LOAD_VSS_FUNC(init, "vsscript_init");
++    LOAD_VSS_FUNC(finalize, "vsscript_finalize");
++    LOAD_VSS_FUNC(createScript, "vsscript_createScript");
++    LOAD_VSS_FUNC(freeScript, "vsscript_freeScript");
++    LOAD_VSS_FUNC(evaluateScript, "vsscript_evaluateScript");
++    LOAD_VSS_FUNC(getError, "vsscript_getError");
++    LOAD_VSS_FUNC(getVSApi2, "vsscript_getVSApi2");
++    LOAD_VSS_FUNC(getCore, "vsscript_getCore");
++    LOAD_VSS_FUNC(getOutput, "vsscript_getOutput");
++#undef LOAD_VSS_FUNC
++    return 0;
+ }
+ 
+ static av_cold int read_close_vs(AVFormatContext *s)
+@@ -193,16 +246,19 @@ static av_cold int read_header_vs(AVFormatContext *s)
+         goto done;
+     }
+ 
+-    if (!vsscript_init()) {
++    if ((err = load_vss_library(s, vss_state)) < 0)
++        goto done;
++
++    if (!vss_state->init()) {
+         av_log(s, AV_LOG_ERROR, "Failed to initialize VSScript (possibly PYTHONPATH not set).\n");
+         err = AVERROR_EXTERNAL;
+         goto done;
+     }
++    vss_state->initialized = 1;
+ 
+-    if (vsscript_createScript(&vss_state->vss)) {
++    if (vss_state->createScript(&vss_state->vss)) {
+         av_log(s, AV_LOG_ERROR, "Failed to create script instance.\n");
+         err = AVERROR_EXTERNAL;
+-        vsscript_finalize();
+         goto done;
+     }
+ 
+@@ -235,17 +291,22 @@ static av_cold int read_header_vs(AVFormatContext *s)
+     }
+ 
+     buf[sz] = '\0';
+-    if (vsscript_evaluateScript(&vss_state->vss, buf, s->url, 0)) {
+-        const char *msg = vsscript_getError(vss_state->vss);
++    if (vss_state->evaluateScript(&vss_state->vss, buf, s->url, 0)) {
++        const char *msg = vss_state->getError(vss_state->vss);
+         av_log(s, AV_LOG_ERROR, "Failed to parse script: %s\n", msg ? msg : "(unknown)");
+         err = AVERROR_EXTERNAL;
+         goto done;
+     }
+ 
+-    vs->vsapi = vsscript_getVSApi();
+-    vs->vscore = vsscript_getCore(vss_state->vss);
++    vs->vsapi = vss_state->getVSApi2(VAPOURSYNTH_API_VERSION);
++    if (!vs->vsapi) {
++        av_log(s, AV_LOG_ERROR, "Installed VapourSynth does not provide the required VSAPI.\n");
++        err = AVERROR_EXTERNAL;
++        goto done;
++    }
++    vs->vscore = vss_state->getCore(vss_state->vss);
+ 
+-    vs->outnode = vsscript_getOutput(vss_state->vss, 0);
++    vs->outnode = vss_state->getOutput(vss_state->vss, 0);
+     if (!vs->outnode) {
+         av_log(s, AV_LOG_ERROR, "Could not get script output node.\n");
+         err = AVERROR_EXTERNAL;

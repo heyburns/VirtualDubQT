@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(VirtualDubQt VERSION 0.1.2 LANGUAGES CXX)
+project(VirtualDubQt VERSION 0.1.3 LANGUAGES CXX)
 
 # Single-configuration builds should not accidentally ship an unoptimized GUI.
 # Honor explicit Debug/RelWithDebInfo choices and multi-configuration generators.
@@ -21,18 +21,54 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia DBus Concurrent)
-find_package(PkgConfig REQUIRED)
-# Version floors match the modern FFmpeg channel-layout/frame APIs used by the
-# decoder, exporter, and audio pipeline. PkgConfig::FFMPEG carries include and
-# transitive link flags to every target below.
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat>=60
-    libavcodec>=60
-    libavutil>=58
-    libswscale>=7
-    libswresample>=4
-    libavfilter>=9
-)
+# Never configure against a distribution FFmpeg SDK. Tools, headers and linked
+# libraries must all come from the one explicitly selected private bundle.
+set(VDQT_FFMPEG_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/dist/ffmpeg-runtime-locked"
+    CACHE PATH "Complete private FFmpeg runtime, including its matching headers")
+get_filename_component(VDQT_FFMPEG_BUNDLE "${VDQT_FFMPEG_BUNDLE}" REALPATH)
+foreach(required IN ITEMS bin/ffmpeg bin/ffprobe ffmpeg-runtime-manifest.json
+        include/libavcodec/version.h include/libavformat/version.h
+        include/libavutil/version.h include/libavfilter/version.h
+        include/libswscale/version.h include/libswresample/version.h)
+    if(NOT EXISTS "${VDQT_FFMPEG_BUNDLE}/${required}")
+        message(FATAL_ERROR "Private FFmpeg bundle is incomplete: ${VDQT_FFMPEG_BUNDLE}/${required}. Build/assemble the bundle and set VDQT_FFMPEG_BUNDLE. System FFmpeg is never used.")
+    endif()
+endforeach()
+add_library(vdqt_ffmpeg INTERFACE)
+add_library(PkgConfig::FFMPEG ALIAS vdqt_ffmpeg)
+# The AviSynth SDK can share a prefix with an unrelated FFmpeg SDK. A normal
+# (not imported/SYSTEM) interface plus BEFORE prevents that prefix's headers
+# from taking priority over our selected bundle's ABI.
+include_directories(BEFORE "${VDQT_FFMPEG_BUNDLE}/include")
+set(vdqt_ffmpeg_libraries)
+foreach(component IN ITEMS avformat avcodec avutil swscale swresample avfilter avdevice postproc)
+    set(component_library "${VDQT_FFMPEG_BUNDLE}/lib/lib${component}.so")
+    if(NOT EXISTS "${component_library}")
+        message(FATAL_ERROR "Bundled FFmpeg library is missing: ${component_library}")
+    endif()
+    list(APPEND vdqt_ffmpeg_libraries "${component_library}")
+endforeach()
+set_target_properties(vdqt_ffmpeg PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${VDQT_FFMPEG_BUNDLE}/include"
+    INTERFACE_LINK_LIBRARIES "${vdqt_ffmpeg_libraries};${CMAKE_DL_LIBS}"
+    INTERFACE_COMPILE_DEFINITIONS "VDQT_FFMPEG_INSTALLED_RELATIVE=\"../${CMAKE_INSTALL_LIBDIR}/virtualdubqt/ffmpeg-runtime\"")
+set(CMAKE_BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib")
+set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/virtualdubqt/ffmpeg-runtime/lib")
+# An adjacent private runtime gives every build-tree executable the same fixed
+# layout. Refuse a conflicting path instead of replacing unrelated files.
+set(vdqt_build_runtime "${CMAKE_BINARY_DIR}/ffmpeg-runtime")
+if(EXISTS "${vdqt_build_runtime}" OR IS_SYMLINK "${vdqt_build_runtime}")
+    get_filename_component(existing_runtime "${vdqt_build_runtime}" REALPATH)
+    if(NOT existing_runtime STREQUAL VDQT_FFMPEG_BUNDLE)
+        message(FATAL_ERROR "${vdqt_build_runtime} points to another runtime; choose a fresh build directory.")
+    endif()
+else()
+    file(CREATE_LINK "${VDQT_FFMPEG_BUNDLE}" "${vdqt_build_runtime}" SYMBOLIC RESULT runtime_link_error)
+    if(NOT runtime_link_error STREQUAL "0")
+        message(FATAL_ERROR "Cannot stage private FFmpeg runtime: ${runtime_link_error}")
+    endif()
+endif()
+message(STATUS "Exclusive bundled FFmpeg: ${VDQT_FFMPEG_BUNDLE}")
 
 find_path(AVISYNTH_INCLUDE_DIR
     NAMES avisynth/avisynth_c.h
@@ -51,6 +87,8 @@ get_filename_component(AVISYNTH_LIBRARY_DIR "${AVISYNTH_LIBRARY}" DIRECTORY)
 # reviews have a single authoritative inventory. Tests below select the smaller
 # subset required for each isolated executable.
 set(VIRTUALDUB_QT_SOURCES
+    src/VirtualDub/VDQtMediaRuntime.h
+    src/VirtualDub/VDQtMediaRuntime.cpp
     src/VirtualDub/VDQtApplicationIcon.h
     src/VirtualDub/VDQtApplicationIcon.cpp
     src/VirtualDub/VDQtCapturePolicy.h
@@ -158,8 +196,8 @@ target_link_libraries(vdqt_core PUBLIC
     PkgConfig::FFMPEG
 )
 set_target_properties(VirtualDubQt PROPERTIES
-    BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
-    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/virtualdubqt"
+    BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
+    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/virtualdubqt/ffmpeg-runtime/lib"
 )
 
 # Compatibility alias for build scripts
@@ -182,19 +220,12 @@ install(FILES LICENSE
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/virtualdubqt"
 )
 
-# AviSynth+ does not currently ship in the target Debian and Fedora repositories,
-# so include its runtime library while leaving plug-ins under the user's control.
-file(REAL_PATH "${AVISYNTH_LIBRARY}" AVISYNTH_REAL_LIBRARY)
-if(IS_SYMLINK "${AVISYNTH_LIBRARY}")
-    file(READ_SYMLINK "${AVISYNTH_LIBRARY}" AVISYNTH_LIBRARY_LINK_TARGET)
-    get_filename_component(AVISYNTH_SONAME "${AVISYNTH_LIBRARY_LINK_TARGET}" NAME)
-else()
-    get_filename_component(AVISYNTH_SONAME "${AVISYNTH_REAL_LIBRARY}" NAME)
-endif()
-install(FILES "${AVISYNTH_REAL_LIBRARY}"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/virtualdubqt"
-    RENAME "${AVISYNTH_SONAME}"
-)
+# Frameworks stay separate. Install only the private media runtime; development
+# headers/pkg-config files are unnecessary in an end-user application package.
+install(DIRECTORY "${VDQT_FFMPEG_BUNDLE}/"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/virtualdubqt/ffmpeg-runtime"
+    USE_SOURCE_PERMISSIONS
+    PATTERN "include" EXCLUDE PATTERN "pkgconfig" EXCLUDE)
 
 set(CPACK_PACKAGE_NAME "virtualdubqt")
 set(CPACK_PACKAGE_VENDOR "VirtualDubQT contributors")
@@ -212,14 +243,12 @@ set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-# Shared-library dependency scanners cannot discover commands launched through
-# QProcess. Native packages must install both ffmpeg and ffprobe as well.
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "ffmpeg (>= 6.0)")
+# Both commands and FFmpeg libraries are private package contents, never distro
+# dependencies. The separately installed AviSynth runtime remains required.
 
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
-set(CPACK_RPM_PACKAGE_REQUIRES "/usr/bin/ffmpeg, /usr/bin/ffprobe")
 
 include(CPack)
 
@@ -228,6 +257,18 @@ include(CPack)
 # -----------------------------------------------------------------------------
 
 if (BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    function(vdqt_private_encoder_test test_name)
+        add_test(NAME ${test_name}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/packaging/run-private-runtime-test.py
+                --test $<TARGET_FILE:${test_name}> --runtime ${VDQT_FFMPEG_BUNDLE})
+    endfunction()
+    add_executable(media_runtime_tests tests/test_media_runtime.cpp src/VirtualDub/VDQtMediaRuntime.cpp)
+    target_include_directories(media_runtime_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(media_runtime_tests PRIVATE Qt6::Core PkgConfig::FFMPEG)
+    vdqt_enable_diagnostics(media_runtime_tests)
+    add_test(NAME media_runtime_tests COMMAND media_runtime_tests)
+    set_tests_properties(media_runtime_tests PROPERTIES LABELS "packaging;runtime;contracts" TIMEOUT 20)
     add_executable(playback_clock_tests tests/test_playback_clock.cpp)
     target_include_directories(playback_clock_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     vdqt_enable_diagnostics(playback_clock_tests)
@@ -339,7 +380,7 @@ if (BUILD_TESTING)
     target_link_libraries(application_baseline_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(application_baseline_tests)
     set_target_properties(application_baseline_tests PROPERTIES
-        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}")
     add_test(NAME application_baseline_tests COMMAND application_baseline_tests)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
@@ -391,7 +432,11 @@ if (BUILD_TESTING)
         add_executable(${audio_export_contract}_tests tests/test_${audio_export_contract}.cpp)
         target_link_libraries(${audio_export_contract}_tests PRIVATE vdqt_core)
         vdqt_enable_diagnostics(${audio_export_contract}_tests)
-        add_test(NAME ${audio_export_contract}_tests COMMAND ${audio_export_contract}_tests)
+        if(audio_export_contract STREQUAL "exporter_diagnostics")
+            vdqt_private_encoder_test(${audio_export_contract}_tests)
+        else()
+            add_test(NAME ${audio_export_contract}_tests COMMAND ${audio_export_contract}_tests)
+        endif()
         set_tests_properties(${audio_export_contract}_tests PROPERTIES
             LABELS "audio;export;contracts" TIMEOUT 120
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
@@ -402,7 +447,11 @@ if (BUILD_TESTING)
             tests/test_${audio_followup_contract}.cpp tests/support/VDQtTestFixtures.cpp)
         target_link_libraries(${audio_followup_contract}_tests PRIVATE vdqt_core)
         vdqt_enable_diagnostics(${audio_followup_contract}_tests)
-        add_test(NAME ${audio_followup_contract}_tests COMMAND ${audio_followup_contract}_tests)
+        if(audio_followup_contract STREQUAL "manual_export_results")
+            vdqt_private_encoder_test(${audio_followup_contract}_tests)
+        else()
+            add_test(NAME ${audio_followup_contract}_tests COMMAND ${audio_followup_contract}_tests)
+        endif()
         set_tests_properties(${audio_followup_contract}_tests PROPERTIES
             LABELS "audio;export;integration;contracts" TIMEOUT 120
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
@@ -496,18 +545,45 @@ if (BUILD_TESTING)
     add_executable(process_completion_tests tests/test_process_completion.cpp)
     target_link_libraries(process_completion_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(process_completion_tests)
-    add_test(NAME process_completion_tests COMMAND process_completion_tests)
+    vdqt_private_encoder_test(process_completion_tests)
     set_tests_properties(process_completion_tests PROPERTIES
         LABELS "audio;process;regression;contracts" TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;VD_DISABLE_AUDIO_OUTPUT=1")
 
-    find_package(Python3 QUIET COMPONENTS Interpreter)
     if (Python3_Interpreter_FOUND)
+        add_test(NAME host_platform_runtime_contract_tests
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-script-plugin-runtime.py
+                --runtime ${VDQT_FFMPEG_BUNDLE} --platform-only)
+        set_tests_properties(host_platform_runtime_contract_tests PROPERTIES
+            LABELS "packaging;runtime;avs;contracts" TIMEOUT 30)
+        add_test(NAME avs_plugin_runtime_tests
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-script-plugin-runtime.py
+                --application $<TARGET_FILE:VirtualDubQt> --runtime ${VDQT_FFMPEG_BUNDLE}
+                --framework-library-path ${AVISYNTH_LIBRARY_DIR})
+        set_tests_properties(avs_plugin_runtime_tests PROPERTIES
+            LABELS "packaging;runtime;avs;export;regression" TIMEOUT 180 SKIP_RETURN_CODE 77)
+        add_test(NAME application_runtime_contract_tests
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-application-runtime.py
+                --application $<TARGET_FILE:VirtualDubQt> --runtime ${VDQT_FFMPEG_BUNDLE})
+        set_tests_properties(application_runtime_contract_tests PROPERTIES
+            LABELS "packaging;runtime;contracts" TIMEOUT 120)
         add_test(NAME package_runtime_contract_tests
             COMMAND ${Python3_EXECUTABLE} -m unittest discover
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_package_runtime.py -v)
         set_tests_properties(package_runtime_contract_tests PROPERTIES
             LABELS "packaging;runtime;contracts" TIMEOUT 15
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        add_test(NAME ffmpeg_runtime_contract_tests
+            COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_ffmpeg_runtime.py -v)
+        set_tests_properties(ffmpeg_runtime_contract_tests PROPERTIES
+            LABELS "packaging;runtime;contracts" TIMEOUT 15
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        add_test(NAME release_packaging_contract_tests
+            COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_release_packaging.py -v)
+        set_tests_properties(release_packaging_contract_tests PROPERTIES
+            LABELS "packaging;release;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
     foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
@@ -597,6 +673,7 @@ if (BUILD_TESTING)
         QT_NO_KEYWORDS
         VDQT_AUDIO_TESTING=1
     )
+    target_sources(stabilization_tests PRIVATE src/VirtualDub/VDQtMediaRuntime.cpp)
     target_include_directories(stabilization_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${AVISYNTH_INCLUDE_DIR}
@@ -611,7 +688,7 @@ if (BUILD_TESTING)
         PkgConfig::FFMPEG
     )
     vdqt_enable_diagnostics(stabilization_tests)
-    set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}")
+    set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}")
     add_test(NAME stabilization_tests COMMAND stabilization_tests)
 
     # Focused guardrails stay separate so performance regressions are obvious.
@@ -634,7 +711,7 @@ if (BUILD_TESTING)
     )
     vdqt_enable_diagnostics(playback_performance_tests)
     set_target_properties(playback_performance_tests PROPERTIES
-        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
     )
     add_test(NAME playback_performance_tests COMMAND playback_performance_tests)
     set_tests_properties(playback_performance_tests PROPERTIES
@@ -655,6 +732,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtVideoDecoder.h
     )
     target_compile_definitions(audio_backend_tests PRIVATE QT_NO_KEYWORDS)
+    target_sources(audio_backend_tests PRIVATE src/VirtualDub/VDQtMediaRuntime.cpp)
     target_include_directories(audio_backend_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${AVISYNTH_INCLUDE_DIR}
@@ -668,7 +746,7 @@ if (BUILD_TESTING)
     )
     vdqt_enable_diagnostics(audio_backend_tests)
     set_target_properties(audio_backend_tests PROPERTIES
-        BUILD_RPATH "${AVISYNTH_LIBRARY_DIR}"
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
     )
     add_test(NAME audio_backend_tests COMMAND audio_backend_tests)
     set_tests_properties(audio_backend_tests PROPERTIES
@@ -809,4 +887,13 @@ if (BUILD_TESTING)
         ENVIRONMENT
             "QT_QPA_PLATFORM=offscreen;XDG_DATA_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-state/data;XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-state/config"
     )
+    # Fixture generators still use ordinary executable names. Give every test
+    # the matching private tools rather than whichever distro CLI happens to
+    # be installed. Production itself does not rely on this PATH setting.
+    get_property(vdqt_registered_tests DIRECTORY PROPERTY TESTS)
+    foreach(vdqt_test IN LISTS vdqt_registered_tests)
+        get_property(vdqt_test_environment TEST ${vdqt_test} PROPERTY ENVIRONMENT)
+        list(APPEND vdqt_test_environment "PATH=${VDQT_FFMPEG_BUNDLE}/bin:$ENV{PATH}")
+        set_property(TEST ${vdqt_test} PROPERTY ENVIRONMENT "${vdqt_test_environment}")
+    endforeach()
 endif()

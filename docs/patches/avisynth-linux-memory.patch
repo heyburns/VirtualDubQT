@@ -1,0 +1,101 @@
+diff --git a/avs_core/core/avisynth.cpp b/avs_core/core/avisynth.cpp
+index bda6ee60..e0fceb9b 100644
+--- a/avs_core/core/avisynth.cpp
++++ b/avs_core/core/avisynth.cpp
+@@ -50,6 +50,7 @@
+ #include <vector>
+ #include <iostream>
+ #include <fstream>
++#include "memory_helpers.h"
+ #include <sstream>
+ #include <exception>
+ 
+@@ -2476,7 +2477,7 @@ static int64_t posix_get_available_memory() {
+   int64_t memory;
+ 
+   long nPageSize = sysconf(_SC_PAGE_SIZE);
+-  int64_t nAvailablePhysicalPages;
++  int64_t nAvailablePhysicalPages = -1;
+ 
+ #if defined(AVS_MACOS)
+   vm_statistics64_data_t vmstats;
+@@ -2494,9 +2495,20 @@ static int64_t posix_get_available_memory() {
+   get_system_info(&sysinf);
+   nAvailablePhysicalPages = sysinf.free_memory;
+ #else // Linux
++#if defined(AVS_LINUX)
++  std::ifstream meminfo("/proc/meminfo");
++  uint64_t available_bytes;
++  if (avs_memory::ReadLinuxAvailable(meminfo, available_bytes))
++    return static_cast<int64_t>(available_bytes);
++#endif
++  // Older kernels, an unavailable /proc, and other POSIX targets retain the
++  // existing fallback rather than depending on a Linux pseudo-file.
+   nAvailablePhysicalPages = sysconf(_SC_AVPHYS_PAGES);
+ #endif
+ 
++  if (nPageSize <= 0 || nAvailablePhysicalPages < 0
++      || nAvailablePhysicalPages > std::numeric_limits<int64_t>::max() / nPageSize)
++    return 0;
+   memory = nPageSize * nAvailablePhysicalPages;
+ 
+   return memory;
+@@ -2553,7 +2565,7 @@ static uint64_t ConstrainMemoryRequest(uint64_t requested)
+   uint64_t mem_sysreserve = isX64 ? (uint64_t)1024 * 1024 * 1024 : (uint64_t)128 * 1024 * 1024;
+ 
+   // Cap memory_max to at most mem_sysreserve less than total, but at least to 64MB.
+-  uint64_t allowed_memory = clamp(requested, (uint64_t)64 * 1024 * 1024, mem_limit - mem_sysreserve);
++  uint64_t allowed_memory = avs_memory::Constrain(requested, mem_limit, mem_sysreserve);
+ #if 0
+   const int DIV = 1024 * 1024;
+   fprintf(stdout, "requested= %" PRIu64 " MB\r\n", requested / DIV);
+diff --git a/avs_core/core/memory_helpers.h b/avs_core/core/memory_helpers.h
+new file mode 100644
+index 00000000..091edc74
+--- /dev/null
++++ b/avs_core/core/memory_helpers.h
+@@ -0,0 +1,44 @@
++#ifndef AVS_CORE_MEMORY_HELPERS_H
++#define AVS_CORE_MEMORY_HELPERS_H
++
++#include <algorithm>
++#include <cstdint>
++#include <istream>
++#include <limits>
++#include <sstream>
++#include <string>
++
++namespace avs_memory {
++
++// Linux's MemFree/sysconf(_SC_AVPHYS_PAGES) excludes reclaimable page cache.
++// MemAvailable estimates RAM usable without swapping, which is the quantity
++// needed when sizing a video cache. Parse a stream to allow fixture-only tests.
++inline bool ReadLinuxAvailable(std::istream& input, uint64_t& bytes)
++{
++  std::string line;
++  while (std::getline(input, line)) {
++    std::istringstream fields(line);
++    std::string key, unit;
++    uint64_t kib;
++    if (!(fields >> key) || key != "MemAvailable:")
++      continue;
++    if (!(fields >> kib >> unit) || unit != "kB"
++        || kib > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / 1024)
++      return false;
++    bytes = kib * 1024;
++    return true;
++  }
++  return false;
++}
++
++inline uint64_t Constrain(uint64_t requested, uint64_t limit, uint64_t reserve)
++{
++  constexpr uint64_t minimum = 64 * 1024 * 1024;
++  // Saturate before subtracting: low-memory hosts must not wrap the unsigned
++  // limit into an enormous allocation allowance. Preserve the existing floor.
++  const uint64_t maximum = limit > reserve ? limit - reserve : 0;
++  return std::max(minimum, std::min(requested, maximum));
++}
++
++} // namespace avs_memory
++#endif

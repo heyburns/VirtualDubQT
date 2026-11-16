@@ -1,10 +1,7 @@
 #include <avisynth/avisynth.h>
 #include <algorithm>
-#include <vector>
 #include <cmath>
-#include <cstring>
 #include <cstdint>
-#include <cstdio>
 
 static const uint8_t alpha_table[52] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -33,7 +30,8 @@ class Deblock : public GenericVideoFilter {
     int m_bOffset;
     int m_planes;
 
-    void FilterPlane(uint8_t* dst, int pitch, int width, int height);
+    template<typename Pixel>
+    void FilterPlane(uint8_t* dst, int pitch, int width, int height, int bits);
 
 public:
     Deblock(PClip child, int quant, int aOffset, int bOffset, int planes, IScriptEnvironment* env);
@@ -49,22 +47,30 @@ Deblock::Deblock(PClip child, int quant, int aOffset, int bOffset, int planes, I
       m_aOffset(aOffset),
       m_bOffset(bOffset),
       m_planes(planes) {
+    const int bits = vi.BitsPerComponent();
+    if (!vi.IsPlanar() || !(vi.IsYUV() || vi.IsYUVA() || vi.IsY())
+        || (bits != 8 && bits != 10 && bits != 12 && bits != 14 && bits != 16)) {
+        env->ThrowError("Deblock: requires planar integer YUV/gray video (8, 10, 12, 14 or 16 bits).");
+    }
 }
 
-void Deblock::FilterPlane(uint8_t* dst, int pitch, int width, int height) {
-    int qp_a = std::clamp(m_quant + m_aOffset, 0, 51);
-    int qp_b = std::clamp(m_quant + m_bOffset, 0, 51);
+template<typename Pixel>
+void Deblock::FilterPlane(uint8_t* dst, int pitch, int width, int height, int bits) {
+    const int qp_a = static_cast<int>(std::clamp<int64_t>(int64_t(m_quant) + m_aOffset, 0, 51));
+    const int qp_b = static_cast<int>(std::clamp<int64_t>(int64_t(m_quant) + m_bOffset, 0, 51));
 
-    int alpha = alpha_table[qp_a];
-    int beta = beta_table[qp_b];
-    int tc0 = tc0_table[qp_a];
+    const int scale = 1 << (bits - 8);
+    const int alpha = alpha_table[qp_a] * scale;
+    const int beta = beta_table[qp_b] * scale;
+    const int tc0 = tc0_table[qp_a] * scale;
+    const int maximum = (1 << bits) - 1;
 
     if (alpha == 0 && beta == 0) return;
 
     // 1. Vertical block edges (x = 8, 16, 24, ...)
-    for (int x = 8; x < width; x += 8) {
+    for (int x = 8; x + 1 < width; x += 8) {
         for (int y = 0; y < height; ++y) {
-            uint8_t* row = dst + y * pitch;
+            Pixel* row = reinterpret_cast<Pixel*>(dst + y * pitch);
             int p1 = row[x - 2];
             int p0 = row[x - 1];
             int q0 = row[x + 0];
@@ -74,18 +80,18 @@ void Deblock::FilterPlane(uint8_t* dst, int pitch, int width, int height) {
                 int delta = ((q0 - p0) * 4 + (p1 - q1) + 4) >> 3;
                 delta = std::clamp(delta, -tc0, tc0);
 
-                row[x - 1] = static_cast<uint8_t>(std::clamp(p0 + delta, 0, 255));
-                row[x + 0] = static_cast<uint8_t>(std::clamp(q0 - delta, 0, 255));
+                row[x - 1] = static_cast<Pixel>(std::clamp(p0 + delta, 0, maximum));
+                row[x + 0] = static_cast<Pixel>(std::clamp(q0 - delta, 0, maximum));
             }
         }
     }
 
     // 2. Horizontal block edges (y = 8, 16, 24, ...)
-    for (int y = 8; y < height; y += 8) {
-        uint8_t* row_p1 = dst + (y - 2) * pitch;
-        uint8_t* row_p0 = dst + (y - 1) * pitch;
-        uint8_t* row_q0 = dst + (y + 0) * pitch;
-        uint8_t* row_q1 = dst + (y + 1) * pitch;
+    for (int y = 8; y + 1 < height; y += 8) {
+        Pixel* row_p1 = reinterpret_cast<Pixel*>(dst + (y - 2) * pitch);
+        Pixel* row_p0 = reinterpret_cast<Pixel*>(dst + (y - 1) * pitch);
+        Pixel* row_q0 = reinterpret_cast<Pixel*>(dst + (y + 0) * pitch);
+        Pixel* row_q1 = reinterpret_cast<Pixel*>(dst + (y + 1) * pitch);
 
         for (int x = 0; x < width; ++x) {
             int p1 = row_p1[x];
@@ -97,8 +103,8 @@ void Deblock::FilterPlane(uint8_t* dst, int pitch, int width, int height) {
                 int delta = ((q0 - p0) * 4 + (p1 - q1) + 4) >> 3;
                 delta = std::clamp(delta, -tc0, tc0);
 
-                row_p0[x] = static_cast<uint8_t>(std::clamp(p0 + delta, 0, 255));
-                row_q0[x] = static_cast<uint8_t>(std::clamp(q0 - delta, 0, 255));
+                row_p0[x] = static_cast<Pixel>(std::clamp(p0 + delta, 0, maximum));
+                row_q0[x] = static_cast<Pixel>(std::clamp(q0 - delta, 0, maximum));
             }
         }
     }
@@ -108,52 +114,25 @@ PVideoFrame __stdcall Deblock::GetFrame(int n, IScriptEnvironment* env) {
     PVideoFrame src = child->GetFrame(n, env);
     if (!src) return nullptr;
 
-    PVideoFrame dst = env->NewVideoFrame(vi);
-    if (!dst) return src;
-
-    if (vi.IsPlanar()) {
-        int wY = vi.width;
-        int hY = vi.height;
-
-        env->BitBlt(dst->GetWritePtr(PLANAR_Y), dst->GetPitch(PLANAR_Y),
-                    src->GetReadPtr(PLANAR_Y), src->GetPitch(PLANAR_Y),
-                    wY, hY);
-        FilterPlane(dst->GetWritePtr(PLANAR_Y), dst->GetPitch(PLANAR_Y), wY, hY);
-
-        if (vi.IsYUV()) {
-            int subW = vi.GetPlaneWidthSubsampling(PLANAR_U);
-            int subH = vi.GetPlaneHeightSubsampling(PLANAR_U);
-            int wUV = vi.width >> subW;
-            int hUV = vi.height >> subH;
-
-            env->BitBlt(dst->GetWritePtr(PLANAR_U), dst->GetPitch(PLANAR_U),
-                        src->GetReadPtr(PLANAR_U), src->GetPitch(PLANAR_U),
-                        wUV, hUV);
-            env->BitBlt(dst->GetWritePtr(PLANAR_V), dst->GetPitch(PLANAR_V),
-                        src->GetReadPtr(PLANAR_V), src->GetPitch(PLANAR_V),
-                        wUV, hUV);
-
-            if (m_planes & 2) {
-                FilterPlane(dst->GetWritePtr(PLANAR_U), dst->GetPitch(PLANAR_U), wUV, hUV);
-            }
-            if (m_planes & 4) {
-                FilterPlane(dst->GetWritePtr(PLANAR_V), dst->GetPitch(PLANAR_V), wUV, hUV);
-            }
-        }
-    } else {
-        env->BitBlt(dst->GetWritePtr(), dst->GetPitch(),
-                    src->GetReadPtr(), src->GetPitch(),
-                    vi.width * (vi.BitsPerPixel() / 8), vi.height);
+    // Copy-on-write preserves every byte of every plane (including alpha and
+    // unselected planes) and frame properties. Plane row sizes are byte counts;
+    // a 10-bit row needs twice as many bytes as its pixel width.
+    env->MakeWritable(&src);
+    const int bits = vi.BitsPerComponent();
+    const int components = vi.IsY() ? 1 : 3;
+    const int planeIds[] = {PLANAR_Y, PLANAR_U, PLANAR_V};
+    for (int component = 0; component < components; ++component) {
+        if (!(m_planes & (1 << component))) continue;
+        const int plane = planeIds[component];
+        const int width = src->GetRowSize(plane) / vi.ComponentSize();
+        const int height = src->GetHeight(plane);
+        if (bits == 8)
+            FilterPlane<uint8_t>(src->GetWritePtr(plane), src->GetPitch(plane), width, height, bits);
+        else
+            FilterPlane<uint16_t>(src->GetWritePtr(plane), src->GetPitch(plane), width, height, bits);
     }
 
-    static int s_deblock_count = 0;
-    if (++s_deblock_count <= 10 || s_deblock_count % 30 == 0) {
-        printf("[Deblock] Active in pipeline -> Processing frame %d (quant=%d, planes=%d, count=%d)\n",
-               n, m_quant, m_planes, s_deblock_count);
-        fflush(stdout);
-    }
-
-    return dst;
+    return src;
 }
 
 AVSValue __cdecl Create_Deblock(AVSValue args, void* user_data, IScriptEnvironment* env) {

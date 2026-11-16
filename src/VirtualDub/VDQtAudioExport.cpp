@@ -2,6 +2,7 @@
 // concatenate edits before effects (continuous histories/tails), encode once,
 // then commit. Callers retain dependency/overwrite approval at their boundary.
 #include "VDQtAudioExport.h"
+#include "VDQtMediaRuntime.h"
 #include "VDQtAudioPlayer.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtSourceSafety.h"
@@ -160,7 +161,7 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
 
     // Preserve the existing standalone LAME path for hosts without FFmpeg's
     // libmp3lame encoder. Effects are rendered before handing PCM to LAME.
-    QString program = QStringLiteral("ffmpeg");
+    QString program = VDQtMediaRuntime::ffmpeg();
     const QString lame = QStandardPaths::findExecutable(QStringLiteral("lame"));
     const bool useLame = (codec.codecId == "mp3" || codec.codecId == "libmp3lame")
         && !avcodec_find_encoder_by_name("libmp3lame") && !lame.isEmpty();
@@ -169,7 +170,7 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
         if (!graph.isEmpty()) {
             lameInput = directory.filePath(QStringLiteral("filtered.wav"));
             QProcess effects;
-            effects.start("ffmpeg", {"-nostdin", "-v", "error", "-y", "-i", wav,
+            effects.start(VDQtMediaRuntime::ffmpeg(), {"-nostdin", "-v", "error", "-y", "-i", wav,
                 "-af", graph, "-c:a", "pcm_s16le", lameInput});
             if (!effects.waitForStarted(5000))
                 return fail(errorMessage, QStringLiteral("Audio filter renderer could not start."));

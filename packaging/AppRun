@@ -6,15 +6,32 @@ set -e
 
 APPDIR=$(CDPATH= cd -- "${0%/*}" && pwd -P)
 export APPDIR
-for tool in VirtualDubQt ffmpeg ffprobe; do
-    if [ ! -x "$APPDIR/usr/bin/$tool" ]; then
-        printf '%s\n' "VirtualDubQT AppImage is incomplete: missing $tool" >&2
+if [ ! -x "$APPDIR/usr/bin/VirtualDubQt" ]; then
+    printf '%s\n' 'VirtualDubQT AppImage is incomplete: missing VirtualDubQt' >&2
+    exit 127
+fi
+vdqt_media_runtime=
+for vdqt_candidate in "$APPDIR/usr/lib/virtualdubqt/ffmpeg-runtime" \
+    "$APPDIR/usr/lib64/virtualdubqt/ffmpeg-runtime" \
+    "$APPDIR/usr/lib/x86_64-linux-gnu/virtualdubqt/ffmpeg-runtime"; do
+    if [ -d "$vdqt_candidate" ]; then
+        vdqt_media_runtime=$vdqt_candidate
+        break
+    fi
+done
+if [ -z "$vdqt_media_runtime" ]; then
+    printf '%s\n' 'VirtualDubQT AppImage is incomplete: missing private FFmpeg bundle (no system fallback)' >&2
+    exit 127
+fi
+for tool in ffmpeg ffprobe; do
+    if [ ! -x "$vdqt_media_runtime/bin/$tool" ]; then
+        printf '%s\n' "VirtualDubQT AppImage is incomplete: missing bundled $tool" >&2
         exit 127
     fi
 done
 
-PATH="$APPDIR/usr/bin${PATH:+:$PATH}"
-LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/virtualdubqt${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+PATH="$vdqt_media_runtime/bin:$APPDIR/usr/bin${PATH:+:$PATH}"
+LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH LD_LIBRARY_PATH
 
 # Qt 6 is configured by linuxdeploy's qt.conf. Honor any additional deployment
@@ -27,4 +44,8 @@ for hook in "$APPDIR"/vdqt-apprun-hooks/*.sh "$APPDIR"/apprun-hooks/*.sh; do
         . "$hook"
     fi
 done
+# Deployment hooks may adjust Qt's loader path, but cannot select a different
+# FFmpeg. Do not expose codec-only C++ dependencies to the application's Qt.
+LD_LIBRARY_PATH="$vdqt_media_runtime/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH
 exec "$APPDIR/usr/bin/VirtualDubQt" "$@"

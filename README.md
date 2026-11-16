@@ -18,9 +18,9 @@ Start with the [installation guide](docs/INSTALLATION.md): choose a package,
 launch the app, and make a first export. It includes copyable commands and
 expected results. You do not need to write code to use VirtualDubQT.
 
-Get version 0.1.2 from the [releases page](https://github.com/heyburns/VirtualDubQT/releases).
-The **AppImage** includes the main supporting software and is the simplest
-starting point. The **DEB** targets Ubuntu 24.04 and the **RPM** targets Fedora 43.
+Get version 0.1.3 from the [releases page](https://github.com/heyburns/VirtualDubQT/releases).
+The **AppImage** includes Qt and the media backend. The **DEB** targets Ubuntu
+24.04 and the **RPM** targets Fedora 43.
 All three are for 64-bit Intel/AMD Linux. The AppImage needs glibc 2.38 or newer;
 the guide shows how to check that requirement. Native packages use their distro's
 libraries, so a newer distro does not automatically accept the same package.
@@ -29,17 +29,17 @@ The project targets reasonably current Linux desktops, roughly the last couple
 of years. Package checks currently cover Ubuntu 24.04 and Fedora 43; this is not
 a claim that every recent distribution has been tested.
 
-- **FFmpeg** handles media conversion; **ffprobe** inspects media files. The
-  AppImage supplies both. Native installs use your system's tools and libraries,
-  which must include the encoders you want to use.
-- **AviSynth+** runs `.avs` video scripts. VirtualDubQT opens these directly.
-  Fast Recompress of a script also needs FFmpeg with AviSynth support. The
-  AppImage includes it; native users can [check or build their FFmpeg](docs/BUILDING.md#optional-build-custom-ffmpeg).
+- **FFmpeg** handles media conversion; **ffprobe** inspects media files. All
+  packages include matching tools and libraries, with expanded codec support.
+  The app always uses this private backend, never your system FFmpeg.
+- **AviSynth+ 3.7.5** runs `.avs` scripts and must be installed separately before
+  starting the app, even for ordinary media. Follow the
+  [setup instructions](docs/BUILDING.md#install-avisynth).
 - **Extra script plugins** are separate downloads. Follow their Linux setup
   instructions; Windows plugin DLLs are not supported. The guide includes a
   first-use AviSynth example that needs no extra plugins.
-- **VapourSynth** `.vpy` scripts need its input module in both the FFmpeg
-  libraries and commands. The supplied custom FFmpeg recipe does not enable it.
+- **VapourSynth** is a separate, optional installation for `.vpy` scripts. The
+  bundled backend includes its reader; it requires the legacy VSScript 3.2 API.
 
 ---
 
@@ -86,8 +86,8 @@ install the tools, build AviSynth+, download the app source, compile, and run.
 The guide provides commands for Ubuntu 24.04 and Fedora 43 and explains the
 common build errors. Programming experience is not required to follow it.
 
-The 0.1.2 builds were tested with Qt 6.4/FFmpeg 6.1 on Ubuntu 24.04 and
-Qt 6.10/FFmpeg 7.1 on Fedora 43. Users maintain their own dependencies and
+The release builds use Qt 6.4 on Ubuntu 24.04 and Qt 6.10 on Fedora 43, with
+the same private FFmpeg 6.1.6 backend. Users maintain their separate frameworks and
 third-party plugins. Reproducible app bugs and unclear or broken instructions
 are welcome in the [issue tracker](https://github.com/heyburns/VirtualDubQT/issues);
 see [what to include](docs/INSTALLATION.md#getting-help-and-reporting-bugs).

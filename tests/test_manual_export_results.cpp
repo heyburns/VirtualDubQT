@@ -3,6 +3,7 @@
 // dialog. This is not a test-only export path or a mocked exporter.
 #include <QString>
 #include "support/VDQtTestFixtures.h"
+#include "support/VDQtBundledToolFixture.h"
 #include "VirtualDub/VDQtMainWindow.h"
 #include <QApplication>
 #include <QAbstractButton>
@@ -29,15 +30,6 @@ QByteArray readFile(const QString& path) {
 bool writeFile(const QString& path, const QByteArray& bytes) {
     QFile file(path); return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
 }
-class PathScope final {
-public:
-    explicit PathScope(const QByteArray& path)
-        : mOriginal(qgetenv("PATH")), mPresent(qEnvironmentVariableIsSet("PATH")) { qputenv("PATH", path); }
-    ~PathScope() { if (mPresent) qputenv("PATH", mOriginal); else qunsetenv("PATH"); }
-private:
-    QByteArray mOriginal;
-    bool mPresent;
-};
 enum class Outcome { StagingError, Cancelled, EncoderStartFailure };
 bool exerciseSave(VDQtMainWindow& window, const QString& output, Outcome outcome) {
     const bool cancel = outcome == Outcome::Cancelled;
@@ -153,7 +145,7 @@ int main(int argc, char **argv) {
     if (!QDir().mkpath(brokenDirectory) || !writeFile(broken, "#!/no/such/vdqt-test-interpreter\n")
         || !QFile::setPermissions(broken, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner)) return 5;
     {
-        PathScope isolated(brokenDirectory.toUtf8());
+        VDQtBundledToolFixture isolated(brokenDirectory.toUtf8());
         const QString uncreated = fixtures.directory.filePath("never-created.mkv");
         passed &= exerciseSave(window, uncreated, Outcome::EncoderStartFailure);
         passed &= check(!QFileInfo::exists(uncreated) && readFile(fixtures.mp4) == original,

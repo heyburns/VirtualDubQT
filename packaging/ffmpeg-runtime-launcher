@@ -1,0 +1,22 @@
+#!/bin/sh
+# Private tools may be moved together with their codec libraries.
+# These settings affect only this child process, never the desktop/system PATH.
+set -eu
+vdqt_runtime=$(CDPATH= cd -- "${0%/*}/.." && pwd -P)
+# These SONAMEs belong to the pinned 6.1 runtime. A missing private FFmpeg
+# library is an incomplete bundle, never permission to borrow a distro copy.
+for vdqt_soname in libavcodec.so.60 libavformat.so.60 libavutil.so.58 libavfilter.so.9 \
+    libswscale.so.7 libswresample.so.4 libavdevice.so.60 libpostproc.so.57; do
+    if [ ! -r "$vdqt_runtime/lib/$vdqt_soname" ]; then
+        printf '%s\n' "Incomplete private FFmpeg bundle: missing $vdqt_soname (no system fallback)." >&2
+        exit 127
+    fi
+done
+LD_LIBRARY_PATH="$vdqt_runtime/lib:$vdqt_runtime/lib/deps${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# The assembler deliberately excludes shared graphics/font/audio and C++ runtime
+# libraries. Both this child and external script plugins use one coherent host
+# platform stack; FFmpeg itself and codec dependencies stay private.
+# Framework/Python lookup belongs to the user's separate installation. Never
+# redirect PYTHONHOME/PYTHONPATH to a bundled or builder-only framework.
+export LD_LIBRARY_PATH
+exec "$vdqt_runtime/libexec/${0##*/}" "$@"

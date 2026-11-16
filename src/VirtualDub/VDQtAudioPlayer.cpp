@@ -3,6 +3,7 @@
 // own decode-ahead threads, bounded buffers, timestamp repair, seek/restart
 // coordination, and sample-accurate export helpers.
 #include "VDQtAudioPlayer.h"
+#include "VDQtMediaRuntime.h"
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
 #include "VDQtTimingMath.h"
@@ -1117,7 +1118,7 @@ bool transcodeTemporaryWav(const QString &wavPath,
 
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start("ffmpeg", arguments);
+    process.start(VDQtMediaRuntime::ffmpeg(), arguments);
     if (!process.waitForStarted(5000)) {
         QFile::remove(outputPath);
         return false;
@@ -3386,7 +3387,7 @@ bool VDQtAudioPlayer::exportAudioRangesToFile(
     process.setWorkingDirectory(directory.path());
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start(
-        QStringLiteral("ffmpeg"),
+        VDQtMediaRuntime::ffmpeg(),
         {QStringLiteral("-nostdin"), QStringLiteral("-hide_banner"),
          QStringLiteral("-loglevel"), QStringLiteral("error"),
          QStringLiteral("-f"), QStringLiteral("concat"),

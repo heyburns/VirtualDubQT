@@ -1671,6 +1671,276 @@ Final frozen exporter review found no further blocker; all source changes were
 frozen during shared builds. These results do not resolve the unchecked items in
 docs/AUDIT_STATUS.txt or claim complete native filter parity.
 
+Expanded private FFmpeg runtime validation (2026-10-05)
+-----------------------------------------------------
+
+Development artifact: dist/ffmpeg-runtime-6.1.6-x86_64. This is FFmpeg/ffprobe
+and their matching shared codec libraries only. It contains no AviSynth+,
+VapourSynth, Python runtime, or user script plugins. Existing installed binaries,
+system FFmpeg packages, published releases and release workflows were unchanged.
+
+The pinned n6.1.6 build includes all 30 previously missing encoder entries,
+AviSynth/VapourSynth script inputs, ALSA/V4L2 capture, and the required application
+filters, containers and protocols. A recorded FFmpeg patch removes VapourSynth's
+unconditional linked dependency, loads the external API 3.2 library on demand,
+and retains its loader handle until the last returned frame is released.
+Framework SDKs under the private builder prefix are build/test fixtures, not
+deployed files. The assembler rejects linked framework/Python dependencies.
+
+Checks performed:
+
+  python3 -m unittest discover -s tests -p 'test*runtime.py' -v
+  python3 packaging/verify-ffmpeg-runtime.py --runtime <portable-runtime>
+  python3 packaging/verify-ffmpeg-runtime.py --runtime <portable-runtime> \
+      --frameworks --framework-library-path <external-sdk>/lib
+  python3 packaging/verify-ffmpeg-runtime.py --runtime <portable-runtime> \
+      --without-frameworks
+  python3 packaging/verify-ffmpeg-runtime.py \
+      --runtime dist/ffmpeg-runtime-6.1.6-x86_64 --nvenc
+
+Results: launcher/manifest/dependency contracts 16/16; all 58 required encoders,
+10 input formats, 13 output formats, two capture devices, 21 filters and three
+protocols present. Every one of the 223 advertised command encoders agrees with
+the application-facing libavcodec inventory. All 42 required software encoders
+produced valid output; 41 also passed complete decode/frame checks. Animated WebP
+is encode-only here because FFmpeg 6.1 cannot decode its animation. Its RIFF,
+ANIM and four ANMF frames were validated instead, with static WebP independently
+decoded. Additional x264 10-bit, x265 10/12-bit, FFV1 16-bit/alpha and ProRes 4444
+alpha exports retained their expected decoded formats and frame counts.
+
+External AviSynth+ 3.7.5 and VapourSynth R70 produced eight-frame FFV1 outputs
+inside Ubuntu 24.04. With both framework prefixes hidden, ordinary exports still
+worked and both script requests failed cleanly. The relocated bundle passed
+software tests on the Gentoo host and real H.264/HEVC/AV1 NVIDIA encode/decode tests
+on its RTX 5090 (driver 615.71.09). The host's separately installed AviSynth was
+also probed/decoded for eight frames with autoload plugins explicitly disabled.
+All deployed ELF objects' version requirements were inspected: glibc 2.38 is the
+highest required GNU libc symbol version.
+
+A separate Ubuntu Release application/test build used these matching FFmpeg
+libraries. Headless CTest: 198 passed, zero failed, one physical-audio test skipped
+(199 selected, 64.58 seconds). The initial run's display test could not open xcb
+without a display; rerunning with QT_QPA_PLATFORM=offscreen resolved that test
+without application changes. Actual-binary smoke checks opened FFV1/native AVS
+and exported eight-frame raw/FFV1 output in Full Processing and Fast Recompress,
+with executable PATH restricted to the new bundle's bin directory.
+
+Limits: Intel/QSV/VAAPI hardware, real microphone/camera capture, external script
+plugin chains, other CPU architectures and older libc environments were not
+verified. Protocol inventory does not constitute network-service testing.
+The bundled VapourSynth reader needs legacy VSScript API 3.2; it was not claimed
+compatible with installations that remove that API. No general GUI/playback
+manual test or ASan rebuild was run for this dependency-packaging change.
+Release integration and redistribution-compliance packaging remain deferred.
+
+Bundled-only application integration (2026-10-05)
+------------------------------------------------
+
+The current build/VirtualDubQt (the native desktop menu's executable) was rebuilt
+against dist/ffmpeg-runtime-locked, using only that bundle's matching FFmpeg SDK.
+The previous binary is preserved as build/VirtualDubQt.before-bundled-ffmpeg.
+Neither system packages nor the separately installed script plugins changed.
+
+VDQtMediaRuntime is the sole selector for internal ffmpeg/ffprobe calls: export
+(including two passes), audio rendering/concatenation, capture, frame serving,
+media inspection, and saved external encoder sets naming those tools. Paths are
+absolute and relative to the application, never searched through PATH/APPDIR.
+Other intentionally chosen external encoders remain supported. Startup checks
+all eight loaded FFmpeg library paths/versions, the matching tool versions and
+configure strings, and refuses incomplete, external or mixed runtimes. System
+Information and --runtime-info expose the active bundle and exact loaded paths.
+
+The SDK's include directory must precede AviSynth's include prefix: the user's
+.local/include also contained an unrelated newer FFmpeg SDK. Making the bundle
+an ordinary (not SYSTEM-imported) interface and prioritizing its headers prevents
+silent header/ABI mixing. General codec dependencies live under lib/deps, outside
+the native Qt app's direct library path; its own newer C++ runtime is retained.
+CLI launchers require every private FFmpeg SONAME before executing the real tool.
+
+Validation on the Gentoo host (Qt 6.11.2, GCC 16.2.1, external AviSynth):
+
+  QT_QPA_PLATFORM=offscreen VD_DISABLE_AUDIO_OUTPUT=1 \
+    ctest --test-dir build-bundled-checks --output-on-failure --parallel 2 -LE hardware
+  python3 packaging/check-application-runtime.py \
+    --application build/VirtualDubQt --runtime dist/ffmpeg-runtime-locked
+  python3 packaging/smoke-runtime.py --application build/VirtualDubQt \
+    --ffmpeg <bundle>/bin/ffmpeg --ffprobe <bundle>/bin/ffprobe \
+    --runtime-ffprobe <bundle>/bin/ffprobe --runtime-path '' \
+    --runtime-library-path /home/alan/.local/lib64 --check-fast-recompress
+
+Results: 200/200 non-hardware regressions passed (66.57 seconds). Both the test
+build and normal desktop-menu binary passed ten actual-process runtime contracts:
+host-tool traps and empty PATH cannot affect selection; missing/wrong tools,
+foreign same-version DSOs, a missing FFmpeg SONAME, and a missing bundle all fail;
+restoration works. FFV1/native AVS and raw/FFV1 exports passed with empty executable
+PATH in Full Processing and Fast Recompress. CMake installation into an isolated
+/tmp prefix also verified all eight private libraries and tool paths after
+build RPATH removal, using only an independently supplied AviSynth library path.
+
+Three existing encoder-failure/completion regressions previously injected fake
+ffmpeg through PATH. They now run copied test executables with privately owned
+tool launchers, without adding production override hooks or changing real bundle
+files. All test fixture generators also select the matching bundle through their
+CTest environment. The Linux regression workflow builds the same private SDK;
+release/tag packaging automation and redistribution compliance remain deferred,
+and the old published AppImage/DEB/RPM files are not changed by this local work.
+
+Host desktop/AviSynth plugin compatibility fix (2026-10-06)
+----------------------------------------------------------
+
+The first bundled-only build prevented the installed L-SMASH plugin from loading:
+its system FFmpeg 8 dependencies needed the host libva-x11, but FFmpeg's private
+older libva.so.2 was already loaded. That exact combination fails with the missing
+va_TraceStatus symbol. Loading the coherent host VA-API pair instead lets the
+unchanged plugin load beside private FFmpeg 6.1.6. An independent CLI-like load
+order also reproduced older fontconfig breaking the newer host Pango library.
+
+The assembler now leaves graphics/font/audio-system libraries and the C++ runtime
+on the host. FFmpeg's eight libraries, executable tools, all codec capabilities,
+and the Intel oneVPL dispatcher remain private; no system FFmpeg fallback was
+introduced. Dependency collection follows direct DT_NEEDED edges instead of
+copying the transitive closure of excluded platform libraries. This reduces the
+assembled dependency set from 77 to 55 shared libraries. No script frameworks,
+Python installation, installed AVS plugins, system libraries, or original media
+were changed. No existing application/export process was stopped.
+
+Assembly metadata records the host-desktop-v1 policy and its shared exclusion
+pattern. Startup rejects both pre-policy bundles and leftover platform libraries
+in a partially updated payload. System Information explains the difference
+between the strictly private FFmpeg and the shared system platform libraries.
+
+New checks:
+
+  python3 packaging/check-script-plugin-runtime.py \
+      --runtime dist/ffmpeg-runtime-locked --platform-only
+  python3 packaging/check-script-plugin-runtime.py \
+      --runtime dist/ffmpeg-runtime-locked --application build/VirtualDubQt \
+      --plugin /home/alan/.local/lib64/avisynth/libLSMASHSource.so \
+      --framework-library-path /home/alan/.local/lib64
+
+The platform check loads private FFmpeg before host libva-x11/fontconfig/Pango,
+without letting Qt hide a bundled-library conflict through its earlier load order.
+The real plugin check creates disposable video/audio media and evaluates the
+installed plugin with bundled ffprobe/ffmpeg, then exports eight-frame raw/FFV1
+outputs through the actual application in Full Processing and Fast Recompress.
+Both raw exports agree byte-for-byte. L-SMASH is optional in portable CI: absence
+is an explicit CTest skip (77), never a claim that the real plugin was tested.
+VDQT_AVISYNTH_TEST_PLUGIN can specify a separately installed test plugin.
+
+Validation on Gentoo: 20/20 Python packaging contracts; focused CTest 6/6; full
+non-hardware Release CTest 202/202, zero failures/skips (68.42 seconds). The normal
+desktop binary also passed twelve hostile/missing/mixed-runtime contracts and
+empty-PATH raw/FFV1 smoke exports. All 58 required encoder entries and all 223
+CLI/library encoder names agree; all 42 required software encoders and five
+high-depth/alpha cases passed. Real NVIDIA H.264, HEVC and AV1 exports passed.
+The isolated Ubuntu builder passed external AviSynth+ and VapourSynth input tests.
+CMake installation into /tmp/vdqt-platform-install-check-x4amMza5 verified all
+eight FFmpeg library paths and command paths in the installed private layout.
+The same installed binary also passed the real L-SMASH Full/Fast export checks.
+
+An isolated copy of the user's Jason of Star Command Season 1 test.avs and its
+two source videos passed bundled ffprobe frame evaluation and native application
+open/preview initialization, including NNEDI3CL_rpow2, resizing, RemoveDirtSMC,
+Deblock, LSFMod, audio and Prefetch. Metadata: 768x576 at 23.976 fps, 33675 frames,
+48 kHz mono audio. This sampled evaluation is not a full-length export or a manual
+playback test. Original files/indexes were not used for writes.
+The copied script and both videos were compared against their originals after
+the test; all were unchanged. Disposable copies and the duplicate staging bundle
+were removed, while the active runtime and rollback artifacts were preserved.
+
+The regular desktop executable is build/VirtualDubQt; close and restart it before
+testing because an already running process retains its old loaded libraries.
+Rollback artifacts are preserved together:
+
+  build/VirtualDubQt.before-platform-library-fix-20261006
+  dist/ffmpeg-runtime-locked.before-platform-fix-20261006
+
+The older pre-bundle binary backup also remains unchanged. QSV/VAAPI hardware,
+physical capture/audio, a new ASan build, release automation and redistribution
+compliance were not verified or completed by this fix. No commit/push or public
+package replacement was performed.
+
+AviSynth Prefetch and repeat-load performance repair (2026-10-15)
+---------------------------------------------------------------
+
+Three independent dependency problems were isolated with direct AviSynth and
+native VDQtVideoDecoder probes, not inferred from app responsiveness alone:
+
+1. Unordered Prefetch requests repeatedly sought L-SMASH's single decoder back
+   through the same GOP. Serialization prevented simultaneous calls, not
+   backward request order. A 120-frame sequential consumer produced 39 source
+   seeks and 2226 decode-helper steps, versus one seek/126 steps without
+   Prefetch. The patched source retains a bounded, byte-accounted frame window
+   and frame zero, fills short gaps forward, and rebases real seeks.
+2. ResampleAudio's MT_SERIALIZED mode held its guard across the entire upstream
+   video graph. An audio-only mutex now protects resampler/converter state;
+   video forwarding remains parallel. Interpolation tables initialize once and
+   overlapping retained samples use memmove.
+3. Linux's available-memory query counted only completely unused RAM, excluding
+   reclaimable disk cache. Reopening reduced the allowed video cache from
+   2128 MiB to 626-789 MiB despite about 20 GiB available. CPU work rose from
+   about 20 to 44-65 CPU-seconds per cycle as intermediate frames were repeatedly
+   recomputed. MemAvailable-based sizing, a validated fallback and saturating
+   reserve subtraction correct this without raising the default 4 GiB maximum.
+
+Source pins, patches, build settings and optional dependency regression commands
+are in docs/patches/README.md. L-SMASH retains the previous audio-only-index crash
+fix. Its existing patch file's incorrect hunk line count was also corrected;
+all four dependency patches pass git apply --check against clean pinned sources.
+No app source code, user scripts, autoload helpers, nnedi3cl or FFmpeg bundle
+is changed by this repair. AviSynth/L-SMASH remain separately installed software.
+
+Validation with the final candidate pair:
+
+- Six direct resampler concurrency cases pass: float/S16 rate conversion,
+  downsampling, no-rate-change and directly owned format conversion. Four audio
+  callers remain serialized while eight video callers overlap; PCM matches a
+  reference exactly. Closely spaced audio windows exercise overlapping copies.
+- Fourteen generated-media dependency cases pass, each with 128 requests:
+  H.264/B-frames, FFV1 10/16-bit, alpha, RGB, packed RGB and grayscale; direct
+  rendering, frame-rate conversion, forward/backward/random seeks, frame zero,
+  retained-frame ownership, disabled/small/undersized cache budgets. Visible
+  pixels, source properties and audio samples match the serial reference.
+- The Linux memory-helper regression passes normally and under ASan/UBSan
+  (leak detection off), including malformed/overflowing/missing proc fields,
+  valid zero availability, low-memory reserve subtraction and small requests.
+- The real 1920x1440/25 fps VP9 source with RemoveDirtSMC(50), Deblock,
+  ResampleAudio(48000) AT THE END and Prefetch(12) completed 3600 frames through
+  the native app decoder: 48.40 warm fps, p95 49.84 ms, maximum warm-frame wait
+  98.73 ms, first-frame 808 ms, peak RSS about 1735 MiB. The serial reference
+  measured about 16 fps. These are fixture observations, not universal targets.
+- Twelve alternating real MP4/filtered-AVS load cycles kept the cache allowance
+  at 4096 MiB. Per-cycle AVS decoding stayed about 1.55-1.89 seconds rather than
+  climbing to 4-6 seconds. All decoder workers returned to a one-thread process
+  baseline after close. Peak RSS plateaued around 2.2 GiB; peak RSS is not live
+  retained memory and these observations do not prove absence of every leak.
+- Full visible-frame SHA-256 hashes for 120 real filtered frames and six PCM
+  windows match the original installed serial implementation exactly.
+- The normal desktop executable exported 96 real filtered frames to ProRes/SQ
+  with 48 kHz stereo AAC; bundled ffprobe confirmed codecs and frame count.
+  Native raw/FFV1 exports in Full/Fast modes and bundled FFmpeg/ffprobe AVS
+  video/audio evaluation also pass with the candidate dependencies.
+- Final headless Release CTest: 202/202 non-hardware tests pass (64.26 seconds):
+
+    QT_QPA_PLATFORM=offscreen VD_DISABLE_AUDIO_OUTPUT=1 \
+      LD_LIBRARY_PATH=<candidate-library-directory> \
+      VDQT_AVISYNTH_TEST_PLUGIN=<candidate-L-SMASH-plugin> \
+      ctest --test-dir build-bundled-checks --output-on-failure --parallel 2 -LE hardware
+
+The initial suite omitted QT_QPA_PLATFORM for one display test, which could not
+connect to the desktop from the sandbox. It passes headlessly; both subsequent
+full suites passed. Earlier intermittent twelve-worker stalls were retained in
+the investigation until the shrinking-memory-budget cause was reproduced and
+fixed; the successful final tests include that third correction.
+
+The dependency replacements require an application restart, not an application
+rebuild. Existing running applications/exports were not terminated. Original
+libraries and rollback instructions are saved together before installation.
+Physical audio output, interactive GUI playback, hardware decoding and arbitrary
+third-party heavy filter chains were not exhaustively tested. Sanitizer coverage
+here is limited to the memory helper, not a rebuilt full framework/application.
+No commit, push or public release is part of this repair.
+
 MPEG-2 bottom-band decoding repair (2026-10-23)
 ---------------------------------------------
 
@@ -1722,3 +1992,26 @@ use the correction; running editor/export processes were not stopped. Original
 media, user configuration, plugins and bundled libraries were not modified.
 Physical audio/video output and interactive playback were not manually tested.
 No commit, push or public package update was performed.
+
+0.1.3 release preparation (2026-11-16)
+------------------------------------
+
+The full existing application and private-runtime changes are included in the
+release preparation, along with the retained dependency patches/tests. Script
+frameworks remain separate installations, including the mandatory AviSynth core.
+Packaging now targets Ubuntu 24.04 DEB, Fedora 43 RPM and an Ubuntu-built AppImage
+with the same private FFmpeg configuration. A matching SDK avoids requiring app
+source builders to compile FFmpeg. Notices and matching dependency sources are
+collected by the Ubuntu builder; no framework is added to the package payloads.
+
+Local Release validation: 204/204 non-hardware CTest cases pass (55.05 seconds),
+including the new release-packaging helper contracts. The actual 0.1.3 candidate
+passes generated FFV1/native-AviSynth raw/encoded export checks in Full Processing
+and Fast Recompress, with an empty application PATH. GitHub workflow linting and
+all embedded shell-block syntax checks pass. The retained Deblock plugin source
+also passes a C++17 syntax check against the installed AviSynth SDK.
+
+These local checks do not substitute for distro package installation/runtime
+checks. The release workflow must build and validate all packages independently
+before a version tag can publish them. Physical display/audio/capture hardware
+and arbitrary third-party plugin chains are not claimed tested by this release.

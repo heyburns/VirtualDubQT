@@ -3,6 +3,7 @@
 // namespace helpers build subprocess pipelines and transactional output files;
 // the two public methods select and drive the appropriate path.
 #include "VDQtVideoExporter.h"
+#include "VDQtMediaRuntime.h"
 #include "VDQtVideoAspect.h"
 #include "VDQtTemporaryStorage.h"
 #include "VDQtVideoExportStorage.h"
@@ -1462,11 +1463,11 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         }
         return false;
     }
-    if (QStandardPaths::findExecutable("ffmpeg").isEmpty()) {
-        mLastError = QStringLiteral("The ffmpeg executable was not found in PATH.");
+    if (!QFileInfo(VDQtMediaRuntime::ffmpeg()).isExecutable()) {
+        mLastError = QStringLiteral("The bundled ffmpeg executable is missing or unusable: %1").arg(VDQtMediaRuntime::ffmpeg());
         if (parentWidget) {
             QMessageBox::critical(parentWidget, "FFmpeg Not Available",
-                                  "The ffmpeg executable was not found in PATH.");
+                                  "The bundled ffmpeg executable is missing or unusable.");
         }
         return false;
     }
@@ -2340,7 +2341,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         // QProcess connects the producer's stdout directly to the encoder's
         // stdin, so planar frames never accumulate in application memory.
         videoDecoderProcess.setStandardOutputProcess(&ffmpeg);
-        ffmpeg.start("ffmpeg", encoderArgs);
+        ffmpeg.start(VDQtMediaRuntime::ffmpeg(), encoderArgs);
         if (!ffmpeg.waitForStarted(3000)) {
             mLastError = QStringLiteral("The FFmpeg encoder process could not be started: %1")
                 .arg(ffmpeg.errorString());
@@ -2350,7 +2351,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                                       "The FFmpeg encoder process could not be started.");
             return false;
         }
-        videoDecoderProcess.start("ffmpeg", decoderArgs);
+        videoDecoderProcess.start(VDQtMediaRuntime::ffmpeg(), decoderArgs);
         if (!videoDecoderProcess.waitForStarted(3000)) {
             mLastError = QStringLiteral("The native-format FFmpeg decoder process could not be started: %1")
                 .arg(videoDecoderProcess.errorString());
@@ -2537,7 +2538,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             return false;
         }
 
-        ffmpeg.start("ffmpeg", args);
+        ffmpeg.start(VDQtMediaRuntime::ffmpeg(), args);
         if (!ffmpeg.waitForStarted(3000)) {
             mLastError = QStringLiteral("The FFmpeg direct-copy process could not be started: %1")
                 .arg(ffmpeg.errorString());
@@ -2838,7 +2839,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     QByteArray diagnostics;
     bool cancelled = false;
     bool writeFailed = false;
-    ffmpeg.start("ffmpeg", args);
+    ffmpeg.start(VDQtMediaRuntime::ffmpeg(), args);
     if (!ffmpeg.waitForStarted(3000)) {
         mLastError = QStringLiteral("The FFmpeg video encoder could not be started: %1")
             .arg(ffmpeg.errorString());
@@ -3096,7 +3097,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             progress.setLabelText(QStringLiteral(
                 "Two-pass encoding: analyzing video (pass 1 of 2)..."));
             progress.setValue(97);
-            passProcess.start(QStringLiteral("ffmpeg"), firstPassArgs);
+            passProcess.start(VDQtMediaRuntime::ffmpeg(), firstPassArgs);
             processOk = passProcess.waitForStarted(3000)
                 && waitForProcess(passProcess, progress, diagnostics, cancelled);
         }
@@ -3104,7 +3105,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
             progress.setLabelText(QStringLiteral(
                 "Two-pass encoding: creating final output (pass 2 of 2)..."));
             progress.setValue(98);
-            passProcess.start(QStringLiteral("ffmpeg"), secondPassArgs);
+            passProcess.start(VDQtMediaRuntime::ffmpeg(), secondPassArgs);
             processOk = passProcess.waitForStarted(3000)
                 && waitForProcess(passProcess, progress, diagnostics, cancelled);
         }

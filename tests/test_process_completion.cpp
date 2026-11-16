@@ -7,6 +7,7 @@
 #include "VirtualDub/VDQtAudioExport.h"
 #include "VirtualDub/VDQtAudioPlayer.h"
 #include "VirtualDub/VDQtWaveform.h"
+#include "support/VDQtBundledToolFixture.h"
 
 #include <QCoreApplication>
 #include <QDataStream>
@@ -302,9 +303,8 @@ int main(int argc, char **argv) {
     const QString source = QDir(root.path()).filePath("source.wav");
     if (!QDir().mkpath(binaryDirectory) || !writePcm(source, fixtureFrames)
         || !QFile::link(QCoreApplication::applicationFilePath(), QDir(binaryDirectory).filePath("ffmpeg"))) return 1;
-    Environment pathEnvironment("PATH");
+    VDQtBundledToolFixture bundledEncoder(binaryDirectory.toUtf8());
     Environment rootEnvironment("VDQT_COMPLETION_ROOT");
-    pathEnvironment.set(binaryDirectory.toUtf8() + ':' + qgetenv("PATH"));
     rootEnvironment.set(root.path().toUtf8());
     for (Path path : {Path::AudioExport, Path::Transcode, Path::Concat}) {
         passed &= completionCase(root.path(), source, path, false);

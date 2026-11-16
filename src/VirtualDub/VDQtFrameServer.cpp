@@ -2,6 +2,7 @@
 // raw video to an ffmpeg child process, and publishes the muxed NUT stream at the
 // requested named pipe. Cancellation closes the pipeline and removes the FIFO.
 #include "VDQtFrameServer.h"
+#include "VDQtMediaRuntime.h"
 #include "VDQtFilterFrameContext.h"
 #include "VDQtTimingMath.h"
 #include "VDQtVideoAspect.h"
@@ -98,8 +99,8 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
         if (errorMessage) *errorMessage = QStringLiteral("The frame-server rate settings are invalid.");
         return false;
     }
-    if (QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
-        if (errorMessage) *errorMessage = QStringLiteral("The ffmpeg executable was not found in PATH.");
+    if (!QFileInfo(VDQtMediaRuntime::ffmpeg()).isExecutable()) {
+        if (errorMessage) *errorMessage = QStringLiteral("The bundled ffmpeg executable is missing or unusable: %1").arg(VDQtMediaRuntime::ffmpeg());
         return false;
     }
     const QFileInfo pipeInfo(config.pipePath);
@@ -263,7 +264,7 @@ void VDQtFrameServer::run(Config config) {
         arguments << QStringLiteral("-f") << QStringLiteral("nut")
                   << QStringLiteral("-flush_packets") << QStringLiteral("1")
                   << QStringLiteral("-y") << config.pipePath;
-        ffmpeg.setProgram(QStringLiteral("ffmpeg"));
+        ffmpeg.setProgram(VDQtMediaRuntime::ffmpeg());
         ffmpeg.setArguments(arguments);
         ffmpeg.start(QIODevice::ReadWrite);
         if (!ffmpeg.waitForStarted(5000)) error = ffmpeg.errorString();

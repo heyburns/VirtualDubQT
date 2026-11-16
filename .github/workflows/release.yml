@@ -1,318 +1,262 @@
 name: Publish Linux release
 
-# Releases are tag-driven. The tag, CMake project version, and release-notes
-# filename must agree before any package is built.
+# Main builds validate packages without publishing. Only a version tag publishes
+# after all three packages pass independent clean-runtime checks.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "CMakeLists.txt"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BASH_ENV: ${{ github.workspace }}/packaging/release-shell.sh
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  AVISYNTH_VERSION: "3.7.5"
-  FFMPEG_VERSION: "6.1.6"
-
 jobs:
-  # Ubuntu supplies the portable AppImage build environment as well as the
-  # native .deb packaging tools. AviSynth+ is built first because distributions
-  # do not consistently provide the required development/runtime version.
   deb-and-appimage:
     name: AppImage and Ubuntu 24.04 DEB
     runs-on: ubuntu-24.04
-
+    timeout-minutes: 90
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Verify release version
-        shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          grep -Fq "project(VirtualDubQt VERSION ${version} " CMakeLists.txt
-          test -f "packaging/release-notes-${GITHUB_REF_NAME}.md"
+          version=$(sed -n 's/^project(VirtualDubQt VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            test "${GITHUB_REF_NAME}" = "v${version}"
+          fi
+          test -f "packaging/release-notes-v${version}.md"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
 
-      - name: Install build tools and libraries
+      - name: Install build and packaging dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake curl desktop-file-utils dpkg-dev ffmpeg file git \
-            libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
-            libfuse2t64 libswresample-dev libswscale-dev ninja-build pkg-config \
-            python3 qt6-base-dev qt6-multimedia-dev nasm \
+            build-essential cmake curl desktop-file-utils dpkg-dev file git \
+            ninja-build pkg-config python3 python3-dev python3-pip nasm \
+            autoconf automake libtool patchelf qt6-base-dev qt6-multimedia-dev \
             libaom-dev libmp3lame-dev libopus-dev libsvtav1enc-dev \
-            libvorbis-dev libvpx-dev libx264-dev libx265-dev
+            libvorbis-dev libvpx-dev libx264-dev libx265-dev \
+            libdav1d-dev librav1e-dev libxvidcore-dev libtheora-dev libwebp-dev \
+            libopenjp2-7-dev libjxl-dev libcodec2-dev libgsm1-dev libtwolame-dev \
+            libshine-dev libspeex-dev libsnappy-dev libzimg-dev libasound2-dev \
+            libva-dev libvpl-dev libdrm-dev libffmpeg-nvenc-dev libgnutls28-dev \
+            zlib1g-dev libbz2-dev liblzma-dev
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
 
-      - name: Build AviSynth+ runtime
-        run: |
-          git clone --branch "v${AVISYNTH_VERSION}" --depth 1 \
-            https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
-          cmake -S /tmp/AviSynthPlus -B /tmp/AviSynthPlus/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DCMAKE_INSTALL_LIBDIR=lib \
-            -DENABLE_PLUGINS=OFF
-          cmake --build /tmp/AviSynthPlus/build --parallel
-          sudo cmake --install /tmp/AviSynthPlus/build
-          sudo ldconfig
+      - name: Reuse matched runtime and its corresponding sources
+        id: media-cache
+        uses: actions/cache@v4
+        with:
+          path: .release-media
+          key: ubuntu24-release-media-v1-${{ hashFiles('packaging/ffmpeg-runtime.json', 'packaging/build-ffmpeg-runtime.sh', 'packaging/assemble-ffmpeg-runtime.py', 'packaging/ffmpeg_runtime_policy.py', 'packaging/ffmpeg-runtime-launcher', 'packaging/ffmpeg-vapoursynth-optional.patch', 'packaging/collect-release-sources.py') }}
 
-      - name: Build VirtualDubQT
+      - name: Build private FFmpeg and collect exact dependency sources
+        if: steps.media-cache.outputs.cache-hit != 'true'
         run: |
-          cmake -S . -B build-release -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DBUILD_TESTING=OFF
-          cmake --build build-release --parallel
+          bash packaging/build-ffmpeg-runtime.sh --jobs 2 \
+            --work-dir "${RUNNER_TEMP}/media-sources" --prefix "${RUNNER_TEMP}/media-sdk"
+          mkdir -p .release-media/external-avisynth/lib .release-media/external-avisynth/include
+          cp -a "${RUNNER_TEMP}/media-sdk/lib/"libavisynth.so* .release-media/external-avisynth/lib/
+          cp -a "${RUNNER_TEMP}/media-sdk/include/avisynth" .release-media/external-avisynth/include/
+          python3 packaging/assemble-ffmpeg-runtime.py --prefix "${RUNNER_TEMP}/media-sdk" \
+            --output "${GITHUB_WORKSPACE}/.release-media/runtime"
+          python3 packaging/collect-release-sources.py --payload .release-media/runtime \
+            --notices .release-media/runtime/licenses --sources .release-media/sources \
+            --ffmpeg-source "${RUNNER_TEMP}/media-sources/ffmpeg" \
+            --ffmpeg-build "${RUNNER_TEMP}/media-sources/ffmpeg-build"
+
+      - name: Validate private runtime and configure application
+        run: |
+          echo "LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/.release-media/external-avisynth/lib" >> "${GITHUB_ENV}"
+          python3 packaging/verify-ffmpeg-runtime.py --runtime .release-media/runtime
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_TESTING=ON \
+            -DVDQT_FFMPEG_BUNDLE="${GITHUB_WORKSPACE}/.release-media/runtime" \
+            -DAVISYNTH_INCLUDE_DIR="${GITHUB_WORKSPACE}/.release-media/external-avisynth/include" \
+            -DAVISYNTH_LIBRARY="${GITHUB_WORKSPACE}/.release-media/external-avisynth/lib/libavisynth.so"
+          cmake --build build-release --parallel 2
           desktop-file-validate packaging/virtualdubqt.desktop
 
-      - name: Build and validate DEB
+      - name: Run maintained regressions without physical hardware
+        env:
+          QT_QPA_PLATFORM: offscreen
+          VD_DISABLE_AUDIO_OUTPUT: "1"
+        run: ctest --test-dir build-release --output-on-failure --parallel 2 -LE hardware
+
+      - name: Build Ubuntu DEB
+        # Explicit target-distro dependencies avoid requesting system FFmpeg or
+        # inventing a distro package for the separately installed AviSynth SDK.
         run: |
           mkdir -p dist
-          cpack -G DEB -B dist --config build-release/CPackConfig.cmake
-          deb_file="$(find dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "${deb_file}"
-          dpkg-deb --info "${deb_file}"
-          dpkg-deb --contents "${deb_file}"
-          # Shared-library dependencies do not imply ffmpeg/ffprobe commands.
-          dpkg-deb --field "${deb_file}" Depends | grep -Eq '(^|, )ffmpeg( |,|$)'
-          # A clean runtime has no build-tree RPATH or preinstalled Qt/AviSynth.
-          # Install ffmpeg only through the application's package dependency.
-          docker run --rm \
-            --volume "${GITHUB_WORKSPACE}:/repo:ro" ubuntu:24.04 bash -euc '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              packages=(/repo/dist/*.deb)
-              test "${#packages[@]}" -eq 1
-              apt-get install --no-install-recommends -y python3 "${packages[0]}"
-              python3 /repo/packaging/smoke-runtime.py \
-                --application /usr/bin/VirtualDubQt --runtime-path /usr/bin:/bin
-            '
+          cpack -G DEB -B dist --config build-release/CPackConfig.cmake \
+            -D CPACK_DEBIAN_PACKAGE_SHLIBDEPS=OFF \
+            -D "CPACK_DEBIAN_PACKAGE_DEPENDS=libc6 (>= 2.38), libstdc++6 (>= 13), libgcc-s1, libqt6core6t64, libqt6gui6t64, libqt6widgets6t64, libqt6multimedia6, libqt6dbus6t64, libqt6concurrent6t64, libasound2t64, libva2, libva-drm2, libdrm2, libcairo2, libgl1, libegl1, ca-certificates"
+          dpkg-deb --info dist/*.deb
 
-      - name: Build AviSynth-enabled FFmpeg tools for AppImage
+      - name: Validate DEB in a clean Ubuntu runtime
         run: |
-          git clone --branch "n${FFMPEG_VERSION}" --depth 1 \
-            https://github.com/FFmpeg/FFmpeg.git /tmp/FFmpeg
-          cd /tmp/FFmpeg
-          ./configure --prefix="${RUNNER_TEMP}/ffmpeg" \
-            --disable-doc --disable-debug --disable-shared --enable-static \
-            --enable-gpl --enable-avisynth --enable-libx264 --enable-libx265 \
-            --enable-libvpx --enable-libmp3lame --enable-libopus \
-            --enable-libvorbis --enable-libaom --enable-libsvtav1
-          make -j2
-          make install
+          docker run --rm --volume "${GITHUB_WORKSPACE}:/repo:ro" ubuntu:24.04 bash -euc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install --no-install-recommends -y python3 /repo/dist/*.deb
+            export LD_LIBRARY_PATH=/repo/.release-media/external-avisynth/lib
+            /usr/bin/VirtualDubQt --runtime-info
+            python3 /repo/packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \
+              --ffmpeg /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffmpeg \
+              --ffprobe /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
+              --runtime-ffprobe /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
+              --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
+          '
 
-      - name: Build and validate AppImage
-        shell: bash
+      - name: Build AppImage without bundling script frameworks
         run: |
-          linuxdeploy_version="1-alpha-20250213-2"
-          qt_plugin_version="1-alpha-20250213-1"
-          curl --fail --location --retry 3 \
-            --output linuxdeploy-x86_64.AppImage \
-            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${linuxdeploy_version}/linuxdeploy-x86_64.AppImage"
-          curl --fail --location --retry 3 \
-            --output linuxdeploy-plugin-qt-x86_64.AppImage \
-            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/${qt_plugin_version}/linuxdeploy-plugin-qt-x86_64.AppImage"
-          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+          bash packaging/build-appimage.sh build-release .release-media/runtime .release-media/sources \
+            "${GITHUB_WORKSPACE}/dist/VirtualDubQT-${VERSION}-x86_64.AppImage"
+          tar -cJf "dist/VirtualDubQT-${VERSION}-third-party-sources.tar.xz" -C .release-media/sources .
+          tar -cJf "dist/VirtualDubQT-${VERSION}-ffmpeg-sdk-x86_64.tar.xz" -C .release-media/runtime .
 
-          export QMAKE="$(command -v qmake6)"
-          export EXTRA_PLATFORM_PLUGINS=libqoffscreen.so
-          export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
-          ./linuxdeploy-x86_64.AppImage \
-            --appdir AppDir \
-            --executable build-release/VirtualDubQt \
-            --executable "${RUNNER_TEMP}/ffmpeg/bin/ffmpeg" \
-            --executable "${RUNNER_TEMP}/ffmpeg/bin/ffprobe" \
-            --desktop-file packaging/virtualdubqt.desktop \
-            --icon-file packaging/virtualdubqt.png \
-            --custom-apprun packaging/AppRun \
-            --plugin qt
-          install -Dm644 LICENSE AppDir/usr/share/licenses/virtualdubqt/LICENSE
-          install -Dm644 /usr/share/doc/ffmpeg/copyright \
-            AppDir/usr/share/licenses/ffmpeg/copyright
-          install -Dm644 /tmp/FFmpeg/COPYING.GPLv2 \
-            AppDir/usr/share/licenses/ffmpeg/COPYING.GPLv2
-          "${RUNNER_TEMP}/ffmpeg/bin/ffmpeg" -version \
-            > AppDir/usr/share/licenses/ffmpeg/build-configuration.txt
-          test -x AppDir/usr/bin/ffmpeg
-          test -x AppDir/usr/bin/ffprobe
-          # FFmpeg loads AviSynth dynamically by its unversioned library name.
-          avisynth_soname="$(basename "$(readlink /usr/local/lib/libavisynth.so)")"
-          test -f "AppDir/usr/lib/${avisynth_soname}"
-          ln -s "${avisynth_soname}" AppDir/usr/lib/libavisynth.so
+      - name: Validate AppImage in a clean Ubuntu runtime
+        run: |
+          docker run --rm --volume "${GITHUB_WORKSPACE}:/repo:ro" --env VERSION ubuntu:24.04 bash -euc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install --no-install-recommends -y python3 libgl1 libegl1 libopengl0 \
+              libdbus-1-3 libfontconfig1 libharfbuzz0b libfribidi0 libasound2t64 \
+              libva2 libva-drm2 libdrm2 libcairo2
+            test ! -e /usr/bin/ffmpeg
+            export LD_LIBRARY_PATH=/repo/.release-media/external-avisynth/lib
+            test_root=$(mktemp -d)
+            cd "$test_root"
+            "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" --appimage-extract > /dev/null
+            media="$test_root/squashfs-root/usr/lib/virtualdubqt/ffmpeg-runtime/bin"
+            python3 /repo/packaging/smoke-runtime.py \
+              --application "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" \
+              --ffmpeg "$media/ffmpeg" --ffprobe "$media/ffprobe" --runtime-ffprobe "$media/ffprobe" \
+              --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
+          '
 
-          # Our launcher sources these hooks itself. Leaving the reserved name
-          # makes linuxdeploy wrap it in a stub that needs host shell utilities.
-          mv AppDir/apprun-hooks AppDir/vdqt-apprun-hooks
-          rm -f AppDir/AppRun.wrapped
-
-          version="${GITHUB_REF_NAME#v}"
-          export VERSION="${version}"
-          export OUTPUT="${GITHUB_WORKSPACE}/dist/VirtualDubQT-${version}-x86_64.AppImage"
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --custom-apprun packaging/AppRun --output appimage
-          cmp packaging/AppRun AppDir/AppRun
-          test -x "${OUTPUT}"
-          # No host FFmpeg, Qt or AviSynth packages in this runtime. Desktop
-          # platform basics are retained; hardware/display/audio are not tested.
-          docker run --rm \
-            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
-            --env "PACKAGE_NAME=$(basename "${OUTPUT}")" \
-            ubuntu:24.04 bash -euc '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --no-install-recommends -y \
-                python3 libgl1 libegl1 libopengl0 libdbus-1-3 \
-                libfontconfig1 libharfbuzz0b libfribidi0 libasound2t64
-              test ! -e /usr/bin/ffmpeg
-              test ! -e /usr/bin/ffprobe
-              test_root="$(mktemp -d)"
-              cd "${test_root}"
-              "/repo/dist/${PACKAGE_NAME}" --appimage-extract > /dev/null
-              # Fixture generation/validation deliberately uses bundled tools.
-              # The application itself still starts with an empty host PATH.
-              python3 /repo/packaging/smoke-runtime.py \
-                --application "/repo/dist/${PACKAGE_NAME}" \
-                --ffmpeg "${test_root}/squashfs-root/usr/bin/ffmpeg" \
-                --ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
-                --runtime-ffprobe "${test_root}/squashfs-root/usr/bin/ffprobe" \
-                --runtime-library-path "${test_root}/squashfs-root/usr/lib" \
-                --check-fast-recompress
-            '
-
-      - name: Upload Ubuntu packages
-        uses: actions/upload-artifact@v4
+      - name: Archive exact SDK and external test-only AviSynth fixture
+        run: tar -cJf media-sdk.tar.xz -C .release-media runtime external-avisynth
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-sdk
+          path: media-sdk.tar.xz
+      - uses: actions/upload-artifact@v4
         with:
           name: ubuntu-packages
           path: |
             dist/*.AppImage
             dist/*.deb
+            dist/*.tar.xz
           if-no-files-found: error
+      - name: Retain regression diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-test-diagnostics
+          path: build-release/Testing/Temporary/
 
   rpm:
-    # Run Fedora packaging inside its own container so CPack resolves RPM
-    # dependencies against Fedora library/package names rather than Ubuntu's.
     name: Fedora 43 RPM
+    needs: deb-and-appimage
     runs-on: ubuntu-24.04
     container: fedora:43
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Verify release version
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: media-sdk
+      - name: Install compiler and Qt
+        run: dnf install -y cmake file gcc-c++ ninja-build qt6-qtbase-devel qt6-qtmultimedia-devel python3 rpm-build xz
+      - name: Build RPM against the same private backend
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          grep -Fq "project(VirtualDubQt VERSION ${version} " CMakeLists.txt
-
-      - name: Install build tools and libraries
-        run: |
-          dnf install -y \
-            cmake file findutils gcc-c++ git ninja-build pkgconf-pkg-config \
-            qt6-qtbase-devel qt6-qtmultimedia-devel ffmpeg-free ffmpeg-free-devel \
-            python3 rpm-build
-
-      - name: Build AviSynth+ runtime
-        run: |
-          git clone --branch "v${AVISYNTH_VERSION}" --depth 1 \
-            https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
-          cmake -S /tmp/AviSynthPlus -B /tmp/AviSynthPlus/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DCMAKE_INSTALL_LIBDIR=lib64 \
-            -DENABLE_PLUGINS=OFF
-          cmake --build /tmp/AviSynthPlus/build --parallel
-          cmake --install /tmp/AviSynthPlus/build
-          ldconfig
-
-      - name: Build VirtualDubQT and RPM
-        run: |
-          cmake -S . -B build-release -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DBUILD_TESTING=OFF
-          cmake --build build-release --parallel
-          mkdir -p dist
-          cpack -G RPM -B dist --config build-release/CPackConfig.cmake
-
-      - name: Validate RPM
-        run: |
-          rpm_file="$(find dist -maxdepth 1 -type f -name '*.rpm' -print -quit)"
-          test -n "${rpm_file}"
-          rpm -qpi "${rpm_file}"
-          rpm -qpl "${rpm_file}"
-          rpm -qpR "${rpm_file}"
-          rpm -qpR "${rpm_file}" | grep -Fx /usr/bin/ffmpeg
-          rpm -qpR "${rpm_file}" | grep -Fx /usr/bin/ffprobe
-
-      - name: Upload RPM for clean-runtime validation
-        uses: actions/upload-artifact@v4
+          mkdir media dist
+          tar -xJf media-sdk.tar.xz -C media
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DBUILD_TESTING=OFF \
+            -DVDQT_FFMPEG_BUNDLE="$PWD/media/runtime" \
+            -DAVISYNTH_INCLUDE_DIR="$PWD/media/external-avisynth/include" \
+            -DAVISYNTH_LIBRARY="$PWD/media/external-avisynth/lib/libavisynth.so"
+          cmake --build build-release --parallel 2
+          cpack -G RPM -B dist --config build-release/CPackConfig.cmake \
+            -D CPACK_RPM_PACKAGE_AUTOREQPROV=OFF \
+            -D "CPACK_RPM_PACKAGE_REQUIRES=glibc >= 2.38, libstdc++, libgcc, qt6-qtbase >= 6.10, qt6-qtmultimedia >= 6.10, alsa-lib, libva, libdrm, cairo, mesa-libGL, mesa-libEGL, ca-certificates"
+          rpm -qpi dist/*.rpm
+          rpm -qpR dist/*.rpm
+      - uses: actions/upload-artifact@v4
         with:
           name: fedora-package
           path: dist/*.rpm
           if-no-files-found: error
 
   rpm-runtime:
-    # This separate container has none of the compiler/development packages or
-    # /usr/local runtime used to build the RPM. Native dependencies must suffice.
-    name: Clean Fedora 43 RPM runtime
+    name: Clean Fedora 43 runtime
     needs: rpm
     runs-on: ubuntu-24.04
     container: fedora:43
     steps:
-      - name: Check out smoke helper
-        uses: actions/checkout@v4
-
-      - name: Download packaged application
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           name: fedora-package
           path: dist
-
-      - name: Install only runtime dependencies and test harness
+      - uses: actions/download-artifact@v4
+        with:
+          name: media-sdk
+      - name: Install only runtime dependencies and the independent framework fixture
         shell: bash
         run: |
-          packages=(dist/*.rpm)
-          test "${#packages[@]}" -eq 1
-          dnf install -y python3 "${packages[0]}"
-          python3 packaging/smoke-runtime.py \
-            --application /usr/bin/VirtualDubQt --runtime-path /usr/bin:/bin
+          mkdir media
+          tar -xJf media-sdk.tar.xz -C media
+          dnf install -y python3 dist/*.rpm
+          export LD_LIBRARY_PATH="$PWD/media/external-avisynth/lib"
+          /usr/bin/VirtualDubQt --runtime-info
+          python3 packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \
+            --ffmpeg /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffmpeg \
+            --ffprobe /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
+            --runtime-ffprobe /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
+            --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
 
   publish:
-    # Publishing waits for both platform jobs, combines their artifacts, and
-    # attaches one checksum manifest to the GitHub release created from the tag.
     name: Publish GitHub release
-    needs:
-      - deb-and-appimage
-      - rpm-runtime
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [deb-and-appimage, rpm-runtime]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-
     steps:
-      - name: Check out release notes
-        uses: actions/checkout@v4
-
-      - name: Download packages
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
+          name: ubuntu-packages
           path: dist
-          merge-multiple: true
-
-      - name: Create checksums
-        working-directory: dist
-        run: sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
-
-      - name: Publish release
+      - uses: actions/download-artifact@v4
+        with:
+          name: fedora-package
+          path: dist
+      - name: Checksum and publish only validated artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "VirtualDubQT ${GITHUB_REF_NAME}" \
-            --notes-file "packaging/release-notes-${GITHUB_REF_NAME}.md" \
-            --verify-tag
+          cd dist
+          sha256sum *.AppImage *.deb *.rpm *.tar.xz > SHA256SUMS
+          cd ..
+          gh release create "${GITHUB_REF_NAME}" dist/* --title "VirtualDubQT ${GITHUB_REF_NAME}" \
+            --notes-file "packaging/release-notes-${GITHUB_REF_NAME}.md" --verify-tag

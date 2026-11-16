@@ -2,6 +2,7 @@
 // cancellation result. All paths/media/encoder substitutions belong to this test.
 #include <QString>
 #include "VirtualDub/VDQtVideoExporter.h"
+#include "support/VDQtBundledToolFixture.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -25,14 +26,6 @@ bool writeFile(const QString& path, const QByteArray& bytes) {
 QByteArray readFile(const QString& path) {
     QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
 }
-class PathScope final {
-public:
-    explicit PathScope(const QByteArray& path)
-        : mOriginal(qgetenv("PATH")), mPresent(qEnvironmentVariableIsSet("PATH")) { qputenv("PATH", path); }
-    ~PathScope() { if (mPresent) qputenv("PATH", mOriginal); else qunsetenv("PATH"); }
-private:
-    QByteArray mOriginal; bool mPresent;
-};
 bool fixture(const QString& ffmpeg, const QString& path) {
     QProcess process;
     process.start(ffmpeg, {"-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
@@ -120,7 +113,7 @@ int main(int argc, char **argv) {
     if (!QFile::link(QCoreApplication::applicationFilePath(), fakeDirectory + "/ffmpeg")) return 5;
     const QByteArray marker("EXISTING_OUTPUT_MUST_SURVIVE");
     {
-        PathScope isolated(fakeDirectory.toUtf8());
+        VDQtBundledToolFixture isolated(fakeDirectory.toUtf8());
         for (int mode : {VideoMode_FullProcessing, VideoMode_NormalRecompress,
                          VideoMode_FastRecompress, VideoMode_DirectStreamCopy}) {
             options = base; options.videoMode = mode;
@@ -135,7 +128,7 @@ int main(int argc, char **argv) {
     if (!writeFile(brokenEncoder, "#!/no/such/vdqt-regression-interpreter\n")
         || !QFile::setPermissions(brokenEncoder, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner)) return 6;
     {
-        PathScope isolated(brokenDirectory.toUtf8());
+        VDQtBundledToolFixture isolated(brokenDirectory.toUtf8());
         for (int mode : {VideoMode_FullProcessing, VideoMode_NormalRecompress,
                          VideoMode_FastRecompress, VideoMode_DirectStreamCopy}) {
             options = base; options.videoMode = mode;
