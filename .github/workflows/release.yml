@@ -195,7 +195,7 @@ jobs:
             # Check the real window-system plugin even in this headless test.
             xcb=$(find "$test_root/squashfs-root" -name libqxcb.so -print -quit)
             test -n "$xcb"
-            if ldd "$xcb" | grep -q 'not found'; then ldd "$xcb"; exit 1; fi
+            if ldd "$xcb" | grep -q "not found"; then ldd "$xcb"; exit 1; fi
             media="$test_root/squashfs-root/usr/lib/virtualdubqt/ffmpeg-runtime/bin"
             python3 /repo/packaging/smoke-runtime.py \
               --application "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" \

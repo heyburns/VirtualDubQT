@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -59,6 +60,36 @@ class ReleasePackagingTests(unittest.TestCase):
         for name in ("build-appimage.sh", "build-ffmpeg-runtime.sh", "release-shell.sh", "AppRun", "ffmpeg-runtime-launcher"):
             with self.subTest(name=name):
                 subprocess.run(["bash", "-n", str(ROOT / "packaging" / name)], check=True)
+
+    def docker_commands(self):
+        lines = (ROOT / ".github/workflows/release.yml").read_text().splitlines()
+        commands = []
+        for index, line in enumerate(lines):
+            if not line.lstrip().startswith("docker run "):
+                continue
+            indent = len(line) - len(line.lstrip())
+            end = next(i for i in range(index + 1, len(lines)) if lines[i] == " " * indent + "'")
+            commands.append("\n".join(part[indent:] for part in lines[index:end + 1]))
+        self.assertGreaterEqual(len(commands), 2)
+        return commands
+
+    def check_docker_script(self, command):
+        words = shlex.split(command.replace("\\\n", ""))
+        shell = words.index("bash")
+        self.assertEqual(words[shell + 1], "-euc")
+        self.assertEqual(len(words[shell + 2:]), 1, "Nested quotes split the Docker script into multiple arguments")
+        subprocess.run(["bash", "-n"], input=words[shell + 2], text=True, check=True)
+
+    def test_embedded_clean_runtime_shells_parse(self):
+        for command in self.docker_commands():
+            self.check_docker_script(command)
+
+    def test_broken_nested_docker_quotes_are_detected(self):
+        command = self.docker_commands()[-1]
+        broken = command.replace('"not found"', "'not found'")
+        self.assertNotEqual(command, broken)
+        with self.assertRaises(AssertionError):
+            self.check_docker_script(broken)
 
     def test_failure_annotation_keeps_original_exit_status(self):
         with tempfile.TemporaryDirectory(prefix="vdqt-release-shell-") as directory:
