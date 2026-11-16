@@ -84,7 +84,7 @@ often already have them):
 
 ```bash
 sudo apt install libgl1 libegl1 libopengl0 libdbus-1-3 libfontconfig1 \
-    libharfbuzz0b libfribidi0 libasound2t64 libva2 libva-drm2 libdrm2 libcairo2 \
+    libharfbuzz0b libfribidi0 libasound2t64 libva2 libva-drm2 libdrm2 libcairo2 libsm6 libice6 \
     libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
     libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
 ```

@@ -139,7 +139,10 @@ own distro's Qt with the same private backend.
 
 The GitHub workflow builds packages on packaging-related pushes to main, without
 publishing them. A matching `v0.1.3` tag publishes only after the Ubuntu DEB,
-AppImage and Fedora RPM pass clean-runtime export tests. Those tests supply
+AppImage and Fedora RPM pass clean-runtime export tests. When the exact tagged
+commit already passed on main and its artifacts are still available, it promotes
+those identical tested files; otherwise it builds and validates fresh packages.
+Those tests supply
 AviSynth as an independent fixture, not as part of the packages.
 
 ## Common build problems

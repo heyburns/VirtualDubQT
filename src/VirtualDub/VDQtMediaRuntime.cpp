@@ -27,17 +27,18 @@ namespace {
 struct Library {
     const char *name;
     unsigned (*version)();
+    const char *(*configuration)();
     unsigned expectedVersion;
 };
 const Library libraries[] = {
-    {"avcodec", avcodec_version, LIBAVCODEC_VERSION_INT},
-    {"avformat", avformat_version, LIBAVFORMAT_VERSION_INT},
-    {"avutil", avutil_version, LIBAVUTIL_VERSION_INT},
-    {"avfilter", avfilter_version, LIBAVFILTER_VERSION_INT},
-    {"swscale", swscale_version, LIBSWSCALE_VERSION_INT},
-    {"swresample", swresample_version, LIBSWRESAMPLE_VERSION_INT},
-    {"avdevice", avdevice_version, LIBAVDEVICE_VERSION_INT},
-    {"postproc", postproc_version, LIBPOSTPROC_VERSION_INT}
+    {"avcodec", avcodec_version, avcodec_configuration, LIBAVCODEC_VERSION_INT},
+    {"avformat", avformat_version, avformat_configuration, LIBAVFORMAT_VERSION_INT},
+    {"avutil", avutil_version, avutil_configuration, LIBAVUTIL_VERSION_INT},
+    {"avfilter", avfilter_version, avfilter_configuration, LIBAVFILTER_VERSION_INT},
+    {"swscale", swscale_version, swscale_configuration, LIBSWSCALE_VERSION_INT},
+    {"swresample", swresample_version, swresample_configuration, LIBSWRESAMPLE_VERSION_INT},
+    {"avdevice", avdevice_version, avdevice_configuration, LIBAVDEVICE_VERSION_INT},
+    {"postproc", postproc_version, postproc_configuration, LIBPOSTPROC_VERSION_INT}
 };
 
 QString versionText(unsigned value) {
@@ -46,7 +47,13 @@ QString versionText(unsigned value) {
 
 QString libraryPath(const Library& library) {
     Dl_info location{};
-    if (!dladdr(reinterpret_cast<void *>(library.version), &location) || !location.dli_fname)
+    // An imported function address can be the executable's canonical PLT stub,
+    // not an address inside the provider DSO (notably on non-PIC Fedora builds).
+    // FFmpeg returns its configuration string from each library's own read-only
+    // storage. Locate that storage after the call has resolved the real library.
+    // Paths, versions and matching command configurations are still validated.
+    const char *configuration = library.configuration();
+    if (!configuration || !dladdr(configuration, &location) || !location.dli_fname)
         return {};
     return QFileInfo(QString::fromLocal8Bit(location.dli_fname)).canonicalFilePath();
 }

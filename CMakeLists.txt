@@ -269,6 +269,24 @@ if (BUILD_TESTING)
     vdqt_enable_diagnostics(media_runtime_tests)
     add_test(NAME media_runtime_tests COMMAND media_runtime_tests)
     set_tests_properties(media_runtime_tests PROPERTIES LABELS "packaging;runtime;contracts" TIMEOUT 20)
+    # Some toolchains use executable PLT entries as imported function addresses.
+    # Force that ELF layout in a tiny non-PIC object while keeping Qt code PIC.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
+            AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_library(canonical_plt_fixture OBJECT tests/support/VDQtCanonicalPlt.cpp)
+        set_target_properties(canonical_plt_fixture PROPERTIES AUTOMOC OFF POSITION_INDEPENDENT_CODE OFF)
+        target_compile_options(canonical_plt_fixture PRIVATE -fno-pic -fno-pie)
+        add_executable(media_runtime_plt_tests tests/test_media_runtime_plt.cpp
+            src/VirtualDub/VDQtMediaRuntime.cpp $<TARGET_OBJECTS:canonical_plt_fixture>)
+        target_include_directories(media_runtime_plt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_options(media_runtime_plt_tests PRIVATE -fPIC)
+        target_link_options(media_runtime_plt_tests PRIVATE -no-pie)
+        target_link_libraries(media_runtime_plt_tests PRIVATE Qt6::Core PkgConfig::FFMPEG)
+        vdqt_enable_diagnostics(media_runtime_plt_tests)
+        add_test(NAME media_runtime_plt_tests COMMAND media_runtime_plt_tests)
+        set_tests_properties(media_runtime_plt_tests PROPERTIES
+            LABELS "packaging;runtime;regression;contracts" TIMEOUT 20 SKIP_RETURN_CODE 77)
+    endif()
     add_executable(playback_clock_tests tests/test_playback_clock.cpp)
     target_include_directories(playback_clock_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     vdqt_enable_diagnostics(playback_clock_tests)

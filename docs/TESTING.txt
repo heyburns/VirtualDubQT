@@ -2015,3 +2015,16 @@ These local checks do not substitute for distro package installation/runtime
 checks. The release workflow must build and validate all packages independently
 before a version tag can publish them. Physical display/audio/capture hardware
 and arbitrary third-party plugin chains are not claimed tested by this release.
+
+A targeted ELF regression reproduces a false bundled-backend startup rejection:
+a non-PIC object forces the executable's canonical PLT entry as avcodec_version's
+address. The old path check reports the executable itself as the loaded FFmpeg
+library and refuses startup, although the correct private library is loaded.
+Identify each provider using the address of its returned configuration data,
+not the imported function address. All path/version/tool-configuration checks
+remain in force. The fixture fails before the correction and passes afterward.
+The corrected Release suite passes 205/205 non-hardware cases (54.60 seconds);
+the focused canonical-PLT regression also passes ASan/UBSan (leak detection off).
+Actual-binary missing/foreign/mixed backend checks and Full/Fast export smoke
+checks pass with the corrected implementation. Final distro runs remain the
+publication gate, rather than treating local success as package validation.

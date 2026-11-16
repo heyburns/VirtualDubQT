@@ -6,6 +6,7 @@ Highlights:
 - Expanded software codec support and AviSynth/VapourSynth readers, with the script frameworks and third-party plugins kept separate.
 - Fixed a decoder setting that smeared the bottom rows of some MPEG-2 videos, including processed exports.
 - Improved compatibility between the private media backend and separately installed script plugins.
+- Corrected backend-location checks for Linux builds that use executable forwarding stubs, avoiding false startup failures.
 - Added dependency patches and regression tests for Linux AviSynth Prefetch, audio resampling, and repeated-load cache performance. These patches are documented for separately installed dependencies; the packages do not replace your frameworks or plugins.
 
 Downloads:
