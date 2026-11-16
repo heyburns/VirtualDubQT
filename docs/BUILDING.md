@@ -14,14 +14,16 @@ Ubuntu 24.04:
 ```bash
 sudo apt update
 sudo apt install build-essential cmake git curl ninja-build nasm xz-utils \
-    qt6-base-dev qt6-multimedia-dev
+    qt6-base-dev qt6-multimedia-dev libasound2t64 libva2 libva-drm2 \
+    libdrm2 libcairo2 libgl1 libegl1 ca-certificates
 ```
 
 Fedora 43:
 
 ```bash
 sudo dnf install gcc-c++ cmake git curl ninja-build nasm xz \
-    qt6-qtbase-devel qt6-qtmultimedia-devel
+    qt6-qtbase-devel qt6-qtmultimedia-devel alsa-lib libva libdrm cairo \
+    mesa-libGL mesa-libEGL ca-certificates
 ```
 
 Run commands in order. If a command fails, stop and keep its error text.
@@ -43,6 +45,7 @@ cmake -S "$HOME/src/AviSynthPlus-3.7.5" -B "$HOME/src/AviSynthPlus-3.7.5/build" 
     -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_PLUGINS=OFF
 cmake --build "$HOME/src/AviSynthPlus-3.7.5/build" --parallel 2
 sudo cmake --install "$HOME/src/AviSynthPlus-3.7.5/build"
+printf '%s\n' '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/avisynth.conf
 sudo ldconfig
 ```
 
