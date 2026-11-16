@@ -61,7 +61,7 @@ jobs:
 
       - name: Reuse matched runtime and its corresponding sources
         id: media-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .release-media
           key: ubuntu24-release-media-v1-${{ hashFiles('packaging/ffmpeg-runtime.json', 'packaging/build-ffmpeg-runtime.sh', 'packaging/assemble-ffmpeg-runtime.py', 'packaging/ffmpeg_runtime_policy.py', 'packaging/ffmpeg-runtime-launcher', 'packaging/ffmpeg-vapoursynth-optional.patch', 'packaging/collect-release-sources.py') }}
@@ -80,6 +80,13 @@ jobs:
             --notices .release-media/runtime/licenses --sources .release-media/sources \
             --ffmpeg-source "${RUNNER_TEMP}/media-sources/ffmpeg" \
             --ffmpeg-build "${RUNNER_TEMP}/media-sources/ffmpeg-build"
+
+      - name: Save validated media SDK independently of package deployment
+        if: steps.media-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .release-media
+          key: ${{ steps.media-cache.outputs.cache-primary-key }}
 
       - name: Validate private runtime and configure application
         run: |
@@ -138,12 +145,18 @@ jobs:
             apt-get update
             apt-get install --no-install-recommends -y python3 libgl1 libegl1 libopengl0 \
               libdbus-1-3 libfontconfig1 libharfbuzz0b libfribidi0 libasound2t64 \
-              libva2 libva-drm2 libdrm2 libcairo2
+              libva2 libva-drm2 libdrm2 libcairo2 libxcb-cursor0 libxcb-icccm4 \
+              libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 \
+              libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
             test ! -e /usr/bin/ffmpeg
             export LD_LIBRARY_PATH=/repo/.release-media/external-avisynth/lib
             test_root=$(mktemp -d)
             cd "$test_root"
             "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" --appimage-extract > /dev/null
+            # Check the real window-system plugin even in this headless test.
+            xcb=$(find "$test_root/squashfs-root" -name libqxcb.so -print -quit)
+            test -n "$xcb"
+            if ldd "$xcb" | grep -q 'not found'; then ldd "$xcb"; exit 1; fi
             media="$test_root/squashfs-root/usr/lib/virtualdubqt/ffmpeg-runtime/bin"
             python3 /repo/packaging/smoke-runtime.py \
               --application "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" \
@@ -183,7 +196,7 @@ jobs:
         with:
           name: media-sdk
       - name: Install compiler and Qt
-        run: dnf install -y cmake file gcc-c++ ninja-build qt6-qtbase-devel qt6-qtmultimedia-devel python3 rpm-build xz
+        run: dnf install -y cmake file gcc-c++ ninja-build qt6-qtbase-devel qt6-qtmultimedia-devel python3 rpm-build xz tar
       - name: Build RPM against the same private backend
         shell: bash
         run: |
@@ -223,9 +236,9 @@ jobs:
       - name: Install only runtime dependencies and the independent framework fixture
         shell: bash
         run: |
+          dnf install -y python3 xz tar dist/*.rpm
           mkdir media
           tar -xJf media-sdk.tar.xz -C media
-          dnf install -y python3 dist/*.rpm
           export LD_LIBRARY_PATH="$PWD/media/external-avisynth/lib"
           /usr/bin/VirtualDubQt --runtime-info
           python3 packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \

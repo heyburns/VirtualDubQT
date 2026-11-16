@@ -78,6 +78,17 @@ that does not automatically make its packages interchangeable.
 
 ### AppImage
 
+Install AviSynth first as described above. On a minimal Ubuntu installation,
+these host desktop libraries may also be needed (normal desktop installations
+often already have them):
+
+```bash
+sudo apt install libgl1 libegl1 libopengl0 libdbus-1-3 libfontconfig1 \
+    libharfbuzz0b libfribidi0 libasound2t64 libva2 libva-drm2 libdrm2 libcairo2 \
+    libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+    libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+```
+
 In your file manager, open the folder containing the downloaded AppImage and
 choose **Open in Terminal**. Alternatively, use `cd "$HOME/Downloads"` if you
 saved it in Downloads. Run:

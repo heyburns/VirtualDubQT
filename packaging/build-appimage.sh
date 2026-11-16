@@ -48,6 +48,22 @@ if [[ -f AppDir/AppRun.wrapped ]]; then
     mv AppDir/AppRun.wrapped "$vdqt_work/generated-AppRun.wrapped"
 fi
 install -m755 "$vdqt_repo/packaging/AppRun" AppDir/AppRun
+# A deployment plugin can invoke linuxdeploy again without forwarding the
+# exclusions. Remove any such duplicates from this disposable AppDir BEFORE
+# inserting the private runtime. Never touch host libraries or the source SDK.
+PYTHONPATH="$vdqt_repo/packaging" python3 - <<'PY'
+from pathlib import Path
+import re
+from ffmpeg_runtime_policy import is_host_library
+private = re.compile(r"^lib(?:avisynth|vapoursynth[^/]*|python[^/]*|avcodec|avdevice|avfilter|avformat|avutil|postproc|swresample|swscale)\.so(?:\..*)?$")
+for directory in (Path("AppDir/usr/lib"), Path("AppDir/usr/lib64")):
+    if not directory.is_dir():
+        continue
+    for library in directory.rglob("*"):
+        if (library.is_file() or library.is_symlink()) and (
+                is_host_library(library.name) or private.fullmatch(library.name)):
+            library.unlink()
+PY
 mkdir -p AppDir/usr/lib/virtualdubqt
 mkdir AppDir/usr/lib/virtualdubqt/ffmpeg-runtime
 tar -C "$vdqt_runtime" --exclude='./include' --exclude='./lib/pkgconfig' -cf - . \
