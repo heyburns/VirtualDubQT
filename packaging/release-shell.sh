@@ -6,10 +6,16 @@ if [[ ${VDQT_RELEASE_SHELL_ACTIVE:-} == 1 ]]; then
 fi
 export VDQT_RELEASE_SHELL_ACTIVE=1
 vdqt_release_log=$(mktemp "${RUNNER_TEMP:-/tmp}/vdqt-release-step-XXXXXXXX.log")
-exec > >(tee "$vdqt_release_log") 2>&1
+exec 3>&1
+exec > >(tee "$vdqt_release_log" >&3) 2>&1
+vdqt_release_tee_pid=$!
 vdqt_release_failure() {
     local vdqt_status=$?
     trap - ERR
+    # Drain the logger before reading it. Otherwise a noisy package install can
+    # leave tee behind and hide the short, important startup error at the end.
+    exec 1>&3 2>&3
+    wait "$vdqt_release_tee_pid" || true
     tail -n 60 "$vdqt_release_log" | python3 -c '
 import sys
 message = sys.stdin.read().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")

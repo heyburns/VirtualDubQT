@@ -240,7 +240,9 @@ jobs:
           mkdir media
           tar -xJf media-sdk.tar.xz -C media
           export LD_LIBRARY_PATH="$PWD/media/external-avisynth/lib"
-          /usr/bin/VirtualDubQt --runtime-info
+          # Also record startup output directly: a loader-policy rejection must
+          # not be lost behind package-manager progress output in the log.
+          python3 -c 'import subprocess,sys; p=subprocess.run(["/usr/bin/VirtualDubQt", "--runtime-info"],capture_output=True,text=True); message=(p.stdout+p.stderr).replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print(("::error" if p.returncode else "::notice")+" title=Installed Fedora backend::"+message,flush=True); sys.exit(p.returncode)'
           python3 packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \
             --ffmpeg /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffmpeg \
             --ffprobe /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
