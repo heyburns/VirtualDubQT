@@ -25,7 +25,8 @@ env:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # Supersede obsolete main-branch previews, but never interrupt a tagged release.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   candidate:
