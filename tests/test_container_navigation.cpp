@@ -19,6 +19,7 @@ struct Case {
     QStringList extra{};
     bool metadata = false;
     bool disposable = false;
+    int frames = 300;
 };
 
 bool ffmpeg(const QStringList& arguments) {
@@ -105,10 +106,13 @@ bool run(const Case& item, QTemporaryDir& directory) {
             hashes.append(line.split(',').last().trimmed());
     }
     const int frames = hashes.size();
-    if (frames != (item.disposable ? 299 : 300)) return false;
+    if (frames != (item.disposable ? 299 : item.frames)) return false;
     VDQtVideoDecoder decoder;
-    if (!decoder.openFile(input) || decoder.getDecodedFrameCount()
-        || (item.metadata && (!decoder.hasFrameNavigation() || decoder.getFrameCount() != 300))) return false;
+    // AVI may decode one calibration picture to establish FFmpeg's timestamp
+    // origin. Navigation must never require a decoded traversal of the movie.
+    if (!decoder.openFile(input) || decoder.getDecodedFrameCount() > (QString(item.extension) == "avi" ? 1 : 0)
+        || (item.metadata && (!decoder.hasFrameNavigation() || decoder.getFrameCount() != frames))
+        || (codec == "libxvid" && decoder.hasFrameNavigation())) return false;
     const bool metadata = decoder.hasFrameNavigation();
     QElapsedTimer timer;
     timer.start();
@@ -134,6 +138,13 @@ bool run(const Case& item, QTemporaryDir& directory) {
     if (!snapshot || !consumer.openFile(input, snapshot) || consumer.getDecodedFrameCount()
         || pictureHash(consumer.getFrameImage(frames - 1)) != hashes.at(frames - 1)
         || pictureHash(consumer.getFrameImage(0)) != hashes.at(0)) correct = false;
+    if (codec == "huffyuv") {
+        const auto health = decoder.scanVideoStream();
+        consumer.close();
+        correct = health.totalFrames == frames && health.keyFrames == frames
+            && consumer.openFile(input, decoder.frameIndexSnapshot()) && consumer.getNextKeyFrame(0) == 1
+            && pictureHash(consumer.getFrameImage(frames - 1)) == hashes.at(frames - 1) && correct;
+    }
     if (metadata && firstSeekDecoded >= 100) correct = false;
     std::cout << item.name << ": metadata=" << metadata << ", first_seek_decoded="
               << firstSeekDecoded << ", ms=" << timer.elapsed() << ", accurate=" << correct << '\n';
@@ -159,9 +170,13 @@ int main(int argc, char **argv) {
         {"webm-vp8", "webm", "libvpx", {"-deadline", "realtime", "-cpu-used", "8"}},
         {"webm-vp9", "webm", "libvpx-vp9", {"-deadline", "realtime", "-cpu-used", "8"}},
         {"webm-av1", "webm", "libaom-av1", {"-cpu-used", "8", "-crf", "40"}},
-        {"avi-mpeg4", "avi", "mpeg4", {"-bf", "2"}},
-        {"avi-mjpeg", "avi", "mjpeg"},
-        {"avi-ffv1", "avi", "ffv1"},
+        {"avi-mpeg4", "avi", "mpeg4", {"-bf", "2"}, true},
+        {"avi-mpeg4-no-b", "avi", "mpeg4", {"-vtag", "DX50"}, true},
+        {"avi-mjpeg", "avi", "mjpeg", {}, true},
+        {"avi-ffv1", "avi", "ffv1", {}, true},
+        {"avi-rawvideo", "avi", "rawvideo", {"-pix_fmt", "bgr0"}, true},
+        {"avi-huffyuv", "avi", "huffyuv", {}, true},
+        {"avi-xvid-packed", "avi", "libxvid", {"-bf", "2"}, false, false, 298},
         {"ts-h264", "ts", "libx264"},
         {"ts-hevc", "ts", "libx265"},
         {"ts-mpeg2", "ts", "mpeg2video", {"-bf", "2"}},

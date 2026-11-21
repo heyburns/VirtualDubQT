@@ -205,6 +205,23 @@ retain verified decoding or fail the open when source identity changes. Known
 field-per-packet/interlaced video is excluded. Parsing never certifies decode health.
 The same 4,194,304-frame limit applies, with finite element and header-byte budgets.
 
+`VDQtAviTiming` validates FFmpeg's native AVI index against every selected movie
+chunk header, including record lists and OpenDML AVIX segments. Checking declared
+length against index length alone is insufficient: both can omit valid tail video.
+Payload is skipped with unbuffered file seeks. Supported frame-per-chunk codecs
+use the native slot clock; MPEG-4 adds bounded picture-header parsing through
+FFmpeg's public parser. Reference/B-picture emission order must agree with the
+codec timestamps, which establish ordering without assuming those clock units
+match AVI's. Packed DivX/Xvid, NVOP fillers, dropped slots, changing palettes,
+contradictory/truncated indexes and unsupported codecs retain decoded verification.
+One calibration picture establishes the decoder's presentation origin. AVI seeks
+translate a key picture's saved chunk position back to its native DTS slot;
+presentation ordinals and stored chunk ordinals differ with reordered pictures.
+The delayed final MPEG-4 picture may lack a decoder timestamp at drain; a known
+dependency chain still identifies its last ordinal without breaking the ordered
+metadata clock. Normal navigation snapshots share this map with preview/export,
+while deliberate health inspections continue to decode every picture.
+
 Complete immutable navigation snapshots are shared between worker and editor, including
 keyframe controls, export and audio-start timing. Matching open-source identity,
 stream/timebase/codec and recovery policy are required for adoption; generation

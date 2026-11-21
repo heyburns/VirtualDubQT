@@ -2167,3 +2167,66 @@ source/snapshot ownership and actual-process smoke. The regular executable is
 build/VirtualDubQt; its prior binary is retained as
 build/VirtualDubQt.before-mkv-container-fixes-20261121. Restart to load the new
 executable; an already running application was not interrupted or replaced in memory.
+
+Native AVI navigation (2026-11-21)
+---------------------------------
+
+Ordinary indexed AVI now uses FFmpeg's existing index and bounded RIFF/movie
+headers instead of a whole decoded navigation scan. The accelerated codecs are
+MPEG-4 Part 2, MJPEG, FFV1, uncompressed video and HuffYUV. A bounded public
+MPEG-4 header parser establishes reordered-picture identity; its codec clock and
+reference/B-picture emission sequence must agree. AVI frame slots establish
+timing, not average-FPS estimates. One decoded calibration picture establishes
+FFmpeg's initial presentation timestamp, including reordered streams starting
+at slot 1. Native chunk DTS and displayed-frame PTS are kept distinct for seeks.
+
+Declared frame count and index length are checked against every selected movie
+chunk, including record lists and OpenDML AVIX segments. Matching stale counts
+and truncated indexes must not hide unindexed tail video. Header reads are
+unbuffered and compressed payload is skipped except for small MPEG-4 prefixes
+and the calibration picture. Unknown codecs, oversized/missing/inconsistent
+indexes, dropped/empty slots, palette changes, packed DivX/Xvid and NVOP fillers
+retain decoded verification. No codec support was removed. In particular, the
+packed-Xvid regression contains 298 decoded pictures despite its declared 300;
+the fallback preserves the independently counted length.
+
+The final delayed AVI MPEG-4 picture can lack a decoder timestamp at drain.
+Its ordinal is retained from the validated key anchor/dependency sequence,
+while the metadata clock stays ordered for binary searches. HuffYUV's decoder
+also omits keyframe flags; independently decodable pictures retain their key
+status through fresh error inspections and shared decoded snapshots.
+
+avi_navigation_tests checks 3,000-picture MPEG-4 sources with and without B
+pictures, fractional frame rate and audio-first stream layout. Nine cold seeks
+per source match independent FFmpeg RGB frame hashes and decode only 65-141
+pictures. Snapshots, complete fresh inspections, stale lengths, bad offsets and
+sizes, selected-stream mismatches, truncated RIFF, noncoded VOPs and contradictory
+P-picture clocks are tested. Small structural fixtures cover record-list nesting,
+odd padding and multiple AVIX segments without needing multi-gigabyte payloads.
+The broader container matrix expands to 34 combinations, including HuffYUV
+inspection/keyframe behavior and packed-Xvid fallback. The real-controller AVI
+test checks cold keyframe controls, middle playback and rapid scrubbing without
+an indexing dialog. Existing underestimated-AVI/unknown-length controls remain.
+
+The user's 46,048-picture, 720x480 MPEG-4 AVI now opens with complete navigation
+in approximately 0.20 seconds, reading about 4.5 MB through read() from a 795 MB
+file, including normal FFmpeg probing and one calibration picture. The first
+far seek needs 116 nearby decoded pictures and about 32 ms, compared with the
+previous whole-source scan at roughly 12 seconds. Nine scattered original-file
+frames plus four adopted-snapshot seeks match the independent full-decode hashes.
+The real controller opens/displays in 241 ms, scrubs to the middle in 35 ms,
+plays from there, rewinds and plays from zero, without an indexing dialog.
+These are warm-cache workstation observations with two decoder threads.
+
+WMV, FLV, MPEG system streams, WebM and unsupported AVI layouts retain their
+previous navigation paths. Physical audio listening and new distro packages
+are outside this verification. No release or GitHub push is performed here.
+
+Final validation: Release 210/210 (119.15 seconds), ASan/UBSan 106/106 (232.78
+seconds), with leak detection disabled by the established preset. Both full
+suites include the final contradictory-clock guard and HuffYUV inspection fix.
+The actual application exports three frames from the middle of the original AVI
+in approximately 0.47 seconds; their BGRA hashes match the independent reference.
+The rebuilt build/VirtualDubQt also passes the maintained MP4/native-AVS smoke
+and that original-AVI export check. Its previous executable is retained as
+build/VirtualDubQt.before-avi-index-navigation-20261121. Restart to use this build.

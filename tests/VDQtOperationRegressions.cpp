@@ -1806,10 +1806,11 @@ bool sparseEof(VDQtTestFixtures& fixtures) {
                  "sparse EOF retains the timeline and last displayed playhead");
 }
 
-bool indexedNavigation(VDQtTestFixtures& fixtures, bool matroska = false) {
-    const QString source = fixtures.directory.filePath(matroska ? "key-navigation.mkv" : "key-navigation.mp4");
+bool indexedNavigation(VDQtTestFixtures& fixtures, const QString& container = "mp4") {
+    const bool matroska = container == "mkv";
+    const QString source = fixtures.directory.filePath("key-navigation." + container);
     QStringList arguments{"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10",
-                          "-frames:v", "48", "-c:v", matroska ? "libx265" : "libx264", "-g", "12",
+                          "-frames:v", "48", "-c:v", matroska ? "libx265" : container == "avi" ? "mpeg4" : "libx264", "-g", "12",
                           "-keyint_min", "12", "-sc_threshold", "0", "-bf", "3",
                           "-threads", "1", "-an"};
     if (matroska) arguments << "-preset" << "ultrafast" << "-x265-params"
@@ -2594,7 +2595,8 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "sparse_eof") return sparseEof(fixtures);
     if (scenario == "index_reuse") return indexReuse(fixtures);
     if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
-    if (scenario == "matroska_navigation") return indexedNavigation(fixtures, true);
+    if (scenario == "matroska_navigation") return indexedNavigation(fixtures, "mkv");
+    if (scenario == "avi_navigation") return indexedNavigation(fixtures, "avi");
     if (scenario == "image_sequence") return importedImageTiming(fixtures);
     if (scenario == "filter_failure") return failedFilterPreview(fixtures);
     if (scenario == "filter_context") return editedFilterContext(fixtures);
