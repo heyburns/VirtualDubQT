@@ -33,15 +33,18 @@ Remaining execution sequence
 [x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
 [x] H05: exact random frame identity, including variable-rate and duplicate-PTS media.
 [x] H04: packet/frame cancellation of obsolete seeks and nearby verified anchors.
-    The first uncached random seek can require one full index; replacement requests
-    resume cancelled indexing when the decoder still continues the verified prefix.
+    Ordinary indexed MP4/MOV navigation now uses sample metadata and decodes only
+    nearby dependencies. Unsupported/ambiguous layouts retain a decoded index;
+    replacement requests resume it when the decoder continues a verified prefix.
     Individual AVS/I/O calls are not preemptible.
 [x] M16: complete immutable indexes shared between preview/editor/export/audio
     timing consumers; cold keyframe buttons use actual keyframes, not FPS guesses.
+    Navigation metadata and completed decoded inspections are distinct proofs.
 [x] Variable-rate jump-to-time: real cumulative edited boundaries, checked parser
     arithmetic and a source-owning modal operation scope.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
-    hashed timestamp reconciliation. Exact random-seek identity remains H05 work.
+    hashed timestamp reconciliation. Validated MP4 maps use binary searches;
+    exact random-seek identity is covered by the completed H05 regressions.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;
     preserve fresh error scans and invalidate proof on Close/cancel/error-policy change.
 [x] S04: preserve all imported sequence images at the requested rational frame rate.

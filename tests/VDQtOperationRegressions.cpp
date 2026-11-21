@@ -51,6 +51,17 @@ template <class Predicate> bool waitFor(Predicate predicate) {
 bool invoke(VDQtMainWindow& window, const char *method) {
     return QMetaObject::invokeMethod(&window, method, Qt::DirectConnection);
 }
+class ProgressObserver final : public QObject {
+public:
+    ProgressObserver() { qApp->installEventFilter(this); }
+    ~ProgressObserver() override { qApp->removeEventFilter(this); }
+    int shown = 0;
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (event->type() == QEvent::Show && qobject_cast<QProgressDialog*>(object)) ++shown;
+        return false;
+    }
+};
 QList<VDFilterInstance> invertChain() {
     VDQtFilterSystem factory;
     factory.addFilter(VDFilterType::InvertColor);
@@ -1722,6 +1733,9 @@ bool indexReuse(VDQtTestFixtures& fixtures) {
     raw.pixelFormat = "rgb24";
     raw.unattended = true;
     if (!exporter.exportRawVideo(raw, &decoder)) return false;
+    if (!check(decoder.hasFrameNavigation() && !decoder.hasCompleteFrameIndex()
+               && decoder.getDecodedFrameCount() < 48,
+               "first selected MP4 raw export avoids a whole-source preflight decode")) return false;
     const QByteArray first = readFile(raw.outputPath);
     decoder.clearCache();
     decoder.resetPerformanceCounters();
@@ -1803,6 +1817,7 @@ bool indexedNavigation(VDQtTestFixtures& fixtures) {
     const int key = reference.getNextKeyFrame(0);
     if (!check(key == 12, "navigation fixture has known GOP positions")) return false;
     const QImage expected = reference.getFrameImage(key);
+    const QImage finalScrub = reference.getFrameImage(41);
     VDQtMainWindow window;
     window.setAutomationUnattended(true);
     window.show();
@@ -1811,6 +1826,7 @@ bool indexedNavigation(VDQtTestFixtures& fixtures) {
     const auto panes = window.findChildren<VDVideoDisplayWidget*>();
     if (!position || panes.size() != 2
         || !waitFor([&] { return !panes.first()->frameImage().isNull(); })) return false;
+    ProgressObserver progress;
     QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
                               Q_ARG(int, VDQT_PCN_KEYNEXT));
     if (!check(position->GetPosition() == key
@@ -1818,8 +1834,20 @@ bool indexedNavigation(VDQtTestFixtures& fixtures) {
                "cold GUI next-keyframe navigation uses actual keyframe knowledge")) return false;
     QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
                               Q_ARG(int, VDQT_PCN_KEYPREV));
-    return check(position->GetPosition() == 0,
-                 "GUI previous-keyframe navigation uses the same verified index");
+    if (!check(position->GetPosition() == 0,
+               "GUI previous-keyframe navigation uses the same navigation map")) return false;
+    position->SetPosition(key);
+    if (!waitFor([&] { return panes.first()->frameImage() == expected; })) return false;
+    QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                              Q_ARG(int, VDQT_PCN_PLAY));
+    const bool advanced = waitFor([&] { return position->GetPosition() > key + 1; });
+    QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
+                              Q_ARG(int, VDQT_PCN_STOP));
+    if (!check(advanced, "cold indexed MP4 playback advances from the middle")) return false;
+    for (int frame : {3, 35, 2, 47, 11, 41}) position->SetPosition(frame);
+    return check(waitFor([&] { return panes.first()->frameImage() == finalScrub; })
+                 && position->GetPosition() == 41 && progress.shown == 0,
+                 "key navigation, middle playback and rapid scrubbing require no indexing dialog");
 }
 
 bool importedImageTiming(VDQtTestFixtures& fixtures) {

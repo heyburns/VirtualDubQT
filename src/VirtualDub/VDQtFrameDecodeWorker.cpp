@@ -20,7 +20,8 @@ bool VDQtFrameDecodeWorker::openSource(const QString& filePath,
                                        const QString& formatName,
                                        int colorSpace,
                                        int componentRange,
-                                       int errorMode) {
+                                       int errorMode,
+                                       const VDQtVideoDecoder::FrameIndexSnapshotPtr& navigation) {
     Q_ASSERT(QThread::currentThread() == thread());
     // Normal media gets a decoder owned exclusively by this worker. Closing it
     // here also ensures no codec context survives a main-window source change.
@@ -28,7 +29,7 @@ bool VDQtFrameDecodeWorker::openSource(const QString& filePath,
     mDecoder.close();
     mDecoder.setDecompressionConfig(formatName, colorSpace, componentRange);
     mDecoder.setErrorMode(errorMode);
-    return mDecoder.openFile(filePath);
+    return mDecoder.openFile(filePath, navigation);
 }
 
 bool VDQtFrameDecodeWorker::useSharedAvsSource(VDQtVideoDecoder *decoder) {
@@ -204,7 +205,7 @@ void VDQtFrameDecodeWorker::processPendingRequest() {
         }
 
         if (currentResult) {
-            // Complete snapshots are cached and immutable. Publishing a shared
+            // Complete navigation snapshots are immutable. Publishing a shared
             // pointer is cheap; partial growing prefixes are never copied here.
             if (const auto snapshot = decoder->frameIndexSnapshot())
                 Q_EMIT frameIndexAvailable(generation, snapshot);

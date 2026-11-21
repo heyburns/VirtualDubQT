@@ -65,7 +65,7 @@ worker threads or child `ffmpeg` processes. Their owners synchronously cancel
 and join them during teardown.
 
 Serving uses exact native AVS metadata without evaluating the whole graph and
-indexes ordinary media once. Its documented wire format is CFR NUT: a cumulative
+uses a validated container map or decoded index for ordinary media. Its documented wire format is CFR NUT: a cumulative
 sample grid repeats long VFR intervals and can omit short ones. Expanded filter
 phases are sampled in their own intervals; alpha/16-bit RGB is not forced to
 RGB24. Existing reinterpretation, conversion and decimation settings determine
@@ -105,7 +105,8 @@ events before releasing the authoritative decoder.
 FFmpeg container frame counts may be absent or wrong. `FrameCountStatus`
 distinguishes exact, estimated, and unknown lengths. Playback can extend a
 provisional identity timeline as frames are discovered; operations requiring a
-definite end scan to decoder EOF first.
+definite end use validated sample metadata when available and otherwise scan to
+decoder EOF. An exact navigation count does not certify that every frame decodes.
 
 Image sequences and appended media are represented by temporary FFconcat
 manifests. Raw input is materialized to a temporary NUT file after the user
@@ -125,14 +126,17 @@ processes consuming free space.
 conversion frame, swscale context, presentation index, and memory-bounded image
 cache.
 
-Random access seeks to a known preceding keyframe where possible, flushes codec
-state, and decodes dependency frames forward. Sequential playback avoids random
+Random access follows the original Windows input reader's approach: use the
+container's sample map when trustworthy, seek to a preceding keyframe, and decode
+only the dependency span. A nearer current forward decode position is reused.
+Sequential playback avoids random
 seeks even when presentation drops a late frame. Best-effort timestamps populate
 the presentation-order index and provide VFR frame durations. A known sequential
 traversal appends the next ordinal directly, even if its PTS equals the previous
 frame's PTS. Timestamp equality does not mean the pictures are the same frame.
 An expected indexed revisit likewise checks only its expected entry. When a seek
-actually requires reconciliation, a lazy hash maps each timestamp to a sorted
+actually requires reconciliation, validated MP4 maps use binary searches without
+allocating a second movie-sized lookup table. For decoded-only indexes, a lazy hash maps each timestamp to a sorted
 list of ordinals; duplicate timestamps are retained rather than overwritten.
 That auxiliary storage is released on Close or a deliberate index rebuild.
 
@@ -144,31 +148,49 @@ can promote decoder EOF to an exact frame count. The worker independently report
 EOF so playback can stop and restore the last displayed playhead without shrinking
 an incomplete timeline. Only verified traversals may extend the prefix; an
 approximately labeled sparse observation never becomes prefix proof. Random
-frame-number seeks establish a complete presentation index before using a
-timestamp anchor; frame number divided by average FPS is never used to label a
+frame-number seeks use a complete container navigation map when available;
+otherwise they establish a decoded presentation index before using a timestamp
+anchor. Frame number divided by average FPS is never used to label a
 picture. Repeated-timestamp anchors are ambiguous, so those paths count from a
 safe earlier unique anchor or the beginning. Seek overshoot retries from start.
 
-`hasCompleteFrameIndex()` is independent of exact count metadata. `ensureFrameIndex()`
-reuses a verified complete index for navigation/export and reports only cached
-length, not a fresh health analysis. `scanVideoStream()` still deliberately decodes
-the source afresh for error analysis. A cancelled fresh scan clears complete-index
-proof even if its old exact count remains a valid length hint; Close and changes
-to corrupt-frame recovery also invalidate it. Color-conversion changes do not
-alter presentation order and therefore retain it. Raw/rendered exports use this
-source-owned proof across selections, segments and retries, not a process-global
+`hasFrameNavigation()`/`ensureFrameNavigation()` are the contract for navigation,
+edits, audio boundaries, exports and serving. For ordinary FFmpeg media,
+`hasCompleteFrameIndex()` means a completed decoded traversal; `ensureFrameIndex()`
+explicitly requests that proof. Native AVS retains its authoritative clip metadata.
+`scanVideoStream()` still deliberately decodes the source afresh for error
+analysis. Cancelling a healthy inspection preserves an independent container map
+without certifying the uninspected frames. Close and changes to corrupt-frame
+recovery invalidate decoded knowledge. Color-conversion changes do not alter
+presentation order and therefore retain it. Consumers reuse source-owned maps
+across selections, segments and retries, not a process-global
 cache of previously opened files. Cancelled indexing preserves codec/packet state
 when it still continues the verified prefix, allowing the latest scrub request to
 resume work. Callback checks between packets/frames abandon obsolete generations;
 an individual blocking demux read, AVS evaluation or plugin call is not preemptible.
 
-Complete immutable index snapshots are shared between worker and editor, including
+`VDQtMp4Timing` reads bounded box headers and composition-offset tables only; it
+skips compressed payload using file seeks. FFmpeg's public sample index supplies
+positions, DTS and key flags. A single demuxed sample calibrates the composition
+shift, avoiding assumptions about FFmpeg's private MOV structures. Frame count,
+track ID, timescale, sample-table sizes, timestamps, positions and discard flags
+must agree. Presentation entries are stably sorted so reordered and repeated
+timestamps keep their identities. The helper accepts ordinary nonfragmented
+MOV/MP4 tables for supported picture-per-sample codecs; fragmented files, complex
+edits, contradictory metadata and excessive tables retain decoded verification.
+Its auxiliary sample limit is 4,194,304. This is a conservative fast path, not a
+replacement demuxer. Unrecognized pictures invalidate the metadata map.
+
+Complete immutable navigation snapshots are shared between worker and editor, including
 keyframe controls, export and audio-start timing. Matching open-source identity,
 stream/timebase/codec and recovery policy are required for adoption; generation
 tokens reject old-session delivery. The queued Qt alias is explicitly registered.
-Partial growing prefixes are not copied on every frame, and read-only accesses do
-not detach the shared array. Edited-timeline cumulative timing and VFR time-entry
-remain separate audit work.
+The snapshot records whether knowledge came from container metadata or decoded
+verification; receiving metadata can never downgrade a completed traversal.
+The worker adopts the main decoder's map while opening, avoiding duplicate table
+parsing. Partial growing prefixes are not copied on every frame, and read-only
+accesses do not detach the shared array. Edited timelines and VFR time entry use
+the same cached cumulative boundaries.
 
 Image sequence manifests configure each still-image demuxer's rational input rate,
 not only concat durations. Otherwise its default 25fps clock quantizes requested

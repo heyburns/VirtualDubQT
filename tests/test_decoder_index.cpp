@@ -3,6 +3,8 @@
 #include "support/VDQtTestFixtures.h"
 #include "VirtualDub/VDQtVideoDecoder.h"
 #include "VirtualDub/VDQtFrameDecodeWorker.h"
+#include "VirtualDub/VDQtMp4Timing.h"
+#include "VirtualDub/VDQtAudioExport.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -10,6 +12,7 @@
 #include <QEventLoop>
 #include <QThread>
 #include <QTimer>
+#include <QtEndian>
 #include <cstring>
 #include <iostream>
 
@@ -203,6 +206,162 @@ bool exactVfrOrdinals(VDQtTestFixtures& fixtures) {
                  "index from another source cannot be adopted");
 }
 
+bool mp4Navigation(VDQtTestFixtures& fixtures, const QString& name,
+                   bool variableRate, const QStringList& extra = {}, const QString& codec = "libx264",
+                   bool audioFirst = false) {
+    const QString input = fixtures.directory.filePath(name + ".mp4");
+    const int frames = variableRate ? 300 : 3000;
+    QStringList arguments;
+    if (audioFirst) arguments << "-f" << "lavfi" << "-i" << "sine=frequency=440:sample_rate=48000:duration=20";
+    arguments << "-f" << "lavfi" << "-i" << "testsrc2=size=96x64:rate=30";
+    if (audioFirst) arguments << "-map" << "0:a:0" << "-map" << "1:v:0" << "-c:a" << "aac";
+    if (variableRate) arguments << "-vf"
+        << "setpts='if(lt(N,150),N/(10*TB),(15+(N-150)/30)/TB)'";
+    arguments << "-frames:v" << QString::number(frames) << "-fps_mode" << "passthrough"
+        << "-c:v" << codec << "-g" << "30"
+        << "-keyint_min" << "30" << "-sc_threshold" << "0" << "-bf" << "3"
+        << "-threads" << "2";
+    if (!audioFirst) arguments << "-an";
+    if (codec == "libx264" || codec == "libx265") arguments << "-preset" << "ultrafast";
+    if (!fixtures.ffmpeg(arguments + extra + QStringList{input})) return false;
+    const QString referencePath = fixtures.directory.filePath(name + ".rgb");
+    if (!fixtures.ffmpeg({"-i", input, "-fps_mode", "passthrough", "-pix_fmt", "rgb24",
+                          "-c:v", "rawvideo", "-threads", "1", "-f", "rawvideo", "-an", referencePath})) return false;
+    QFile referenceFile(referencePath);
+    if (!referenceFile.open(QIODevice::ReadOnly)) return false;
+    const QByteArray reference = referenceFile.readAll();
+    if (!check(reference.size() == frames * 96 * 64 * 3,
+               "independent MP4 reference contains all displayed pictures")) return false;
+    VDQtVideoDecoder decoder;
+    if (!check(decoder.openFile(input) && decoder.hasFrameNavigation()
+               && !decoder.hasCompleteFrameIndex() && decoder.isFrameCountExact()
+               && decoder.getFrameCount() == frames && decoder.getDecodedFrameCount() == 0,
+               "MP4 opens with an exact metadata map and no decoded scan")) return false;
+    const auto snapshot = decoder.frameIndexSnapshot();
+    if (!check(snapshot && decoder.ensureFrameNavigation().totalFrames == frames
+               && decoder.getDecodedFrameCount() == 0 && !decoder.hasCompleteFrameIndex(),
+               "navigation metadata is distinct from a completed decoded inspection")) return false;
+    QElapsedTimer timer;
+    timer.start();
+    for (int frame : {frames - 5, frames / 2, 1, frames - 1, 30, 31, 29, 0, 150}) {
+        decoder.clearCache();
+        const QImage image = decoder.getFrameImage(frame).convertToFormat(QImage::Format_RGB888);
+        if (!check(image.size() == QSize(96, 64), "cold MP4 seeks return an image")) return false;
+        for (int y = 0; y < 64; ++y) {
+            if (!check(std::memcmp(image.constScanLine(y), reference.constData()
+                    + (frame * 64 + y) * 96 * 3, 96 * 3) == 0,
+                    "MP4 random seek matches independently decoded presentation ordinal")) return false;
+        }
+    }
+    std::cout << name.toStdString() << ": " << timer.elapsed() << " ms, "
+              << decoder.getDecodedFrameCount() << " pictures for nine random seeks\n";
+    if (!check(decoder.getDecodedFrameCount() < 450 && !decoder.hasCompleteFrameIndex()
+               && decoder.getIndexLookupWorkCount() < 1000 && decoder.frameIndexSnapshot() == snapshot,
+               "first and subsequent MP4 seeks decode bounded dependency spans, not the movie")) return false;
+    if (variableRate && !check(decoder.getFrameTimestampSeconds(150) == 15.0,
+                              "container navigation retains exact VFR frame timing")) return false;
+    if (variableRate) {
+        const quint64 before = decoder.getDecodedFrameCount();
+        QList<QPair<int64_t, int64_t>> ranges;
+        QString error;
+        if (!check(VDQtAudioRangesForTimeline(decoder, {}, 150, 152, 48000, &ranges, &error)
+                   && ranges == QList<QPair<int64_t, int64_t>>{{720000, 4800}}
+                   && decoder.getDecodedFrameCount() == before,
+                   "VFR audio selection uses precise metadata boundaries without decoding video")) return false;
+    }
+    VDQtVideoDecoder consumer;
+    if (!check(consumer.openFile(input, snapshot)
+               && consumer.hasFrameNavigation() && !consumer.hasCompleteFrameIndex()
+               && consumer.ensureFrameNavigation().totalFrames == frames
+               && consumer.getDecodedFrameCount() == 0,
+               "sharing metadata never upgrades it to decoded health proof")) return false;
+    const auto cancelled = decoder.scanVideoStream([](int frame, int) { return frame < 3; });
+    if (!check(cancelled.cancelled && decoder.hasFrameNavigation() && !decoder.hasCompleteFrameIndex()
+               && decoder.frameIndexSnapshot() == snapshot,
+               "cancelling a healthy inspection retains independent container navigation")) return false;
+    decoder.clearCache();
+    const auto inspection = decoder.scanVideoStream();
+    return check(inspection.totalFrames == frames && inspection.errorMessage.isEmpty()
+                 && decoder.hasCompleteFrameIndex() && decoder.adoptFrameIndexSnapshot(snapshot)
+                 && decoder.hasCompleteFrameIndex(),
+                 "explicit MP4 health inspection still decodes and verifies every frame");
+}
+
+bool mp4MetadataBounds(VDQtTestFixtures& fixtures) {
+    QFile source(fixtures.directory.filePath("indexed-cfr.mp4"));
+    if (!source.open(QIODevice::ReadOnly)) return false;
+    const QByteArray original = source.readAll();
+    const qsizetype ctts = original.indexOf("ctts");
+    const qsizetype moov = original.indexOf("moov");
+    if (ctts < 4 || moov < 4) return false;
+    QVector<qint64> validOffsets;
+    if (!check(VDQtReadMp4CompositionOffsets(source.fileName(), 1, 15360, 3000, &validOffsets)
+               && validOffsets.size() == 3000, "metadata mutation tests begin with a valid matching track")) return false;
+    const auto rejected = [&](const QByteArray& bytes, const char *message) {
+        const QString path = fixtures.directory.filePath("invalid-metadata.mp4");
+        QVector<qint64> offsets{123};
+        return fixtures.writeText(path, bytes)
+            && check(!VDQtReadMp4CompositionOffsets(path, 1, 15360, 3000, &offsets)
+                     && offsets == QVector<qint64>{123}, message);
+    };
+    QByteArray bytes = original;
+    bytes[ctts + 4] = 2;
+    if (!rejected(bytes, "unknown CTTS version cannot become trusted navigation")) return false;
+    bytes = original;
+    qToBigEndian<quint32>(0x7fffffff, reinterpret_cast<uchar*>(bytes.data() + ctts + 12));
+    if (!rejected(bytes, "composition run count cannot overrun the sample array")) return false;
+    bytes = original;
+    qToBigEndian<quint32>(0xffffffff, reinterpret_cast<uchar*>(bytes.data() + ctts - 4));
+    if (!rejected(bytes, "nested boxes cannot exceed their parent or file bounds")) return false;
+    bytes = original;
+    qToBigEndian<quint32>(0xffffffff, reinterpret_cast<uchar*>(bytes.data() + ctts + 8));
+    if (!rejected(bytes, "untrusted run counts cannot trigger oversized allocations")) return false;
+
+    // Convert a real tail moov to its legal 64-bit-size form. Video payload
+    // positions stay unchanged, so the decoder must retain fast exact access.
+    bytes = original;
+    const quint32 oldSize = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(bytes.constData() + moov - 4));
+    QByteArray extended(8, '\0');
+    qToBigEndian<quint64>(quint64(oldSize) + 8, reinterpret_cast<uchar*>(extended.data()));
+    bytes.insert(moov + 4, extended);
+    qToBigEndian<quint32>(1, reinterpret_cast<uchar*>(bytes.data() + moov - 4));
+    const QString path = fixtures.directory.filePath("extended-moov.mp4");
+    VDQtVideoDecoder decoder;
+    return fixtures.writeText(path, bytes) && check(decoder.openFile(path) && decoder.hasFrameNavigation()
+        && !decoder.getFrameImage(2999).isNull() && decoder.getDecodedFrameCount() < 90,
+        "64-bit movie box sizes retain exact container navigation without reading payload prefixes");
+}
+
+bool fragmentedMp4Fallback(VDQtTestFixtures& fixtures) {
+    const QString input = fixtures.directory.filePath("fragmented.mp4");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=30",
+        "-frames:v", "300", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30",
+        "-bf", "3", "-threads", "1", "-movflags", "+frag_keyframe+empty_moov", "-an", input})) return false;
+    VDQtVideoDecoder reference, decoder;
+    if (!reference.openFile(input) || reference.scanVideoStream().totalFrames != 300
+        || !decoder.openFile(input)) return false;
+    if (!check(!decoder.hasFrameNavigation(), "fragmented sample tables are not mistaken for a complete movie")) return false;
+    return check(decoder.getFrameImage(150) == reference.getFrameImage(150)
+        && decoder.hasCompleteFrameIndex() && decoder.getFrameCount() == 300,
+        "fragmented MP4 retains the accurate decoded-index fallback");
+}
+
+bool intraMovNavigation(VDQtTestFixtures& fixtures) {
+    const QString input = fixtures.directory.filePath("prores.mov");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25",
+        "-frames:v", "32", "-c:v", "prores_ks", "-profile:v", "0", "-threads", "2", "-an", input})) return false;
+    VDQtVideoDecoder reference, decoder;
+    if (!reference.openFile(input) || reference.scanVideoStream().totalFrames != 32
+        || !decoder.openFile(input)) return false;
+    if (!check(decoder.hasFrameNavigation() && !decoder.hasCompleteFrameIndex()
+               && decoder.getDecodedFrameCount() == 0,
+               "intra MOV without a composition table opens without a decoded pass")) return false;
+    for (int frame : {31, 2, 17, 0})
+        if (!check(decoder.getFrameImage(frame) == reference.getFrameImage(frame),
+                   "high-depth ProRes navigation preserves exact frame identity and pixels")) return false;
+    return check(decoder.getDecodedFrameCount() < 16, "intra MOV seeks decode only the requested pictures");
+}
+
 bool queuedIndexDelivery(VDQtTestFixtures& fixtures) {
     const QString source = fixtures.directory.filePath("exact-vfr.mkv");
     VDQtVideoDecoder consumer;
@@ -248,7 +407,17 @@ int main(int argc, char **argv) {
     const bool duplicates = duplicateTimestamps(fixtures);
     const bool ordinals = exactVfrOrdinals(fixtures);
     const bool delivered = ordinals && queuedIndexDelivery(fixtures);
-    if (!scaling || !duplicates || !ordinals || !delivered) {
+    const bool mp4 = mp4Navigation(fixtures, "indexed-cfr", false)
+        && mp4Navigation(fixtures, "indexed-vfr", true)
+        && mp4Navigation(fixtures, "signed-ctts-vfr", true, {"-movflags", "+negative_cts_offsets+faststart"})
+        && mp4Navigation(fixtures, "open-gop-hevc", true,
+            {"-x265-params", "pools=1:frame-threads=1:log-level=error:open-gop=1:keyint=30:min-keyint=30:scenecut=0"}, "libx265")
+        && mp4Navigation(fixtures, "av1-vfr", true, {"-cpu-used", "8", "-crf", "40"}, "libaom-av1")
+        && mp4Navigation(fixtures, "vp9-vfr", true, {"-deadline", "realtime", "-cpu-used", "8"}, "libvpx-vp9")
+        && mp4Navigation(fixtures, "audio-first-vfr", true, {}, "libx264", true)
+        && mp4MetadataBounds(fixtures) && fragmentedMp4Fallback(fixtures)
+        && intraMovNavigation(fixtures);
+    if (!scaling || !duplicates || !ordinals || !delivered || !mp4) {
         if (!fixtures.error.isEmpty()) std::cerr << fixtures.error.toStdString() << '\n';
         return 1;
     }

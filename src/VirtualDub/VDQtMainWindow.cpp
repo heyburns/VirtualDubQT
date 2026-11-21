@@ -7103,7 +7103,7 @@ bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen())
         return true;
-    if (mVideoDecoder.hasCompleteFrameIndex()) {
+    if (mVideoDecoder.hasFrameNavigation()) {
         mTimeline.setSourceFrameCount(mVideoDecoder.getFrameCount(), true);
         mPositionControl->SetRange(
             0, std::max<qint64>(0, mTimeline.frameCount() - 1));
@@ -7120,7 +7120,7 @@ bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
     progress.setAutoReset(false);
-    const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.ensureFrameIndex(
+    const VDQtVideoDecoder::VDScanResult scan = mVideoDecoder.ensureFrameNavigation(
         [&progress, estimate, operationLabel](int current, int reportedTotal) {
             if (estimate > 0) {
                 const int maximum = std::max({estimate, reportedTotal, current});
@@ -7419,7 +7419,7 @@ void VDQtMainWindow::onViewAudioWaveform() {
         // Unlike a full Save Audio, a video waveform ends at the edited video
         // boundary. Passing the generic full-soundtrack EOF sentinel here would
         // turn the preview cap into requested silence beyond a short source.
-        const auto scan = mVideoDecoder.ensureFrameIndex(report);
+        const auto scan = mVideoDecoder.ensureFrameNavigation(report);
         VDQtTimeline previewTimeline;
         previewTimeline.reset(scan.totalFrames, true);
         const bool validTimeline = !scan.cancelled && scan.errorMessage.isEmpty()
@@ -9159,7 +9159,7 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
     }
     if ((actionCode == VDQT_PCN_PLAY || actionCode == VDQT_PCN_PLAYPREVIEW)
         && !mPlaybackTimer->isActive() && mPositionControl->GetPosition() > 0
-        && !mVideoDecoder.hasCompleteFrameIndex()
+        && !mVideoDecoder.hasFrameNavigation()
         && !ensureExactFrameRange(QStringLiteral("playback start"))) return;
 
     switch (actionCode) {
@@ -9615,9 +9615,10 @@ bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *er
     bool opened = false;
     QString workerError;
     const QList<VDFilterInstance> chain = VDQtFilterSystem::instance().getActiveChain();
+    const auto navigation = mVideoDecoder.frameIndexSnapshot();
     QMetaObject::invokeMethod(
         mFrameDecodeWorker,
-        [this, &opened, &workerError, filePath, chain]() {
+        [this, &opened, &workerError, filePath, chain, navigation]() {
             mFrameDecodeWorker->setFilterChain(chain);
             if (mVideoDecoder.isAvsNative()) {
                 // Keep one authoritative AviSynth environment. Re-evaluating
@@ -9630,7 +9631,7 @@ bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *er
                     mDecompressionFormatConfig.formatName,
                     mDecompressionFormatConfig.colorSpace,
                     mDecompressionFormatConfig.componentRange,
-                    mDecoderErrorModeConfig.errorMode);
+                    mDecoderErrorModeConfig.errorMode, navigation);
             }
             if (!opened) workerError = mFrameDecodeWorker->lastError();
         },

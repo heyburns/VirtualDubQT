@@ -3,6 +3,7 @@
 // cache. Static dependency inspection lives in VDQtSourceDependencies.
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoAspect.h"
+#include "VDQtMp4Timing.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
@@ -376,6 +377,8 @@ struct VDQtVideoDecoder::FrameIndexSnapshot {
     AVCodecID codec = AV_CODEC_ID_NONE;
     QVector<FrameIndexEntry> entries;
     QVector<double> elapsedSeconds;
+    bool decodedComplete = false;
+    bool containerComplete = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -703,7 +706,7 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
     }
 }
 
-bool VDQtVideoDecoder::openFile(const QString& filePath) {
+bool VDQtVideoDecoder::openFile(const QString& filePath, const FrameIndexSnapshotPtr& navigation) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     close();
     mLastError.clear();
@@ -1032,6 +1035,16 @@ bool VDQtVideoDecoder::openFile(const QString& filePath) {
     }
 
     mIsOpen = true;
+    // Windows VirtualDub2's avlib input driver navigates an existing container
+    // sample index. A whole decoded error scan is not an MP4 seek prerequisite.
+    // Metadata failure is deliberately nonfatal: the verified fallback remains.
+    if (!adoptFrameIndexSnapshot(navigation)) buildContainerFrameIndex();
+    if (!mLastError.isEmpty()) {
+        const QString error = mLastError;
+        close();
+        mLastError = error;
+        return false;
+    }
     qDebug() << "[VDQtVideoDecoder] Opened file:" << absolutePath
              << mWidth << "x" << mHeight << "@" << mFps << "fps,"
              << mFrameCount
@@ -1073,8 +1086,12 @@ void VDQtVideoDecoder::cacheFrame(int frameIndex, const QImage& image) {
 void VDQtVideoDecoder::close() {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     clearCache();
-    mFrameIndex.clear();
+    // QVector::clear() allocates a same-capacity replacement when shared. Drop
+    // the reference instead: closing must release storage and never allocate a
+    // second movie-sized array while worker/editor snapshots still own the old.
+    mFrameIndex = QVector<FrameIndexEntry>();
     mFrameIndexComplete = false;
+    mContainerIndexComplete = false;
     mFrameIndexSnapshot.clear();
     mOpenedFileSize = -1;
     mOpenedFileModifiedMs = -1;
@@ -1325,6 +1342,130 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
 // Seek/decode state machine and presentation-order frame indexing
 // ---------------------------------------------------------------------------
 
+bool VDQtVideoDecoder::buildContainerFrameIndex() {
+    bool demuxNeedsReset = false;
+    try {
+        if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0
+            || mFormatCtx->iformat != av_find_input_format("mov")) return false;
+        // These MOV codecs store a picture (or paired interlaced fields) per sample.
+        // Do not generalize packet counts to codecs which can emit several pictures
+        // per sample. Fragmented files/complex edits are rejected by the table reader.
+        switch (mCodecCtx->codec_id) {
+        case AV_CODEC_ID_H264: case AV_CODEC_ID_HEVC: case AV_CODEC_ID_MPEG4:
+        case AV_CODEC_ID_AV1: case AV_CODEC_ID_VP9: case AV_CODEC_ID_VP8:
+        case AV_CODEC_ID_MPEG2VIDEO: case AV_CODEC_ID_MJPEG: case AV_CODEC_ID_PRORES:
+        case AV_CODEC_ID_DNXHD: case AV_CODEC_ID_PNG: case AV_CODEC_ID_RAWVIDEO:
+            break;
+        default: return false;
+        }
+        AVStream *stream = mFormatCtx->streams[mVideoStreamIndex];
+        const int samples = avformat_index_get_entries_count(stream);
+        if (stream->time_base.num != 1 || samples <= 0 || stream->nb_frames != samples) return false;
+        QVector<qint64> offsets;
+        if (!VDQtReadMp4CompositionOffsets(mFilePath, stream->id, stream->time_base.den, samples, &offsets)) return false;
+        qint64 previousPosition = -1;
+        int64_t previousDts = AV_NOPTS_VALUE;
+        for (int sample = 0; sample < samples; ++sample) {
+            const AVIndexEntry *entry = avformat_index_get_entry(stream, sample);
+            if (!entry || entry->timestamp == AV_NOPTS_VALUE
+                || (sample && entry->timestamp <= previousDts)
+                || entry->pos <= previousPosition || entry->size <= 0
+                || entry->pos > mOpenedFileSize || entry->size > mOpenedFileSize - entry->pos
+                || (entry->flags & AVINDEX_DISCARD_FRAME)) return false;
+            previousPosition = entry->pos;
+            previousDts = entry->timestamp;
+        }
+
+        // The public index stores DTS. Calibrate its affine CTTS shift against one
+        // actual demuxed sample rather than depending on MOVStreamContext layout or
+        // duplicating FFmpeg's negative-CTTS/edit-list adjustment rules.
+        const AVIndexEntry first = *avformat_index_get_entry(stream, 0);
+        bool calibrated = false;
+        int64_t firstPts = AV_NOPTS_VALUE;
+        demuxNeedsReset = true;
+        for (int packet = 0; packet < 1024; ++packet) {
+            if (av_read_frame(mFormatCtx, mPacket) < 0) break;
+            if (mPacket->stream_index == mVideoStreamIndex) {
+                calibrated = mPacket->pos == first.pos && mPacket->dts == first.timestamp
+                    && mPacket->pts != AV_NOPTS_VALUE && !(mPacket->flags & AV_PKT_FLAG_DISCARD);
+                firstPts = mPacket->pts;
+                av_packet_unref(mPacket);
+                break;
+            }
+            av_packet_unref(mPacket);
+        }
+        av_packet_unref(mPacket);
+        if (!resetDecoderToStart()) return false;
+        demuxNeedsReset = false;
+        if (!calibrated) return false;
+        stream = mFormatCtx->streams[mVideoStreamIndex];
+        if (avformat_index_get_entries_count(stream) != samples || stream->nb_frames != samples) return false;
+        // Safe checked timestamp arithmetic: rejecting extreme metadata is better
+        // than overflowing a signed timestamp or guessing an ordinal.
+        const auto add = [](int64_t left, int64_t right, int64_t *sum) {
+            if ((right > 0 && left > INT64_MAX - right)
+                || (right < 0 && left < INT64_MIN - right)) return false;
+            *sum = left + right;
+            return true;
+        };
+        int64_t shift;
+        if (first.timestamp == INT64_MIN || offsets.at(0) == INT64_MIN
+            || !add(firstPts, -first.timestamp, &shift) || !add(shift, -offsets.at(0), &shift)) return false;
+        QVector<FrameIndexEntry> entries;
+        entries.reserve(samples);
+        for (int sample = 0; sample < samples; ++sample) {
+            const AVIndexEntry *source = avformat_index_get_entry(stream, sample);
+            FrameIndexEntry entry;
+            if (!add(source->timestamp, shift, &entry.timestamp)
+                || !add(entry.timestamp, offsets.at(sample), &entry.timestamp)
+                || entry.timestamp == AV_NOPTS_VALUE) return false;
+            entry.keyFrame = (source->flags & AVINDEX_KEYFRAME) != 0;
+            entries.append(entry);
+        }
+        std::stable_sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            return a.timestamp < b.timestamp;
+        });
+        // The ordinary no-discard sample table must start at the stream's declared
+        // presentation origin. Preroll/trimming layouts need decoded verification.
+        if (entries.first().timestamp != mStreamStartTimestamp) return false;
+        for (int frame = 0; frame + 1 < samples; ++frame) {
+            const int64_t timestamp = entries.at(frame).timestamp;
+            const int64_t next = entries.at(frame + 1).timestamp;
+            if (timestamp < 0 && next > INT64_MAX + timestamp) return false;
+            entries[frame].duration = next - timestamp;
+        }
+        // The final frame duration is resolved against stream duration by the usual
+        // timing query. A later decode can supply missing zero-duration observations.
+        mFrameIndex = std::move(entries);
+        mContainerIndexComplete = true;
+        mFrameIndexComplete = false;
+        mFrameCount = samples;
+        mFrameCountStatus = FrameCountStatus::Exact;
+        return true;
+    } catch (const std::bad_alloc&) {
+        // A navigation acceleration must not prevent an otherwise readable file
+        // from opening. The on-demand decoded index remains available.
+        // If memory failed after consuming a packet and before restoring demux,
+        // opening must fail transactionally rather than silently omit frame zero.
+        if (demuxNeedsReset)
+            mLastError = QStringLiteral("Not enough memory to restore the video stream after reading navigation metadata.");
+        return false;
+    }
+}
+
+void VDQtVideoDecoder::invalidateContainerFrameIndex() {
+    if (!mContainerIndexComplete) return;
+    mContainerIndexComplete = false;
+    mFrameIndexComplete = false;
+    mFrameIndex = QVector<FrameIndexEntry>();
+    mFrameIndexSnapshot.clear();
+    mFrameTimestampLookup.clear();
+    mFrameTimestampLookupReady = false;
+    mIndexTraversalContiguous = false;
+    mFrameCountStatus = mFrameCount > 0 ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
+    clearCache();
+}
+
 bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
     if (frameIndex <= 0) return resetDecoderToStart();
@@ -1354,6 +1495,13 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
         return resetDecoderToStart();
     }
 
+    // Continue an already decoded dependency chain when it starts nearer the
+    // requested frame than the preceding keyframe (the original DefaultIP
+    // decoder model's forward fast path). Never continue an abandoned anchor.
+    if (!mLastDecodeReachedEof && mPendingSeekTargetTimestamp == AV_NOPTS_VALUE
+        && mCurrentFrameIndex >= anchorIndex && mCurrentFrameIndex < frameIndex)
+        return true;
+
     int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
     if (result < 0) {
         result = avformat_seek_file(
@@ -1370,7 +1518,9 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     mDemuxEof = false;
     mDrainSent = false;
     mLastDecodeReachedEof = false;
-    mIndexTraversalContiguous = true;
+    // A metadata map identifies frames, but a sparse visit does not verify the
+    // entire movie's decodability. Only a traversal from start proves that.
+    mIndexTraversalContiguous = !mContainerIndexComplete;
     mDiscardUntilKeyFrame = false;
     mCurrentFrameIndex = anchorIndex - 1;
     mNextDecodeFrameIndex = anchorIndex;
@@ -1387,6 +1537,7 @@ bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors,
         // Skipped/failed packets cannot verify a complete ordinal traversal.
         mIndexTraversalContiguous = false;
         mFrameIndexComplete = false;
+        invalidateContainerFrameIndex();
         mFrameIndexSnapshot.clear();
         if (decodeErrors) ++*decodeErrors;
         mLastError = avOperationError(operation, error);
@@ -1513,6 +1664,25 @@ int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint, b
 
     const int indexedCount = boundedFrameCount(mFrameIndex.size());
     hint = std::clamp(hint, 0, indexedCount - 1);
+    if (mContainerIndexComplete) {
+        // Container entries are sorted by presentation timestamp. Search that
+        // immutable array directly: building a QHash/QVector for every sample
+        // would make the first seek needlessly expensive on a long movie.
+        const auto first = std::lower_bound(mFrameIndex.cbegin(), mFrameIndex.cend(), timestamp,
+            [this](const FrameIndexEntry& entry, int64_t value) {
+                ++mIndexLookupWorkCount;
+                return entry.timestamp < value;
+            });
+        if (first == mFrameIndex.cend() || first->timestamp != timestamp) return -1;
+        const auto after = std::upper_bound(first, mFrameIndex.cend(), timestamp,
+            [this](int64_t value, const FrameIndexEntry& entry) {
+                ++mIndexLookupWorkCount;
+                return value < entry.timestamp;
+            });
+        if (requireUnique && after - first != 1) return -1;
+        return std::clamp(hint, static_cast<int>(first - mFrameIndex.cbegin()),
+                          static_cast<int>(after - mFrameIndex.cbegin() - 1));
+    }
     if (!mFrameTimestampLookupReady) {
         mFrameTimestampLookup.reserve(indexedCount);
         for (int ordinal = 0; ordinal < indexedCount; ++ordinal) {
@@ -1544,6 +1714,14 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     const bool nextPrefixFrame = mIndexTraversalContiguous && frameIndex == indexedCount;
     const bool expectedTimestamp = frameIndex >= 0 && frameIndex < indexedCount
         && mFrameIndex.at(frameIndex).timestamp == timestamp;
+    if (mContainerIndexComplete && mIndexTraversalContiguous && !expectedTimestamp) {
+        // A sequential decode contradicts the sample-to-picture contract (for
+        // example, unusual field packets or damaged samples). Discard metadata
+        // ordinals and let the caller count actual pictures from the beginning.
+        invalidateContainerFrameIndex();
+        mLastError = QStringLiteral("Decoded pictures contradict the container sample map.");
+        return -1;
+    }
     // Known presentation order, not PTS uniqueness, establishes a new ordinal.
     // Two sequential decoded frames with equal timestamps must remain distinct.
     if (!nextPrefixFrame && !expectedTimestamp) {
@@ -1552,6 +1730,7 @@ int VDQtVideoDecoder::registerDecodedFrame() {
             // Never label an unrecognized picture with the requested ordinal.
             // The caller can retry by counting from the beginning.
             mIndexTraversalContiguous = false;
+            invalidateContainerFrameIndex();
             mLastError = QStringLiteral("Decoded picture does not match the verified frame index.");
             return -1;
         }
@@ -1565,6 +1744,16 @@ int VDQtVideoDecoder::registerDecodedFrame() {
     entry.timestamp = timestamp;
     entry.duration = mFrame->duration;
     entry.keyFrame = (mFrame->flags & AV_FRAME_FLAG_KEY) != 0;
+
+    if (mContainerIndexComplete) {
+        // The validated navigation table is immutable. Refining per-frame
+        // observations here would detach its shared array and rebuild elapsed
+        // times after every seek. A full health scan builds its own decoded
+        // observations instead; normal display keeps metadata and proof apart.
+        mCurrentFrameIndex = frameIndex;
+        mNextDecodeFrameIndex = frameIndex + 1;
+        return frameIndex;
+    }
 
     if (mIndexTraversalContiguous && frameIndex == indexedCount) {
         mFrameIndex.append(entry);
@@ -1628,12 +1817,13 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
         || mFrameIndex.isEmpty() || mNextDecodeFrameIndex != mFrameIndex.size()) return;
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
+    if (!mFrameIndexComplete) mFrameIndexSnapshot.clear();
     mFrameIndexComplete = true;
 }
 
 VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() try {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
-    if (mIsAvsNative || !hasCompleteFrameIndex() || !mFormatCtx) return {};
+    if (mIsAvsNative || !hasFrameNavigation() || !mFormatCtx) return {};
     if (mFrameIndexSnapshot) return mFrameIndexSnapshot;
     auto snapshot = QSharedPointer<FrameIndexSnapshot>::create();
     snapshot->filePath = mFilePath;
@@ -1644,6 +1834,8 @@ VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() t
     snapshot->timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
     snapshot->codec = mCodecCtx->codec_id;
     snapshot->entries = mFrameIndex;
+    snapshot->decodedComplete = mFrameIndexComplete;
+    snapshot->containerComplete = mContainerIndexComplete;
     snapshot->elapsedSeconds.reserve(mFrameIndex.size() + 1);
     snapshot->elapsedSeconds.append(0.0);
     for (int frame = 0; frame < mFrameIndex.size(); ++frame)
@@ -1666,11 +1858,15 @@ bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snap
         || snapshot->codec != mCodecCtx->codec_id || snapshot->entries.isEmpty()) return false;
     const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
     if (snapshot->timeBase.num != timeBase.num || snapshot->timeBase.den != timeBase.den) return false;
-    if (mFrameIndexSnapshot == snapshot && mFrameIndexComplete) return true;
+    // A queued preview result may carry the older metadata map after the main
+    // decoder has completed an inspection. Never downgrade decoded knowledge.
+    if (mFrameIndexComplete && !snapshot->decodedComplete) return true;
+    if (mFrameIndexSnapshot == snapshot && hasFrameNavigation()) return true;
     if (!resetDecoderToStart()) return false;
     mFrameIndex = snapshot->entries;
     mFrameIndexSnapshot = snapshot;
-    mFrameIndexComplete = true;
+    mFrameIndexComplete = snapshot->decodedComplete;
+    mContainerIndexComplete = snapshot->containerComplete;
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
     mFrameTimestampLookup.clear();
@@ -1708,11 +1904,10 @@ QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDe
         && (frameIndex == mCurrentFrameIndex + 1
             || (preserveSequentialDecode && frameIndex > mCurrentFrameIndex));
     if (!sequentialRequest) {
-        // Frame number / average FPS is not an ordinal for variable-rate media.
-        // Index once before random seeking; sequential playback stays lazy.
-        // Subsequent seeks/exports reuse this source-owned presentation index.
-        if (frameIndex > 0 && !hasCompleteFrameIndex()) {
-            const auto scan = ensureFrameIndex(nullptr, shouldContinue);
+        // A reliable container map supports a cold random seek immediately.
+        // Only sources without such a map need the decoded-index fallback.
+        if (frameIndex > 0 && !hasFrameNavigation()) {
+            const auto scan = ensureFrameNavigation(nullptr, shouldContinue);
             if (scan.cancelled || !scan.errorMessage.isEmpty()) return QImage();
             if (frameIndex >= mFrameCount) return QImage();
         }
@@ -1824,7 +2019,7 @@ double VDQtVideoDecoder::getFrameTimestampSeconds(int frameIndex) {
 double VDQtVideoDecoder::getFrameElapsedSeconds(int frameIndex) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     if (!mIsOpen || frameIndex < 0) return std::numeric_limits<double>::quiet_NaN();
-    if (!mIsAvsNative && hasCompleteFrameIndex()) {
+    if (!mIsAvsNative && hasFrameNavigation()) {
         const auto snapshot = frameIndexSnapshot();
         if (snapshot && frameIndex < snapshot->elapsedSeconds.size())
             return snapshot->elapsedSeconds.at(frameIndex);
@@ -1898,10 +2093,11 @@ void VDQtVideoDecoder::setErrorMode(int errorMode) {
     if (replacementMode != mErrorMode && mIsOpen && !mIsAvsNative) {
         // Error recovery can change which corrupt pictures are emitted. Index
         // knowledge from the previous policy is not valid for the new one.
-        mFrameIndex.clear();
+        mFrameIndex = QVector<FrameIndexEntry>();
         mFrameTimestampLookup.clear();
         mFrameTimestampLookupReady = false;
         mFrameIndexComplete = false;
+        mContainerIndexComplete = false;
         mFrameIndexSnapshot.clear();
         mIndexTraversalContiguous = false;
         mFrameCountStatus = mFrameCount > 0
@@ -1936,6 +2132,20 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameIndex(
             : mLastError;
     }
     return result;
+}
+
+VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::ensureFrameNavigation(
+    std::function<bool(int currentFrame, int totalFrames)> progressCallback,
+    std::function<bool()> shouldContinue) {
+    QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
+    if (hasFrameNavigation()) {
+        VDScanResult result;
+        result.totalFrames = mFrameCount;
+        result.cancelled = (shouldContinue && !shouldContinue())
+            || (progressCallback && !progressCallback(mFrameCount, mFrameCount));
+        return result;
+    }
+    return ensureFrameIndex(std::move(progressCallback), std::move(shouldContinue));
 }
 
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
@@ -1993,13 +2203,19 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
         && !mLastDecodeReachedEof && !mFrameIndexComplete
         && mPendingSeekTargetTimestamp == AV_NOPTS_VALUE
         && mNextDecodeFrameIndex == mFrameIndex.size();
+    // A cancelled fresh health inspection does not invalidate trustworthy
+    // container navigation. Keep its immutable metadata separate from the new
+    // decoded observations, restoring it only if inspection finds no damage.
+    const auto previousNavigation = !resumeVerifiedPrefix && mContainerIndexComplete
+        ? frameIndexSnapshot() : FrameIndexSnapshotPtr{};
     if (!canResume) {
         if (!resetDecoderToStart()) {
             res.errorMessage = mLastError;
             return res;
         }
-        mFrameIndex.clear();
+        mFrameIndex = QVector<FrameIndexEntry>();
         mFrameIndexComplete = false;
+        mContainerIndexComplete = false;
         mFrameIndexSnapshot.clear();
         mFrameTimestampLookup.clear();
         mFrameTimestampLookupReady = false;
@@ -2055,6 +2271,8 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
         if (!resetDecoderToStart() && res.errorMessage.isEmpty()) res.errorMessage = mLastError;
         clearCache();
     }
+    if (res.cancelled && previousNavigation && res.badFrames == 0 && res.errorMessage.isEmpty())
+        adoptFrameIndexSnapshot(previousNavigation);
 
     return res;
 }

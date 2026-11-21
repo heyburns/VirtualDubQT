@@ -596,8 +596,9 @@ blocking demux reads, AVS GetFrame calls and filter/plugin calls remain non-pree
 On the 7,200-frame NUT fixture, four indexed random seeks required 194 total frame
 decodes, including container preroll, instead of repeated all-prefix traversals.
 
-Sequential playback remains lazy. The first uncached random seek may require one
-full presentation index; subsequent seeks/exports reuse it. Retaining incremental
+Sequential playback remains lazy. At this historical checkpoint, the first
+uncached random seek could require a full decoded index; ordinary indexed MP4s
+no longer require that pass (see the 2026-11-20 navigation update below). Retaining incremental
 index work across cancellations and sharing the verified index with audio/keyframe
 consumers are follow-up work, not claimed resolved by this checkpoint.
 
@@ -2028,3 +2029,59 @@ the focused canonical-PLT regression also passes ASan/UBSan (leak detection off)
 Actual-binary missing/foreign/mixed backend checks and Full/Fast export smoke
 checks pass with the corrected implementation. Final distro runs remain the
 publication gate, rather than treating local success as package validation.
+
+Container-based MP4/MOV navigation (2026-11-20)
+---------------------------------------------
+
+The previous H04/H05 repair coupled exact random frame identity to decoding the
+whole source. Normal MP4 navigation now uses validated sample metadata, following
+the original Windows avlib reader's index/nearby-keyframe approach. A decoded
+inspection is a separate capability. Navigation, middle-start playback, editing,
+raw/rendered/audio exports and serving use ensureFrameNavigation; explicit error
+analysis still performs a fresh scan. Sources without a reliable complete map
+retain the decoded-index fallback. This change does not accelerate every format.
+
+The bounded metadata helper combines composition offsets with FFmpeg's public
+sample index and calibrates its timestamp shift from one demuxed sample. It
+never reads all compressed movie payloads or uses private FFmpeg structures.
+The worker adopts the editor's immutable map while opening. Binary timestamp
+searches avoid an extra movie-sized hash, and normal decode does not detach or
+refine immutable metadata. Reset/Close releases shared arrays with move assignment
+rather than QVector::clear(), which allocates when the array is shared.
+
+Reference: original Windows avlib VideoSource2.cpp at SourceForge cch_input
+revision d49389, initStream/calc_seek, plus the installed Windows build 44282.
+https://sourceforge.net/p/vdfiltermod/cch_input/ci/d49389/tree/VideoSource2.cpp
+The copied reference source SHA-256 is
+89a8d0b7b48f8ce020c4b3eea0c39b9da5bdaaa5815f5b150d9a8ba069c1e3c7.
+An isolated temporary Wine prefix captured its selected ordinal 150 from the
+300-picture VFR fixture (first 150 at 10fps, remainder at 30fps). The captured
+picture corresponds to independently decoded picture 150, which the native
+regression locates at 15 seconds. Cross-platform RGB conversion differences and
+Wine startup/exit overhead are not used as color or latency assertions.
+
+decoder_index_tests compares random H.264/HEVC/AV1/VP9 MP4 pictures with independent
+FFmpeg RGB output, including open GOPs, negative composition offsets, faststart,
+an audio-first stream layout and VFR audio boundaries. It also checks high-depth
+intra ProRes MOV without a composition table, extended-size movie boxes, malformed
+table bounds and the fragmented-MP4 fallback. Metadata snapshots must not become
+decoded proof, stale metadata cannot downgrade a completed inspection, and
+cancelling a healthy inspection preserves independent navigation metadata.
+
+The 3,000-picture H.264 fixture needs 93 decoded pictures for nine random seeks;
+the VFR H.264/HEVC fixtures need 153. Tests bound both decoding and lookup work
+instead of asserting machine-specific milliseconds. The real-controller test
+checks keyframe buttons, playback from the middle, rapid playhead changes and
+absence of indexing dialogs. The first selected raw export also avoids a full
+preflight decode. Existing duplicate-PTS, sparse EOF, unknown/underestimated
+length, cancellation, source replacement, pixel and audio regressions remain.
+
+Final validation: 205/205 non-hardware Release tests pass (111.23 seconds) and
+101/101 ASan/UBSan tests pass (227.96 seconds; leak detection remains disabled by
+the established preset). The rebuilt build/VirtualDubQt passes the maintained
+actual-process MP4/native-AVS open/raw-export smoke. Eight additional synthetic
+1080p MP4 -> native AVS -> ProRes cycles all complete at approximately 102-110fps;
+this short fixture does not establish arbitrary third-party-chain performance.
+The previous regular binary is retained locally as
+build/VirtualDubQt.before-container-seeking-20261120. Physical devices and new
+distro/release packages were not tested or published by this navigation change.

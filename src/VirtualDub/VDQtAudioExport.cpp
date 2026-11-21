@@ -40,7 +40,7 @@ bool VDQtAudioRangesForTimeline(
         ranges->append({0, -1});
         return true;
     }
-    const auto scan = decoder.ensureFrameIndex(progress);
+    const auto scan = decoder.ensureFrameNavigation(progress);
     if (scan.cancelled || !scan.errorMessage.isEmpty() || scan.totalFrames <= 0)
         return fail(errorMessage, scan.errorMessage.isEmpty()
             ? QStringLiteral("Audio timeline indexing failed or was cancelled.") : scan.errorMessage);

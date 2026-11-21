@@ -22,7 +22,8 @@ public:
                     const QString& formatName,
                     int colorSpace,
                     int componentRange,
-                    int errorMode);
+                    int errorMode,
+                    const VDQtVideoDecoder::FrameIndexSnapshotPtr& navigation = {});
     bool useSharedAvsSource(VDQtVideoDecoder *decoder);
     void closeSource();
     QString lastError() const;

@@ -1099,11 +1099,9 @@ bool VDQtVideoExporter::exportRawVideo(
     }
 
     int totalFrames = decoder.getFrameCount();
-    // Container nb_frames metadata can be exact-looking but underreported, and
-    // it does not prove that a VFR timestamp index exists. Native AviSynth has
-    // an authoritative clip length; regular media must be drained once before
-    // raw range and frame-rate conversion decisions are made.
-    if (!decoder.isAvsNative() && !decoder.hasCompleteFrameIndex()) {
+    // A validated sample map establishes ranges/timing without a decoded pass.
+    // Other containers retain the verified-index fallback for exact exports.
+    if (!decoder.hasFrameNavigation()) {
         QProgressDialog indexingProgress(
             "Indexing source frames for raw export...", "Cancel",
             0, totalFrames > 0 ? totalFrames : 0, parentWidget);
@@ -1113,7 +1111,7 @@ bool VDQtVideoExporter::exportRawVideo(
         indexingProgress.setAutoClose(false);
         indexingProgress.setAutoReset(false);
         const int initialEstimate = totalFrames;
-        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameIndex(
+        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameNavigation(
             [&indexingProgress, initialEstimate](int current, int reportedTotal) {
                 if (initialEstimate > 0) {
                     const int maximum = std::max({initialEstimate, reportedTotal, current});
@@ -1642,15 +1640,15 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     }
 
     int totalFrames = decoder.getFrameCount();
-    bool indexedForExport = !decoder.isAvsNative() && decoder.hasCompleteFrameIndex();
+    bool indexedForExport = !decoder.isAvsNative() && decoder.hasFrameNavigation();
     const bool explicitFrameRange = options.endFrame >= 0
                                  && options.endFrame >= options.startFrame;
-    const bool needsDecodedIndex = !decoder.isAvsNative()
+    const bool needsNavigation = !decoder.isAvsNative()
         && (videoMode != VideoMode_DirectStreamCopy || explicitFrameRange
             || editedTimeline || selectedAudioIsSeparateSource);
-    if (!decoder.hasCompleteFrameIndex()
+    if (!decoder.hasFrameNavigation()
         && ((videoMode != VideoMode_DirectStreamCopy && !decoder.isFrameCountExact())
-            || needsDecodedIndex)) {
+            || needsNavigation)) {
         QProgressDialog indexingProgress(
             "Indexing source frames for an exact export range...", "Cancel",
             0, totalFrames > 0 ? totalFrames : 0, parentWidget);
@@ -1660,7 +1658,7 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         indexingProgress.setAutoClose(false);
         indexingProgress.setAutoReset(false);
 
-        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameIndex(
+        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameNavigation(
             [&indexingProgress, totalFrames, &progressCallback](
                 int current, int reportedTotal) {
                 if (totalFrames > 0) {

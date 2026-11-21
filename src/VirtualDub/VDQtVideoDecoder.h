@@ -26,15 +26,17 @@ extern "C" {
 // serving. Ordinary media uses libavformat/libavcodec; .avs files are evaluated
 // directly through AviSynth+ so video and audio can share one script graph.
 //
-// FFmpeg decoding is presentation-order aware: mFrameIndex records timestamps
-// and keyframes as frames are discovered, seeks restart from a safe timestamp,
+// FFmpeg decoding is presentation-order aware: mFrameIndex holds validated MP4
+// sample metadata or decoded observations, seeks restart from a safe timestamp,
 // and dependent frames are decoded forward. getFrameImage() returns a detached
 // QImage cached by frame number. The class is internally guarded by a recursive
 // mutex because native AVS audio/video may enter it from separate workers.
 class VDQtVideoDecoder {
 public:
-    // Container frame counts are often estimates. Callers that require an exact
-    // end frame must scan to EOF or use ensureExactFrameRange() in the UI.
+    struct FrameIndexSnapshot;
+    using FrameIndexSnapshotPtr = QSharedPointer<const FrameIndexSnapshot>;
+    // A validated container sample map can establish an exact navigation range
+    // without decoding the movie. Other counts remain provisional until EOF.
     enum class FrameCountStatus {
         Exact,
         Estimated,
@@ -46,7 +48,7 @@ public:
 
     // Transactional: an unsuccessful open leaves the object closed and frees
     // all partially constructed FFmpeg/AviSynth resources.
-    bool openFile(const QString& filePath);
+    bool openFile(const QString& filePath, const FrameIndexSnapshotPtr& navigation = {});
     void close();
 
     bool isOpen() const { return mIsOpen; }
@@ -57,11 +59,12 @@ public:
     bool hasCompleteFrameIndex() const {
         return mIsOpen && (mIsAvsNative || mFrameIndexComplete);
     }
-    // Immutable, complete presentation knowledge for another decoder of this
+    bool hasFrameNavigation() const {
+        return mIsOpen && (mIsAvsNative || mContainerIndexComplete || mFrameIndexComplete);
+    }
+    // Immutable, complete navigation knowledge for another decoder of this
     // same open source. Partial prefixes are deliberately not published on
     // every playback frame: that would cause quadratic QVector detachment.
-    struct FrameIndexSnapshot;
-    using FrameIndexSnapshotPtr = QSharedPointer<const FrameIndexSnapshot>;
     FrameIndexSnapshotPtr frameIndexSnapshot();
     bool adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snapshot);
     // EOF describes the last decode attempt, not proof of the entire source's
@@ -134,11 +137,15 @@ public:
 
     VDScanResult scanVideoStream(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr,
                                 std::function<bool()> shouldContinue = nullptr);
-    // Navigation/export need the verified index, not a fresh health analysis.
-    // Reuse a complete source-owned index; cached results report length only.
-    // scanVideoStream() remains the explicit, always-fresh error scan.
+    // Request a fully decoded ordinal index; ordinary consumers should use
+    // ensureFrameNavigation instead. Reuse a previous completed traversal.
     VDScanResult ensureFrameIndex(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr,
                                  std::function<bool()> shouldContinue = nullptr);
+    // Ordinary navigation/edit/export requires a reliable map, not proof that
+    // every picture is decodable. Decode a full index only if metadata cannot
+    // establish that map. Explicit health analysis always uses scanVideoStream.
+    VDScanResult ensureFrameNavigation(std::function<bool(int currentFrame, int totalFrames)> progressCallback = nullptr,
+                                      std::function<bool()> shouldContinue = nullptr);
 
     void setDecompressionConfig(const QString &formatName, int colorSpace, int componentRange);
     QString getForcedFormatName() const { return mForcedFormatName; }
@@ -150,8 +157,8 @@ public:
     QString getLastError() const { return mLastError; }
 
 private:
-    // One presentation-order observation. Entries are gradually refined as
-    // decoding reaches parts of files whose container metadata was incomplete.
+    // One presentation-order entry. Validated container entries stay immutable;
+    // decoded-only observations grow/refine as missing information is discovered.
     struct FrameIndexEntry {
         int64_t timestamp = AV_NOPTS_VALUE;
         int64_t duration = 0;
@@ -164,6 +171,8 @@ private:
                          AVPixelFormat destinationFormat = AV_PIX_FMT_RGB24);
     bool ensureConversionResources(const AVFrame *sourceFrame);
     bool seekToFrame(int frameIndex);
+    bool buildContainerFrameIndex();
+    void invalidateContainerFrameIndex();
     bool resetDecoderToStart();
     bool decodeNextFrame(int *decodeErrors = nullptr,
                          const std::function<bool()>& shouldContinue = nullptr);
@@ -248,6 +257,7 @@ private:
     QCache<int, QImage> mFrameCache;
     QVector<FrameIndexEntry> mFrameIndex;
     bool mFrameIndexComplete = false;
+    bool mContainerIndexComplete = false;
     FrameIndexSnapshotPtr mFrameIndexSnapshot;
     qint64 mOpenedFileSize = -1;
     qint64 mOpenedFileModifiedMs = -1;

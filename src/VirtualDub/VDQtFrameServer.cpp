@@ -141,7 +141,7 @@ bool VDQtFrameServer::isRunning() const {
 
 void VDQtFrameServer::run(Config config) {
     // Phase 1: prove ordinary-media count/timestamps once. Native AVS already
-    // has an authoritative clip length and rational CFR clock; ensureFrameIndex
+    // has an authoritative clip length and rational CFR clock; navigation
     // returns that proof without evaluating the entire (possibly heavy) graph.
     QString error;
     VDQtVideoDecoder decoder;
@@ -154,7 +154,7 @@ void VDQtFrameServer::run(Config config) {
 
     int endFrame = config.endFrame;
     if (error.isEmpty()) {
-        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameIndex(
+        const VDQtVideoDecoder::VDScanResult scan = decoder.ensureFrameNavigation(
             [this](int, int) {
                 return !mCancelRequested.load(std::memory_order_relaxed);
             });

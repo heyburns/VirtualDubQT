@@ -97,6 +97,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtFrameDecodeWorker.cpp
     src/VirtualDub/VDQtVideoDecoder.h
     src/VirtualDub/VDQtVideoDecoder.cpp
+    src/VirtualDub/VDQtMp4Timing.h
+    src/VirtualDub/VDQtMp4Timing.cpp
     src/VirtualDub/VDQtSourceDependencies.h
     src/VirtualDub/VDQtSourceDependencies.cpp
     src/VirtualDub/VDQtAudioPlayer.h
@@ -684,6 +686,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtPositionControl.cpp
         src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -713,6 +716,7 @@ if (BUILD_TESTING)
     add_executable(playback_performance_tests
         src/VirtualDub/test_playback_performance.cpp
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -746,6 +750,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtAudioFilterSystem.cpp
         src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
