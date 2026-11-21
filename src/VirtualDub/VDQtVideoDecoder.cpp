@@ -6,6 +6,7 @@
 #include "VDQtMp4Timing.h"
 #include "VDQtMatroskaTiming.h"
 #include "VDQtAviTiming.h"
+#include "VDQtAsfTiming.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
@@ -1397,6 +1398,7 @@ bool VDQtVideoDecoder::buildContainerFrameIndex() {
         if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0) return false;
         if (mFormatCtx->iformat == av_find_input_format("matroska")) return buildMatroskaFrameIndex();
         if (mFormatCtx->iformat == av_find_input_format("avi")) return buildAviFrameIndex();
+        if (mFormatCtx->iformat == av_find_input_format("asf")) return buildAsfFrameIndex();
         if (mFormatCtx->iformat != av_find_input_format("mov")) return false;
         // These MOV codecs store a picture (or paired interlaced fields) per sample.
         // Do not generalize packet counts to codecs which can emit several pictures
@@ -1552,6 +1554,84 @@ bool VDQtVideoDecoder::buildAviFrameIndex() {
     }
 }
 
+bool VDQtVideoDecoder::buildAsfFrameIndex() {
+    bool demuxNeedsReset = false;
+    try {
+        // WMV1/2 have no picture reordering. For WMV3, the sequence header
+        // explicitly declares the maximum B-picture count. Probe observations
+        // alone cannot establish the absence of B pictures later in a movie.
+        if (mCodecCtx->codec_id == AV_CODEC_ID_WMV3) {
+            if (mCodecCtx->extradata_size != 4 || !mCodecCtx->extradata
+                || (mCodecCtx->extradata[0] >> 6) > 1 // Simple/Main only.
+                || (mCodecCtx->extradata[0] & 0x30) // Old interlace/sprite.
+                || (mCodecCtx->extradata[1] & 0x04) // IntraX8 variant.
+                || (mCodecCtx->extradata[3] & 0x70)) return false; // MAXBFRAMES.
+        } else if (mCodecCtx->codec_id != AV_CODEC_ID_WMV1 && mCodecCtx->codec_id != AV_CODEC_ID_WMV2)
+            return false;
+        AVStream *stream = mFormatCtx->streams[mVideoStreamIndex];
+        if (mCodecCtx->has_b_frames || stream->time_base.num != 1 || stream->time_base.den != 1000)
+            return false;
+        QVector<VDQtAsfFrameTiming> timing;
+        if (!VDQtReadAsfTiming(mFilePath, stream->id, &timing)) return false;
+        const QFileInfo current(mFilePath);
+        if (current.size() != mOpenedFileSize
+            || current.lastModified().toMSecsSinceEpoch() != mOpenedFileModifiedMs) {
+            mLastError = QStringLiteral("The WMV source changed while its navigation metadata was being read. Please reopen it.");
+            return false;
+        }
+        // Calibrate ASF preroll/normalization against an actual packet without
+        // decoding any picture. Fragmentation and audio-first stream ordering
+        // must agree with FFmpeg's normal demuxer, which remains the sole decoder.
+        bool calibrated = false;
+        int64_t origin = AV_NOPTS_VALUE;
+        demuxNeedsReset = true;
+        for (int packet = 0; packet < 1024; ++packet) {
+            if (av_read_frame(mFormatCtx, mPacket) < 0) break;
+            if (mPacket->stream_index == mVideoStreamIndex) {
+                origin = mPacket->pts != AV_NOPTS_VALUE ? mPacket->pts : mPacket->dts;
+                calibrated = origin != AV_NOPTS_VALUE && mPacket->pos == timing.first().seekPosition
+                    && mPacket->size == int(timing.first().size) && (mPacket->flags & AV_PKT_FLAG_KEY)
+                    && !(mPacket->flags & (AV_PKT_FLAG_DISCARD | AV_PKT_FLAG_CORRUPT));
+                av_packet_unref(mPacket);
+                break;
+            }
+            av_packet_unref(mPacket);
+        }
+        av_packet_unref(mPacket);
+        if (!resetDecoderToStart()) return false;
+        demuxNeedsReset = false;
+        if (!calibrated || origin != mStreamStartTimestamp) return false;
+        int64_t shift;
+        if (!addTimestamp(origin, -timing.first().timestamp, &shift)) return false;
+        QVector<FrameIndexEntry> entries;
+        entries.reserve(timing.size());
+        for (const auto& source : std::as_const(timing)) {
+            FrameIndexEntry entry;
+            if (!addTimestamp(source.timestamp, shift, &entry.timestamp)
+                || entry.timestamp == AV_NOPTS_VALUE) return false;
+            entry.keyFrame = source.keyFrame;
+            entry.seekPosition = source.seekPosition;
+            entries.append(entry);
+        }
+        for (int frame = 0; frame + 1 < entries.size(); ++frame)
+            entries[frame].duration = entries.at(frame + 1).timestamp - entries.at(frame).timestamp;
+        mFrameIndex = std::move(entries);
+        mContainerIndexComplete = true;
+        if (!registerContainerSeekPoints()) {
+            invalidateContainerFrameIndex();
+            return false;
+        }
+        mFrameIndexComplete = false;
+        mFrameCount = boundedFrameCount(mFrameIndex.size());
+        mFrameCountStatus = FrameCountStatus::Exact;
+        return true;
+    } catch (const std::bad_alloc&) {
+        if (demuxNeedsReset)
+            mLastError = QStringLiteral("Not enough memory to restore the WMV stream after reading navigation metadata.");
+        return false;
+    }
+}
+
 bool VDQtVideoDecoder::buildMatroskaFrameIndex() {
     bool demuxNeedsReset = false;
     try {
@@ -1642,7 +1722,19 @@ bool VDQtVideoDecoder::buildMatroskaFrameIndex() {
 }
 
 bool VDQtVideoDecoder::registerContainerSeekPoints() {
-    if (!mFormatCtx || mFormatCtx->iformat != av_find_input_format("matroska")) return true;
+    if (!mFormatCtx) return true;
+    const bool asf = mFormatCtx->iformat == av_find_input_format("asf");
+    const bool matroska = mFormatCtx->iformat == av_find_input_format("matroska");
+    if (!asf && !matroska) return true;
+    if (asf && !mFrameIndex.isEmpty() && mFrameIndex.first().seekPosition >= 0) {
+        // A nonzero native seek loads ASF's optional coarse Simple Index first;
+        // otherwise its later loading could overwrite exact keyframe positions.
+        // Always use public seeking so fragmented-payload state is reset too.
+        int64_t probe;
+        if (!addTimestamp(mFrameIndex.first().timestamp, 1, &probe)) return false;
+        const int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, probe, AVSEEK_FLAG_BACKWARD);
+        if (!resetDecoderToStart() || result < 0) return false;
+    }
     // Use the demuxer's own public keyframe index so files without Cues remain
     // seekable too. Bound its size; dense intra sources may decode a few extra
     // pictures from a coarser anchor rather than duplicate a movie-sized table.
@@ -1661,7 +1753,7 @@ bool VDQtVideoDecoder::registerContainerSeekPoints() {
     // seeker's last-entry special case otherwise reads to EOF (and can reject
     // the last GOP when Cues are absent), even though our header map is complete.
     // Omitting a key flag may decode from an earlier key; it cannot skip pictures.
-    if (mFrameIndex.size() > 1 && mFrameIndex.last().seekPosition >= 0) {
+    if (matroska && mFrameIndex.size() > 1 && mFrameIndex.last().seekPosition >= 0) {
         const auto& last = mFrameIndex.last();
         if (av_add_index_entry(mFormatCtx->streams[mVideoStreamIndex], last.seekPosition,
                                last.timestamp, 0, 0, 0) < 0) return false;
@@ -1719,6 +1811,15 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
         return true;
 
     int64_t seekTimestamp = targetTimestamp;
+    if (mFormatCtx->iformat == av_find_input_format("asf")
+        && mFrameIndex.at(anchorIndex).seekPosition >= 0) {
+        // Reinsert the exact requested anchor even if the bounded native index
+        // coarsened it or contains a Simple Index entry at the same timestamp.
+        // A raw byte seek would leave ASF's fragment buffers from the old GOP.
+        if (av_add_index_entry(mFormatCtx->streams[mVideoStreamIndex],
+                mFrameIndex.at(anchorIndex).seekPosition, targetTimestamp, 0, 0, AVINDEX_KEYFRAME) < 0)
+            return resetDecoderToStart();
+    }
     if (mFormatCtx->iformat == av_find_input_format("avi")
         && mFrameIndex.at(anchorIndex).seekPosition >= 0) {
         // The AVI seek API expects a stored chunk's DTS slot. Its presentation

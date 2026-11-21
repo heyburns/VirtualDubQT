@@ -222,6 +222,23 @@ dependency chain still identifies its last ordinal without breaking the ordered
 metadata clock. Normal navigation snapshots share this map with preview/export,
 while deliberate health inspections continue to decode every picture.
 
+`VDQtAsfTiming` maps complete media objects in fixed-size ASF packets for WMV1,
+WMV2 and Simple/Main WMV3 whose sequence header declares no B pictures. This
+walks packet/payload headers with unbuffered reads and skips compressed video
+and other tracks. Contiguous fragments must agree on object identity, size and
+timestamp before one picture is counted. The common two-byte duration extension
+is accepted; timestamp overrides, compressed multi-object video payloads,
+variable packet sizes, encrypted streams and ambiguous/truncated layouts retain
+decoded verification. WMV3 sprite, IntraX8 and old interlace modes are excluded.
+Timestamps remain strictly increasing; average FPS never determines ordinals.
+One actual demuxed packet calibrates preroll without decoding a picture. Before
+seeding FFmpeg's public keyframe index, a native seek loads its optional coarse
+Simple Index so it cannot later replace exact positions. Each requested anchor
+is reinserted if the bounded native index coarsened it. Native seeking resets
+ASF's fragment buffers; a raw byte seek would leave stale partial objects.
+Snapshots and completed inspections preserve packet positions. Reader limits
+bound frames, packet/object counts and header bytes; metadata is not decode proof.
+
 Complete immutable navigation snapshots are shared between worker and editor, including
 keyframe controls, export and audio-start timing. Matching open-source identity,
 stream/timebase/codec and recovery policy are required for adoption; generation

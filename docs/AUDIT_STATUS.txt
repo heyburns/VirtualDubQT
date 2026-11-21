@@ -48,7 +48,11 @@ Remaining execution sequence
     FFV1, raw and HuffYUV paths also accelerate; native key positions survive
     snapshot sharing. One picture calibrates timestamps. Packed DivX/Xvid,
     dropped slots and inconsistent indexes deliberately retain decoded fallback.
-[ ] Container navigation performance: ASF/WMV, FLV, MPEG system streams,
+[x] Ordinary ASF/WMV navigation: fixed-packet object headers establish exact
+    frame order for WMV1/2 and Simple/Main WMV3 without B pictures. Fragment
+    validation, calibrated preroll and native seek points avoid a full decode;
+    preview snapshots retain those positions. Complex WMV layouts keep fallback.
+[ ] Container navigation performance: complex ASF/WMV, FLV, MPEG system streams,
     WebM and other unsupported mappings still build a decoded index on the first
     random seek. Accurate seeking after that scan does not establish the original
     Windows startup behavior. Measure and extend format-specific navigation;
@@ -226,10 +230,11 @@ Remaining execution sequence
     Arbitrary nonzero AVI packet-copy starts may retain container/audio preroll;
     packet-aligned controls do not establish sample-exact compressed copying.
 
-Latest verified checkpoint (2026-11-21): Release 210/210 and ASan/UBSan 106/106
-pass, followed by regular-binary media smoke and original-file AVI export checks.
+Latest verified checkpoint (2026-11-21): Release 212/212 and ASan/UBSan 108/108
+pass, followed by regular-binary media smoke and original-file WMV export checks.
 The user's HEVC MKV navigates from header metadata with zero movie-wide decoding;
-Ordinary indexed AVI uses native navigation and one calibration picture;
+ordinary indexed AVI uses native navigation and one calibration picture;
+ordinary WMV uses packet-header timing with zero calibration pictures;
 other formats' remaining first-scrub scans are explicitly unchecked above.
 Coverage includes 100 native allocation-failure cases, joined-audio precision/cancellation, exact
 blur/interpolation/six-axis and actual waveform/export-preview/playback controls.

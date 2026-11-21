@@ -2230,3 +2230,57 @@ in approximately 0.47 seconds; their BGRA hashes match the independent reference
 The rebuilt build/VirtualDubQt also passes the maintained MP4/native-AVS smoke
 and that original-AVI export check. Its previous executable is retained as
 build/VirtualDubQt.before-avi-index-navigation-20261121. Restart to use this build.
+
+
+ASF/WMV navigation (2026-11-21)
+-------------------------------
+
+Ordinary fixed-packet ASF sources use packet/payload headers for frame order:
+WMV1, WMV2, and Simple/Main WMV3 whose sequence header declares no B pictures.
+No compressed picture is decoded during opening. Unbuffered reads skip picture
+and audio data; one normal demuxed packet calibrates ASF preroll. Complete,
+contiguous media-object fragments establish one picture, including objects that
+cross packet boundaries. The selected stream need not be first. Native seeks
+load the optional Simple Index before exact key positions are registered, and
+reinsert the requested precise anchor after any native index coarsening. Raw
+byte seeking is deliberately avoided because ASF retains fragment assembly state.
+
+Maintained asf_navigation_tests generate six 3,000-picture fixtures: WMV2,
+audio-first fractional-rate WMV1, variable-rate timing, absent Simple Index,
+a nonzero timestamp origin, and intra-only video sharing packets. Nine sparse
+seeks per fixture, adopted snapshots and fresh health scans agree with independent
+full-decode hashes. Structural fixtures cover complete/incomplete fragments,
+object-number wrap, replication-free continuations, first-fragment key flags,
+changed fragment timestamps/IDs/offsets, oversized objects, compressed video
+payload rejection, packet/header count mismatches, padding, encryption and
+truncation. A stale declared count rejects metadata acceleration while retaining
+accurate decoded fallback through tail/rewind. The cross-container matrix now
+requires metadata navigation for ASF/WMV2. operation_asf_navigation exercises
+cold keyframe controls, playback and rapid scrubbing without an indexing dialog.
+
+The original 640x480 WMV3 sample contains 10,259 pictures. Header object times,
+sizes, packet positions and key flags agree with every normal demuxed packet.
+All 10,259 application-decoded pictures match the independent sequential BGRA
+hashes. Nine scattered seeks and four adopted-snapshot seeks also match; a fresh
+full health inspection retains its exact count and reusable packet positions.
+Measured warm-cache opening is approximately 105-107 ms, reading 339 KB through
+read() from the 30.5 MB source, including normal FFmpeg probing. The first far
+seek is 13-14 ms and 24 decoded pictures, versus the previous 3.47-second full
+navigation decode. The real controller opens/displays in 149 ms, scrubs to the
+middle in 30 ms, plays, rewinds and plays from frame zero, with no indexing dialog.
+These timings describe this workstation with two decoder threads, not a general
+latency guarantee. Media is read-only and probe/application settings are isolated.
+
+Complex/B-picture WMV3, VC-1 Advanced, variable packet sizes, multi-object video
+payloads, timestamp override extensions and ambiguous/damaged layouts retain the
+verified decoded fallback. This does not accelerate every historical ASF variant.
+FLV, MPEG system streams and WebM are unchanged. No new release packages or push
+are performed for this test checkpoint; physical audio listening is not covered.
+
+Final validation: Release 212/212 and ASan/UBSan 108/108 pass, with leak detection
+disabled by the established sanitizer preset. Both final builds are warning-free.
+The rebuilt build/VirtualDubQt passes the maintained MP4/native-AviSynth smoke
+and exports three original WMV pictures from the middle in approximately 0.38
+seconds; their BGRA hashes match the independent reference exactly. The previous
+executable is retained as build/VirtualDubQt.before-wmv-navigation-20261121.
+Restart the application to use the rebuilt executable.

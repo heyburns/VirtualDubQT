@@ -162,7 +162,7 @@ private:
     struct FrameIndexEntry {
         int64_t timestamp = AV_NOPTS_VALUE;
         int64_t duration = 0;
-        int64_t seekPosition = -1; // MKV Cluster or AVI chunk position; key flags establish safe anchors.
+        int64_t seekPosition = -1; // MKV Cluster, AVI chunk or ASF packet; key flags establish safe anchors.
         bool keyFrame = false;
     };
 
@@ -175,6 +175,7 @@ private:
     bool buildContainerFrameIndex();
     bool buildMatroskaFrameIndex();
     bool buildAviFrameIndex();
+    bool buildAsfFrameIndex();
     bool registerContainerSeekPoints();
     void invalidateContainerFrameIndex();
     bool resetDecoderToStart();

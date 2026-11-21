@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
         {"flv-spark", "flv", "flv"},
         {"flv-disposable", "flv", "flv", {"-g", "2"}, false, true},
         {"ogv-theora", "ogv", "libtheora"},
-        {"asf-wmv2", "asf", "wmv2"},
+        {"asf-wmv2", "asf", "wmv2", {}, true},
         {"nut-ffv1", "nut", "ffv1"},
         {"nut-rawvideo", "nut", "rawvideo", {"-pix_fmt", "bgr0"}},
         {"mxf-mpeg2", "mxf", "mpeg2video", {"-pix_fmt", "yuv422p", "-profile:v", "0",
