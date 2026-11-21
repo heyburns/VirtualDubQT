@@ -1,6 +1,6 @@
 # Building VirtualDubQT
 
-These instructions target version **0.1.3**, Ubuntu 24.04 and Fedora 43 on
+These instructions target version **0.1.4**, Ubuntu 24.04 and Fedora 43 on
 64-bit Intel/AMD Linux. You do not need to build FFmpeg: use the matching SDK
 download below. The application never uses distribution FFmpeg.
 
@@ -61,16 +61,16 @@ the matching headers needed to compile against it. It contains no script
 frameworks or Python installation. It requires glibc 2.38 or newer.
 
 ```bash
-git clone --branch v0.1.3 --depth 1 \
-    https://github.com/heyburns/VirtualDubQT.git "$HOME/src/VirtualDubQT-0.1.3"
-cd "$HOME/src/VirtualDubQT-0.1.3"
+git clone --branch v0.1.4 --depth 1 \
+    https://github.com/heyburns/VirtualDubQT.git "$HOME/src/VirtualDubQT-0.1.4"
+cd "$HOME/src/VirtualDubQT-0.1.4"
 curl --fail --location --remote-name \
-    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.3/VirtualDubQT-0.1.3-ffmpeg-sdk-x86_64.tar.xz
+    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.4/VirtualDubQT-0.1.4-ffmpeg-sdk-x86_64.tar.xz
 curl --fail --location --remote-name \
-    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.3/SHA256SUMS
+    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.4/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 mkdir -p dist/ffmpeg-runtime-locked
-tar -xJf VirtualDubQT-0.1.3-ffmpeg-sdk-x86_64.tar.xz -C dist/ffmpeg-runtime-locked
+tar -xJf VirtualDubQT-0.1.4-ffmpeg-sdk-x86_64.tar.xz -C dist/ffmpeg-runtime-locked
 ```
 
 Expect the SDK filename followed by `OK` before extracting it. Stop if the
@@ -138,7 +138,7 @@ separate frameworks and host platform libraries. DEB and RPM builds use their
 own distro's Qt with the same private backend.
 
 The GitHub workflow builds packages on packaging-related pushes to main, without
-publishing them. A matching `v0.1.3` tag publishes only after the Ubuntu DEB,
+publishing them. A matching `v0.1.4` tag publishes only after the Ubuntu DEB,
 AppImage and Fedora RPM pass clean-runtime export tests. When the exact tagged
 commit already passed on main and its artifacts are still available, it promotes
 those identical tested files; otherwise it builds and validates fresh packages.

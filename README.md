@@ -18,7 +18,7 @@ Start with the [installation guide](docs/INSTALLATION.md): choose a package,
 launch the app, and make a first export. It includes copyable commands and
 expected results. You do not need to write code to use VirtualDubQT.
 
-Get version 0.1.3 from the [releases page](https://github.com/heyburns/VirtualDubQT/releases).
+Download the latest version from the [releases page](https://github.com/heyburns/VirtualDubQT/releases).
 The **AppImage** includes Qt and the media backend. The **DEB** targets Ubuntu
 24.04 and the **RPM** targets Fedora 43.
 All three are for 64-bit Intel/AMD Linux. The AppImage needs glibc 2.38 or newer;

@@ -46,15 +46,15 @@ terminal shell on Ubuntu and Fedora. If you use another shell, type `bash` first
 
 ## Choose a package
 
-Open the [0.1.3 release](https://github.com/heyburns/VirtualDubQT/releases/tag/v0.1.3)
+Open the [0.1.4 release](https://github.com/heyburns/VirtualDubQT/releases/tag/v0.1.4)
 and expand **Assets** if necessary. Download **one** of the files below. GitHub's
 “Source code” ZIP and tar.gz files are for building, not ready-to-run programs.
 
 | Download | Choose this when | What it supplies |
 | --- | --- | --- |
-| `VirtualDubQT-0.1.3-x86_64.AppImage` | You want the bundled version | Qt and private FFmpeg/ffprobe with script-reader support |
-| `virtualdubqt_0.1.3_amd64.deb` | You use Ubuntu 24.04 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
-| `virtualdubqt-0.1.3-1.x86_64.rpm` | You use Fedora 43 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
+| `VirtualDubQT-0.1.4-x86_64.AppImage` | You want the bundled version | Qt and private FFmpeg/ffprobe with script-reader support |
+| `virtualdubqt_0.1.4_amd64.deb` | You use Ubuntu 24.04 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
+| `virtualdubqt-0.1.4-1.x86_64.rpm` | You use Fedora 43 or matching packages | Private FFmpeg/ffprobe; your package manager installs Qt |
 
 All three are for 64-bit Intel/AMD computers. `amd64` and `x86_64` mean the same
 architecture here; neither is an ARM build. If you are unsure of your system,
@@ -94,8 +94,8 @@ choose **Open in Terminal**. Alternatively, use `cd "$HOME/Downloads"` if you
 saved it in Downloads. Run:
 
 ```bash
-chmod +x VirtualDubQT-0.1.3-x86_64.AppImage
-./VirtualDubQT-0.1.3-x86_64.AppImage
+chmod +x VirtualDubQT-0.1.4-x86_64.AppImage
+./VirtualDubQT-0.1.4-x86_64.AppImage
 ```
 
 `chmod +x` marks the file as a program you can run. `./` means “the file in this
@@ -105,7 +105,7 @@ run it from; it does not install a separate copy of the application.
 If it reports missing FUSE support, this command runs it without FUSE:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./VirtualDubQT-0.1.3-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./VirtualDubQT-0.1.4-x86_64.AppImage
 ```
 
 Next, try [your first open and export](#your-first-open-and-export). There is no
@@ -116,7 +116,7 @@ need to build FFmpeg. Complete the separate AviSynth setup before launching.
 Open a terminal in the folder containing the downloaded `.deb`, then run:
 
 ```bash
-sudo apt install ./virtualdubqt_0.1.3_amd64.deb
+sudo apt install ./virtualdubqt_0.1.4_amd64.deb
 VirtualDubQt
 ```
 
@@ -129,7 +129,7 @@ open **VirtualDubQT** from your desktop's application menu. Next, try
 Open a terminal in the folder containing the downloaded `.rpm`, then run:
 
 ```bash
-sudo dnf install ./virtualdubqt-0.1.3-1.x86_64.rpm
+sudo dnf install ./virtualdubqt-0.1.4-1.x86_64.rpm
 VirtualDubQt
 ```
 
@@ -199,7 +199,7 @@ The packages do not supply Python or VapourSynth.
 
 To inspect the selected backend, use **Tools → System Information**, or run
 `VirtualDubQt --runtime-info` for a native package. For an AppImage, run
-`./VirtualDubQT-0.1.3-x86_64.AppImage --runtime-info`. An AppImage also needs the
+`./VirtualDubQT-0.1.4-x86_64.AppImage --runtime-info`. An AppImage also needs the
 separately installed AviSynth library to start.
 
 ## Common problems
@@ -207,7 +207,8 @@ separately installed AviSynth library to start.
 | What you see | What to do next |
 | --- | --- |
 | Downloaded filename: “No such file or directory” | Open a terminal in the download folder. Run `pwd` to show the current folder and `ls` to list its files; use the filename that is actually there. |
-| Startup: missing `libavisynth` | Follow the separate [AviSynth setup](BUILDING.md#install-avisynth), then run `sudo ldconfig`. |\n| AppImage: “Permission denied” | Run its `chmod +x` command above, then launch it again. |
+| Startup: missing `libavisynth` | Follow the separate [AviSynth setup](BUILDING.md#install-avisynth), then run `sudo ldconfig`. |
+| AppImage: “Permission denied” | Run its `chmod +x` command above, then launch it again. |
 | AppImage: FUSE or `libfuse.so.2` error | Use the `APPIMAGE_EXTRACT_AND_RUN=1` command above. |
 | AppImage: `GLIBC_2.38 not found` | Your system's glibc is below this package's requirement. Use an appropriate system or a source build with compatible dependencies. |
 | APT/DNF: dependencies cannot be satisfied | Check that the package matches your distro/version. Use the AppImage or a source build if it does not. |

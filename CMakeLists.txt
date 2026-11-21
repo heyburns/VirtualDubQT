@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(VirtualDubQt VERSION 0.1.3 LANGUAGES CXX)
+project(VirtualDubQt VERSION 0.1.4 LANGUAGES CXX)
 
 # Single-configuration builds should not accidentally ship an unoptimized GUI.
 # Honor explicit Debug/RelWithDebInfo choices and multi-configuration generators.
