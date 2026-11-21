@@ -1806,12 +1806,15 @@ bool sparseEof(VDQtTestFixtures& fixtures) {
                  "sparse EOF retains the timeline and last displayed playhead");
 }
 
-bool indexedNavigation(VDQtTestFixtures& fixtures) {
-    const QString source = fixtures.directory.filePath("key-navigation.mp4");
-    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10",
-                          "-frames:v", "48", "-c:v", "libx264", "-g", "12",
+bool indexedNavigation(VDQtTestFixtures& fixtures, bool matroska = false) {
+    const QString source = fixtures.directory.filePath(matroska ? "key-navigation.mkv" : "key-navigation.mp4");
+    QStringList arguments{"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10",
+                          "-frames:v", "48", "-c:v", matroska ? "libx265" : "libx264", "-g", "12",
                           "-keyint_min", "12", "-sc_threshold", "0", "-bf", "3",
-                          "-threads", "1", "-an", source})) return false;
+                          "-threads", "1", "-an"};
+    if (matroska) arguments << "-preset" << "ultrafast" << "-x265-params"
+        << "pools=1:frame-threads=1:log-level=error:keyint=12:min-keyint=12:scenecut=0";
+    if (!fixtures.ffmpeg(arguments + QStringList{source})) return false;
     VDQtVideoDecoder reference;
     if (!reference.openFile(source) || reference.ensureFrameIndex().totalFrames != 48) return false;
     const int key = reference.getNextKeyFrame(0);
@@ -1843,7 +1846,7 @@ bool indexedNavigation(VDQtTestFixtures& fixtures) {
     const bool advanced = waitFor([&] { return position->GetPosition() > key + 1; });
     QMetaObject::invokeMethod(&window, "onTransportAction", Qt::DirectConnection,
                               Q_ARG(int, VDQT_PCN_STOP));
-    if (!check(advanced, "cold indexed MP4 playback advances from the middle")) return false;
+    if (!check(advanced, "cold container-mapped playback advances from the middle")) return false;
     for (int frame : {3, 35, 2, 47, 11, 41}) position->SetPosition(frame);
     return check(waitFor([&] { return panes.first()->frameImage() == finalScrub; })
                  && position->GetPosition() == 41 && progress.shown == 0,
@@ -2591,6 +2594,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "sparse_eof") return sparseEof(fixtures);
     if (scenario == "index_reuse") return indexReuse(fixtures);
     if (scenario == "indexed_navigation") return indexedNavigation(fixtures);
+    if (scenario == "matroska_navigation") return indexedNavigation(fixtures, true);
     if (scenario == "image_sequence") return importedImageTiming(fixtures);
     if (scenario == "filter_failure") return failedFilterPreview(fixtures);
     if (scenario == "filter_context") return editedFilterContext(fixtures);

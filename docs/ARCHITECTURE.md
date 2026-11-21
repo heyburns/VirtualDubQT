@@ -135,7 +135,7 @@ the presentation-order index and provide VFR frame durations. A known sequential
 traversal appends the next ordinal directly, even if its PTS equals the previous
 frame's PTS. Timestamp equality does not mean the pictures are the same frame.
 An expected indexed revisit likewise checks only its expected entry. When a seek
-actually requires reconciliation, validated MP4 maps use binary searches without
+actually requires reconciliation, validated container maps use binary searches without
 allocating a second movie-sized lookup table. For decoded-only indexes, a lazy hash maps each timestamp to a sorted
 list of ordinals; duplicate timestamps are retained rather than overwritten.
 That auxiliary storage is released on Close or a deliberate index rebuild.
@@ -153,6 +153,13 @@ otherwise they establish a decoded presentation index before using a timestamp
 anchor. Frame number divided by average FPS is never used to label a
 picture. Repeated-timestamp anchors are ambiguous, so those paths count from a
 safe earlier unique anchor or the beginning. Seek overshoot retries from start.
+MPEG transport/program streams rewind by byte position because their demuxer
+searches DTS while the declared start describes PTS; a timestamp rewind can
+silently miss the first GOP. Random MPEG seeks request an earlier verified GOP
+before reconciling presentation timestamps. FLV1 has no decoder flush callback
+in the bundled FFmpeg: replace that codec context transactionally after a seek,
+and warm it from the preceding GOP before the target. Rewinding starts with a
+fresh context so disposable initial pictures retain their original identities.
 
 `hasFrameNavigation()`/`ensureFrameNavigation()` are the contract for navigation,
 edits, audio boundaries, exports and serving. For ordinary FFmpeg media,
@@ -180,6 +187,23 @@ MOV/MP4 tables for supported picture-per-sample codecs; fragmented files, comple
 edits, contradictory metadata and excessive tables retain decoded verification.
 Its auxiliary sample limit is 4,194,304. This is a conservative fast path, not a
 replacement demuxer. Unrecognized pictures invalidate the metadata map.
+
+`VDQtMatroskaTiming` builds the equivalent map for native picture-per-block MKV
+tracks, including HEVC/H.264 and variable-rate timing. Unlike MP4 sample tables,
+Matroska keeps individual timestamps beside its blocks, so this helper walks
+bounded EBML headers while seeking over compressed pictures, audio and attachments.
+It selects the track using the first demuxed packet's actual block position and
+calibrates codec delay against that packet. No frame ordinal is inferred from
+average FPS or a duration tag. Fixed/Xiph/EBML laces use FFmpeg's integer duration
+distribution. Cluster positions seed FFmpeg's public keyframe index, including
+files without Cues; a real final picture is registered as a non-key boundary to
+avoid the demuxer's last-index-entry scan. Shared snapshots retain those positions
+when adopted by the preview worker or replaced by a matching completed inspection.
+Malformed metadata, changed sources, reordered duplicate timestamps, invisible
+pictures, track encodings/scaling, unsupported codec mappings and oversized maps
+retain verified decoding or fail the open when source identity changes. Known
+field-per-packet/interlaced video is excluded. Parsing never certifies decode health.
+The same 4,194,304-frame limit applies, with finite element and header-byte budgets.
 
 Complete immutable navigation snapshots are shared between worker and editor, including
 keyframe controls, export and audio-start timing. Matching open-source identity,

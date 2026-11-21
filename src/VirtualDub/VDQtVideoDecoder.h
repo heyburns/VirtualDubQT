@@ -27,7 +27,7 @@ extern "C" {
 // directly through AviSynth+ so video and audio can share one script graph.
 //
 // FFmpeg decoding is presentation-order aware: mFrameIndex holds validated MP4
-// sample metadata or decoded observations, seeks restart from a safe timestamp,
+// sample/MKV block metadata or decoded observations, seeks restart from a safe timestamp,
 // and dependent frames are decoded forward. getFrameImage() returns a detached
 // QImage cached by frame number. The class is internally guarded by a recursive
 // mutex because native AVS audio/video may enter it from separate workers.
@@ -162,6 +162,7 @@ private:
     struct FrameIndexEntry {
         int64_t timestamp = AV_NOPTS_VALUE;
         int64_t duration = 0;
+        int64_t seekPosition = -1; // Matroska Cluster position; key flags establish safe anchors.
         bool keyFrame = false;
     };
 
@@ -172,8 +173,11 @@ private:
     bool ensureConversionResources(const AVFrame *sourceFrame);
     bool seekToFrame(int frameIndex);
     bool buildContainerFrameIndex();
+    bool buildMatroskaFrameIndex();
+    bool registerContainerSeekPoints();
     void invalidateContainerFrameIndex();
     bool resetDecoderToStart();
+    bool resetCodecAfterSeek();
     bool decodeNextFrame(int *decodeErrors = nullptr,
                          const std::function<bool()>& shouldContinue = nullptr);
     QImage convertDecodedFrameToImage();

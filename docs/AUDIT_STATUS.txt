@@ -33,17 +33,28 @@ Remaining execution sequence
 [x] H03: sparse EOF must not promote an incomplete prefix to exact source length.
 [x] H05: exact random frame identity, including variable-rate and duplicate-PTS media.
 [x] H04: packet/frame cancellation of obsolete seeks and nearby verified anchors.
-    Ordinary indexed MP4/MOV navigation now uses sample metadata and decodes only
-    nearby dependencies. Unsupported/ambiguous layouts retain a decoded index;
+    Ordinary indexed MP4/MOV navigation uses sample metadata; native HEVC/H.264
+    MKV uses block-header timing and cluster seek points, including missing Cues.
+    Both decode only nearby dependencies. Unsupported/ambiguous layouts retain a decoded index;
     replacement requests resume it when the decoder continues a verified prefix.
     Individual AVS/I/O calls are not preemptible.
+[x] MPEG/FLV navigation follow-up: byte rewind and earlier verified GOPs prevent
+    MPEG timestamp seeks from missing beginning/tail frames. Recreate FLV1's
+    unflushable codec after seeks and warm reference history before the target.
+    Thirty synthetic combinations and the user's four additional files verify
+    exact pixels, rewind/playback, shared indexes and selected raw exports.
+[ ] Container navigation performance: AVI, ASF/WMV, FLV, MPEG system streams,
+    WebM and other unsupported mappings still build a decoded index on the first
+    random seek. Accurate seeking after that scan does not establish the original
+    Windows startup behavior. Measure and extend format-specific navigation;
+    do not replace frame identity with average-FPS estimates. FLV is low priority.
 [x] M16: complete immutable indexes shared between preview/editor/export/audio
     timing consumers; cold keyframe buttons use actual keyframes, not FPS guesses.
     Navigation metadata and completed decoded inspections are distinct proofs.
 [x] Variable-rate jump-to-time: real cumulative edited boundaries, checked parser
     arithmetic and a source-owning modal operation scope.
 [x] P01: linear sequential index growth, distinct duplicate-PTS ordinals and lazy
-    hashed timestamp reconciliation. Validated MP4 maps use binary searches;
+    hashed timestamp reconciliation. Validated container maps use binary searches;
     exact random-seek identity is covered by the completed H05 regressions.
 [x] P02: reuse complete source-owned indexes for raw/rendered exports and retries;
     preserve fresh error scans and invalidate proof on Close/cancel/error-policy change.
@@ -210,9 +221,11 @@ Remaining execution sequence
     Arbitrary nonzero AVI packet-copy starts may retain container/audio preroll;
     packet-aligned controls do not establish sample-exact compressed copying.
 
-Latest verified checkpoint: Release 197/197, ASan/UBSan 93/93 and independently
-rebuilt regular-binary MP4/native-AVS raw/FFV1 smoke tests pass. This includes
-100 native allocation-failure cases, joined-audio precision/cancellation, exact
+Latest verified checkpoint (2026-11-21): Release 208/208 and ASan/UBSan 104/104
+pass, followed by final header-I/O regressions and regular-binary media smoke.
+The user's HEVC MKV navigates from header metadata with zero movie-wide decoding;
+other formats' remaining first-scrub scans are explicitly unchecked above.
+Coverage includes 100 native allocation-failure cases, joined-audio precision/cancellation, exact
 blur/interpolation/six-axis and actual waveform/export-preview/playback controls.
 VFR packed RGB24, RGBA8 and RGBA16 round trips compare exact pixels/timestamps.
 Selected-source policy, held-mask duration/rate conversion, unsafe gap-collapse

@@ -4,6 +4,7 @@
 #include "VDQtVideoDecoder.h"
 #include "VDQtVideoAspect.h"
 #include "VDQtMp4Timing.h"
+#include "VDQtMatroskaTiming.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 
 extern "C" {
 #include <libavutil/pixdesc.h>
@@ -231,6 +233,18 @@ bool isUsableFrameRate(AVRational rate) {
 int boundedFrameCount(int64_t count) {
     if (count <= 0) return 0;
     return static_cast<int>(std::min<int64_t>(count, std::numeric_limits<int>::max()));
+}
+
+bool addTimestamp(int64_t left, int64_t right, int64_t *sum) {
+    if ((right > 0 && left > INT64_MAX - right)
+        || (right < 0 && left < INT64_MIN - right)) return false;
+    *sum = left + right;
+    return true;
+}
+
+bool isMpegSystemStream(const AVFormatContext *context) {
+    return context && (context->iformat == av_find_input_format("mpegts")
+                       || context->iformat == av_find_input_format("mpeg"));
 }
 
 constexpr qsizetype kConversionAlignment = 64;
@@ -1036,7 +1050,7 @@ bool VDQtVideoDecoder::openFile(const QString& filePath, const FrameIndexSnapsho
 
     mIsOpen = true;
     // Windows VirtualDub2's avlib input driver navigates an existing container
-    // sample index. A whole decoded error scan is not an MP4 seek prerequisite.
+    // sample index. A whole decoded error scan is not a navigation prerequisite.
     // Metadata failure is deliberately nonfatal: the verified fallback remains.
     if (!adoptFrameIndexSnapshot(navigation)) buildContainerFrameIndex();
     if (!mLastError.isEmpty()) {
@@ -1278,9 +1292,14 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
     if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
 
     const int64_t timestamp = mStreamStartTimestamp == AV_NOPTS_VALUE ? 0 : mStreamStartTimestamp;
-    int result = avformat_seek_file(
-        mFormatCtx, mVideoStreamIndex, std::numeric_limits<int64_t>::min(),
-        timestamp, timestamp, AVSEEK_FLAG_BACKWARD);
+    // MPEG system-stream timestamp searches use DTS, while stream start_time
+    // describes the first presentation time. With reordered pictures a search
+    // for that PTS can skip the first GOP even when it reports success. Rewind
+    // these byte-seekable demuxers to the actual beginning instead.
+    int result = isMpegSystemStream(mFormatCtx)
+        ? av_seek_frame(mFormatCtx, -1, 0, AVSEEK_FLAG_BYTE)
+        : avformat_seek_file(mFormatCtx, mVideoStreamIndex, std::numeric_limits<int64_t>::min(),
+                             timestamp, timestamp, AVSEEK_FLAG_BACKWARD);
     if (result < 0) {
         result = av_seek_frame(mFormatCtx, mVideoStreamIndex, timestamp, AVSEEK_FLAG_BACKWARD);
     }
@@ -1323,7 +1342,7 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
         }
     }
 
-    avcodec_flush_buffers(mCodecCtx);
+    if (!resetCodecAfterSeek()) return false;
     av_frame_unref(mFrame);
     av_packet_unref(mPacket);
     mPacketPending = false;
@@ -1338,6 +1357,35 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
     return true;
 }
 
+bool VDQtVideoDecoder::resetCodecAfterSeek() {
+    if (mCodecCtx->codec_id == AV_CODEC_ID_FLV1) {
+        // FLV1's legacy decoder retains state through flush which changes
+        // whether an initial disposable picture is emitted on the next pass.
+        // FFmpeg 6.1's FLV1 implementation has no flush callback. Recreate only
+        // this codec so seek history cannot change presentation ordinals.
+        // Build the replacement before releasing the old context.
+        const AVCodec *codec = mCodecCtx->codec;
+        AVCodecContext *replacement = avcodec_alloc_context3(codec);
+        int error = replacement ? avcodec_parameters_to_context(
+            replacement, mFormatCtx->streams[mVideoStreamIndex]->codecpar) : AVERROR(ENOMEM);
+        if (error >= 0) {
+            replacement->pkt_timebase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+            replacement->thread_count = mCodecCtx->thread_count;
+            replacement->thread_type = mCodecCtx->thread_type;
+            configureDecoderErrorMode(replacement, mErrorMode);
+            error = avcodec_open2(replacement, codec, nullptr);
+        }
+        if (error < 0) {
+            avcodec_free_context(&replacement);
+            mLastError = avOperationError(QStringLiteral("Could not reset the FLV video decoder"), error);
+            return false;
+        }
+        avcodec_free_context(&mCodecCtx);
+        mCodecCtx = replacement;
+    } else avcodec_flush_buffers(mCodecCtx);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Seek/decode state machine and presentation-order frame indexing
 // ---------------------------------------------------------------------------
@@ -1345,8 +1393,9 @@ bool VDQtVideoDecoder::resetDecoderToStart() {
 bool VDQtVideoDecoder::buildContainerFrameIndex() {
     bool demuxNeedsReset = false;
     try {
-        if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0
-            || mFormatCtx->iformat != av_find_input_format("mov")) return false;
+        if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0) return false;
+        if (mFormatCtx->iformat == av_find_input_format("matroska")) return buildMatroskaFrameIndex();
+        if (mFormatCtx->iformat != av_find_input_format("mov")) return false;
         // These MOV codecs store a picture (or paired interlaced fields) per sample.
         // Do not generalize packet counts to codecs which can emit several pictures
         // per sample. Fragmented files/complex edits are rejected by the table reader.
@@ -1402,22 +1451,17 @@ bool VDQtVideoDecoder::buildContainerFrameIndex() {
         if (avformat_index_get_entries_count(stream) != samples || stream->nb_frames != samples) return false;
         // Safe checked timestamp arithmetic: rejecting extreme metadata is better
         // than overflowing a signed timestamp or guessing an ordinal.
-        const auto add = [](int64_t left, int64_t right, int64_t *sum) {
-            if ((right > 0 && left > INT64_MAX - right)
-                || (right < 0 && left < INT64_MIN - right)) return false;
-            *sum = left + right;
-            return true;
-        };
         int64_t shift;
         if (first.timestamp == INT64_MIN || offsets.at(0) == INT64_MIN
-            || !add(firstPts, -first.timestamp, &shift) || !add(shift, -offsets.at(0), &shift)) return false;
+            || !addTimestamp(firstPts, -first.timestamp, &shift)
+            || !addTimestamp(shift, -offsets.at(0), &shift)) return false;
         QVector<FrameIndexEntry> entries;
         entries.reserve(samples);
         for (int sample = 0; sample < samples; ++sample) {
             const AVIndexEntry *source = avformat_index_get_entry(stream, sample);
             FrameIndexEntry entry;
-            if (!add(source->timestamp, shift, &entry.timestamp)
-                || !add(entry.timestamp, offsets.at(sample), &entry.timestamp)
+            if (!addTimestamp(source->timestamp, shift, &entry.timestamp)
+                || !addTimestamp(entry.timestamp, offsets.at(sample), &entry.timestamp)
                 || entry.timestamp == AV_NOPTS_VALUE) return false;
             entry.keyFrame = (source->flags & AVINDEX_KEYFRAME) != 0;
             entries.append(entry);
@@ -1451,6 +1495,123 @@ bool VDQtVideoDecoder::buildContainerFrameIndex() {
             mLastError = QStringLiteral("Not enough memory to restore the video stream after reading navigation metadata.");
         return false;
     }
+}
+
+bool VDQtVideoDecoder::buildMatroskaFrameIndex() {
+    bool demuxNeedsReset = false;
+    try {
+        // Native Matroska frame-per-block mappings. Invisible-frame codecs,
+        // VFW packed packets and field-per-packet video retain decoded indexing.
+        QByteArray codecId;
+        switch (mCodecCtx->codec_id) {
+        case AV_CODEC_ID_HEVC: codecId = "V_MPEGH/ISO/HEVC"; break;
+        case AV_CODEC_ID_H264: codecId = "V_MPEG4/ISO/AVC"; break;
+        case AV_CODEC_ID_FFV1: codecId = "V_FFV1"; break;
+        case AV_CODEC_ID_PRORES: codecId = "V_PRORES"; break;
+        case AV_CODEC_ID_MJPEG: codecId = "V_MJPEG"; break;
+        case AV_CODEC_ID_PNG: codecId = "V_PNG"; break;
+        default: return false;
+        }
+        if (mCodecCtx->field_order != AV_FIELD_UNKNOWN && mCodecCtx->field_order != AV_FIELD_PROGRESSIVE)
+            return false;
+        qint64 packetPosition = -1;
+        int64_t packetPts = AV_NOPTS_VALUE;
+        demuxNeedsReset = true;
+        for (int packet = 0; packet < 1024; ++packet) {
+            if (av_read_frame(mFormatCtx, mPacket) < 0) break;
+            if (mPacket->stream_index == mVideoStreamIndex) {
+                packetPosition = mPacket->pos;
+                packetPts = mPacket->pts;
+                av_packet_unref(mPacket);
+                break;
+            }
+            av_packet_unref(mPacket);
+        }
+        av_packet_unref(mPacket);
+        if (!resetDecoderToStart()) return false;
+        demuxNeedsReset = false;
+        if (packetPosition < 0 || packetPts == AV_NOPTS_VALUE) return false;
+        const AVRational timeBase = mFormatCtx->streams[mVideoStreamIndex]->time_base;
+        VDQtMatroskaTiming timing;
+        const bool haveTiming = VDQtReadMatroskaTiming(mFilePath, packetPosition, codecId,
+                                                       timeBase.num, timeBase.den, &timing);
+        const QFileInfo currentSource(mFilePath);
+        if (currentSource.size() != mOpenedFileSize
+            || currentSource.lastModified().toMSecsSinceEpoch() != mOpenedFileModifiedMs) {
+            mLastError = QStringLiteral("The MKV source changed while its navigation metadata was being read. Please reopen it.");
+            return false;
+        }
+        if (!haveTiming) return false;
+        int64_t shift;
+        if (!addTimestamp(packetPts, -timing.referenceTimestamp, &shift)) return false;
+        QVector<FrameIndexEntry> entries;
+        entries.reserve(timing.frames.size());
+        for (const auto& source : std::as_const(timing.frames)) {
+            FrameIndexEntry entry;
+            if (!addTimestamp(source.timestamp, shift, &entry.timestamp)
+                || entry.timestamp == AV_NOPTS_VALUE) return false;
+            entry.duration = source.duration;
+            entry.keyFrame = source.keyFrame;
+            entry.seekPosition = source.seekPosition;
+            entries.append(entry);
+        }
+        std::stable_sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            return a.timestamp < b.timestamp;
+        });
+        if (entries.isEmpty() || !entries.first().keyFrame
+            || entries.first().timestamp != mStreamStartTimestamp) return false;
+        for (int frame = 0; frame + 1 < entries.size(); ++frame) {
+            const int64_t timestamp = entries.at(frame).timestamp;
+            const int64_t next = entries.at(frame + 1).timestamp;
+            // Equal PTS cannot establish POC order for reordered pictures.
+            // Intra codecs retain distinct duplicate-PTS ordinals in file order.
+            if (timestamp == next && mCodecCtx->has_b_frames > 0) return false;
+            if (timestamp < 0 && next > INT64_MAX + timestamp) return false;
+            if (next > timestamp) entries[frame].duration = next - timestamp;
+        }
+        mFrameIndex = std::move(entries);
+        mContainerIndexComplete = true;
+        if (!registerContainerSeekPoints()) {
+            invalidateContainerFrameIndex();
+            return false;
+        }
+        mFrameIndexComplete = false;
+        mFrameCount = boundedFrameCount(mFrameIndex.size());
+        mFrameCountStatus = FrameCountStatus::Exact;
+        return true;
+    } catch (const std::bad_alloc&) {
+        if (demuxNeedsReset)
+            mLastError = QStringLiteral("Not enough memory to restore the MKV stream after reading navigation metadata.");
+        return false;
+    }
+}
+
+bool VDQtVideoDecoder::registerContainerSeekPoints() {
+    if (!mFormatCtx || mFormatCtx->iformat != av_find_input_format("matroska")) return true;
+    // Use the demuxer's own public keyframe index so files without Cues remain
+    // seekable too. Bound its size; dense intra sources may decode a few extra
+    // pictures from a coarser anchor rather than duplicate a movie-sized table.
+    const qsizetype keys = std::count_if(mFrameIndex.cbegin(), mFrameIndex.cend(), [](const auto& frame) {
+        return frame.keyFrame && frame.seekPosition >= 0;
+    });
+    const qsizetype budget = std::clamp<qsizetype>(mFormatCtx->max_index_size / sizeof(AVIndexEntry), 128, 32768);
+    const qsizetype stride = std::max<qsizetype>(1, (keys + budget - 1) / budget);
+    qsizetype key = 0;
+    for (const auto& frame : std::as_const(mFrameIndex)) {
+        if (!frame.keyFrame || frame.seekPosition < 0 || key++ % stride) continue;
+        if (av_add_index_entry(mFormatCtx->streams[mVideoStreamIndex], frame.seekPosition,
+                frame.timestamp, 0, 0, AVINDEX_KEYFRAME) < 0) return false;
+    }
+    // Keep a real final picture as a conservative non-key boundary. The MKV
+    // seeker's last-entry special case otherwise reads to EOF (and can reject
+    // the last GOP when Cues are absent), even though our header map is complete.
+    // Omitting a key flag may decode from an earlier key; it cannot skip pictures.
+    if (mFrameIndex.size() > 1 && mFrameIndex.last().seekPosition >= 0) {
+        const auto& last = mFrameIndex.last();
+        if (av_add_index_entry(mFormatCtx->streams[mVideoStreamIndex], last.seekPosition,
+                               last.timestamp, 0, 0, 0) < 0) return false;
+    }
+    return true;
 }
 
 void VDQtVideoDecoder::invalidateContainerFrameIndex() {
@@ -1502,16 +1663,29 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
         && mCurrentFrameIndex >= anchorIndex && mCurrentFrameIndex < frameIndex)
         return true;
 
-    int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
+    int64_t seekTimestamp = targetTimestamp;
+    if (isMpegSystemStream(mFormatCtx) || mCodecCtx->codec_id == AV_CODEC_ID_FLV1) {
+        // Seek from a preceding verified GOP: the demuxer's DTS search must
+        // not land after the key picture whose PTS identifies our target GOP.
+        // The actual returned timestamps still establish every ordinal below.
+        // FLV1 also needs an earlier GOP to establish reference history before
+        // disposable pictures in the target GOP (except at actual movie start).
+        int previousKey = anchorIndex - 1;
+        while (previousKey > 0 && (!mFrameIndex.at(previousKey).keyFrame
+               || mFrameIndex.at(previousKey).timestamp == AV_NOPTS_VALUE)) --previousKey;
+        if (previousKey <= 0) return resetDecoderToStart();
+        seekTimestamp = mFrameIndex.at(previousKey).timestamp;
+    }
+    int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, seekTimestamp, AVSEEK_FLAG_BACKWARD);
     if (result < 0) {
         result = avformat_seek_file(
-            mFormatCtx, mVideoStreamIndex, 0, targetTimestamp, targetTimestamp, AVSEEK_FLAG_BACKWARD);
+            mFormatCtx, mVideoStreamIndex, INT64_MIN, seekTimestamp, seekTimestamp, AVSEEK_FLAG_BACKWARD);
     }
     if (result < 0) {
         return resetDecoderToStart();
     }
 
-    avcodec_flush_buffers(mCodecCtx);
+    if (!resetCodecAfterSeek()) return false;
     av_frame_unref(mFrame);
     av_packet_unref(mPacket);
     mPacketPending = false;
@@ -1867,6 +2041,15 @@ bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snap
     mFrameIndexSnapshot = snapshot;
     mFrameIndexComplete = snapshot->decodedComplete;
     mContainerIndexComplete = snapshot->containerComplete;
+    if (!registerContainerSeekPoints()) {
+        mFrameIndex = QVector<FrameIndexEntry>();
+        mFrameIndexSnapshot.clear();
+        mFrameIndexComplete = false;
+        mContainerIndexComplete = false;
+        mFrameCountStatus = mFrameCount > 0 ? FrameCountStatus::Estimated : FrameCountStatus::Unknown;
+        clearCache();
+        return false;
+    }
     mFrameCount = boundedFrameCount(mFrameIndex.size());
     mFrameCountStatus = FrameCountStatus::Exact;
     mFrameTimestampLookup.clear();
@@ -2273,6 +2456,21 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
     }
     if (res.cancelled && previousNavigation && res.badFrames == 0 && res.errorMessage.isEmpty())
         adoptFrameIndexSnapshot(previousNavigation);
+    else if (!res.cancelled && mFrameIndexComplete && previousNavigation
+             && previousNavigation->entries.size() == mFrameIndex.size()) {
+        // A fresh inspection replaces header observations with decoded proof,
+        // but matching keyframes can retain their validated cluster positions.
+        // This keeps adopted post-inspection snapshots seekable without Cues.
+        for (int frame = 0; frame < mFrameIndex.size(); ++frame) {
+            const auto& old = previousNavigation->entries.at(frame);
+            const auto& decoded = mFrameIndex.at(frame);
+            if (old.keyFrame && decoded.keyFrame && old.timestamp == decoded.timestamp)
+                mFrameIndex[frame].seekPosition = old.seekPosition;
+        }
+        const auto& last = previousNavigation->entries.last();
+        if (last.timestamp == mFrameIndex.last().timestamp)
+            mFrameIndex.last().seekPosition = last.seekPosition;
+    }
 
     return res;
 }

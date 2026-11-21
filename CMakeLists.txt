@@ -99,6 +99,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtVideoDecoder.cpp
     src/VirtualDub/VDQtMp4Timing.h
     src/VirtualDub/VDQtMp4Timing.cpp
+    src/VirtualDub/VDQtMatroskaTiming.h
+    src/VirtualDub/VDQtMatroskaTiming.cpp
     src/VirtualDub/VDQtSourceDependencies.h
     src/VirtualDub/VDQtSourceDependencies.cpp
     src/VirtualDub/VDQtAudioPlayer.h
@@ -308,6 +310,22 @@ if (BUILD_TESTING)
     add_test(NAME decoder_index_tests COMMAND decoder_index_tests)
     set_tests_properties(decoder_index_tests PROPERTIES
         LABELS "decoder;index;performance" TIMEOUT 60)
+
+    add_executable(matroska_timing_tests tests/test_matroska_timing.cpp
+        src/VirtualDub/VDQtMatroskaTiming.cpp)
+    target_link_libraries(matroska_timing_tests PRIVATE Qt6::Core)
+    target_include_directories(matroska_timing_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    vdqt_enable_diagnostics(matroska_timing_tests)
+    add_test(NAME matroska_timing_tests COMMAND matroska_timing_tests)
+    set_tests_properties(matroska_timing_tests PROPERTIES
+        LABELS "decoder;index;matroska;contracts" TIMEOUT 30)
+
+    add_executable(container_navigation_tests tests/test_container_navigation.cpp)
+    target_link_libraries(container_navigation_tests PRIVATE vdqt_core)
+    vdqt_enable_diagnostics(container_navigation_tests)
+    add_test(NAME container_navigation_tests COMMAND container_navigation_tests)
+    set_tests_properties(container_navigation_tests PROPERTIES
+        LABELS "decoder;navigation;containers;pixels;integration" TIMEOUT 180)
 
     add_executable(decoder_error_policy_tests
         tests/test_decoder_error_policy.cpp tests/support/VDQtTestFixtures.cpp)
@@ -606,7 +624,7 @@ if (BUILD_TESTING)
             LABELS "packaging;release;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation matroska_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -687,6 +705,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
+        src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -717,6 +736,7 @@ if (BUILD_TESTING)
         src/VirtualDub/test_playback_performance.cpp
         src/VirtualDub/VDQtVideoDecoder.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
+        src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -751,6 +771,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtVideoDecoder.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
+        src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )

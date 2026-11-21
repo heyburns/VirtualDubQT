@@ -362,6 +362,74 @@ bool intraMovNavigation(VDQtTestFixtures& fixtures) {
     return check(decoder.getDecodedFrameCount() < 16, "intra MOV seeks decode only the requested pictures");
 }
 
+bool matroskaNavigation(VDQtTestFixtures& fixtures, bool variable = false, bool cues = true) {
+    const QString input = fixtures.directory.filePath(variable ? "hevc-vfr.mkv"
+        : cues ? "hevc-navigation.mkv" : "hevc-no-cues.mkv");
+    const int frames = variable ? 300 : 3000;
+    QStringList arguments{"-f", "lavfi", "-i", variable ? "testsrc2=size=96x64:rate=30"
+        : "testsrc2=size=96x64:rate=24000/1001", "-frames:v", QString::number(frames),
+        "-c:v", "libx265", "-preset", "ultrafast", "-threads", "1",
+        "-x265-params", "pools=1:frame-threads=1:log-level=error:keyint=48:min-keyint=48:scenecut=0",
+        "-an"};
+    // Integer source-clock ticks avoid floating-point truncation creating
+    // accidental duplicate PTS in a test of unambiguous variable-rate timing.
+    if (variable) arguments << "-vf" << "setpts='if(lt(N,150),N*3,450+N-150)'"
+        << "-fps_mode" << "passthrough";
+    if (!cues) arguments << "-live" << "1";
+    if (!fixtures.ffmpeg(arguments + QStringList{input})) return false;
+    VDQtVideoDecoder decoder;
+    if (!check(decoder.openFile(input) && decoder.hasFrameNavigation()
+               && decoder.isFrameCountExact() && decoder.getFrameCount() == frames
+               && decoder.getDecodedFrameCount() == 0 && !decoder.hasCompleteFrameIndex(),
+               "HEVC MKV opens with exact header navigation without decoding the movie")) return false;
+    VDQtVideoDecoder reference;
+    if (!reference.openFile(input) || reference.scanVideoStream().totalFrames != frames) return false;
+    const auto snapshot = decoder.frameIndexSnapshot();
+    for (int frame : {frames - 5, frames - 1, frames / 2 - 1, 1, 49, 47, 48, 0, 150}) {
+        decoder.clearCache();
+        if (!check(decoder.getFrameImage(frame) == reference.getFrameImage(frame),
+                   "cold HEVC MKV seeks match independently counted presentation frames")) return false;
+    }
+    std::cout << (variable ? "VFR" : cues ? "CFR" : "No-Cues") << " MKV: "
+              << decoder.getDecodedFrameCount() << " pictures for nine random seeks\n";
+    if (!check(decoder.getDecodedFrameCount() < 650 && !decoder.hasCompleteFrameIndex()
+               && decoder.frameIndexSnapshot() == snapshot,
+               "MKV scrubbing decodes nearby dependencies and retains immutable navigation")) return false;
+    VDQtVideoDecoder consumer;
+    if (!check(consumer.openFile(input, snapshot) && consumer.hasFrameNavigation()
+        && !consumer.hasCompleteFrameIndex() && consumer.getDecodedFrameCount() == 0
+        && consumer.getFrameImage(frames - 5) == reference.getFrameImage(frames - 5)
+        && consumer.getDecodedFrameCount() < 100,
+        "preview adopts MKV timing and seek anchors without a second scan")) return false;
+    if (variable && !check(decoder.getFrameTimestampSeconds(150) == 15.0,
+                          "MKV variable-rate frame identity does not rely on average FPS")) return false;
+    const auto inspected = decoder.scanVideoStream();
+    consumer.close();
+    return check(inspected.totalFrames == frames && decoder.hasCompleteFrameIndex()
+        && consumer.openFile(input, decoder.frameIndexSnapshot())
+        && consumer.getFrameImage(frames - 1) == reference.getFrameImage(frames - 1)
+        && consumer.getDecodedFrameCount() < 100,
+        "completed inspections retain accurate last-GOP seeking, including files without Cues");
+}
+
+bool ambiguousMatroskaFallback(VDQtTestFixtures& fixtures) {
+    const QString input = fixtures.directory.filePath("ambiguous-hevc.mkv");
+    if (!fixtures.ffmpeg({"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=30",
+        "-frames:v", "48", "-vf", "setpts=floor(N/2)", "-fps_mode", "passthrough",
+        "-c:v", "libx265", "-preset", "ultrafast", "-threads", "1", "-x265-params",
+        "pools=1:frame-threads=1:log-level=error:keyint=12:min-keyint=12:scenecut=0",
+        "-an", input})) return false;
+    VDQtVideoDecoder decoder, reference;
+    if (!check(decoder.openFile(input) && !decoder.hasFrameNavigation()
+               && reference.openFile(input) && reference.scanVideoStream().totalFrames == 48,
+               "reordered pictures with duplicate MKV timestamps retain decoded verification")) return false;
+    for (int frame : {33, 1, 47, 12, 0}) {
+        if (!check(decoder.getFrameImage(frame) == reference.getFrameImage(frame),
+                   "ambiguous MKV metadata cannot silently relabel presentation ordinals")) return false;
+    }
+    return true;
+}
+
 bool queuedIndexDelivery(VDQtTestFixtures& fixtures) {
     const QString source = fixtures.directory.filePath("exact-vfr.mkv");
     VDQtVideoDecoder consumer;
@@ -417,7 +485,9 @@ int main(int argc, char **argv) {
         && mp4Navigation(fixtures, "audio-first-vfr", true, {}, "libx264", true)
         && mp4MetadataBounds(fixtures) && fragmentedMp4Fallback(fixtures)
         && intraMovNavigation(fixtures);
-    if (!scaling || !duplicates || !ordinals || !delivered || !mp4) {
+    const bool matroska = matroskaNavigation(fixtures) && matroskaNavigation(fixtures, true)
+        && matroskaNavigation(fixtures, false, false) && ambiguousMatroskaFallback(fixtures);
+    if (!scaling || !duplicates || !ordinals || !delivered || !mp4 || !matroska) {
         if (!fixtures.error.isEmpty()) std::cerr << fixtures.error.toStdString() << '\n';
         return 1;
     }

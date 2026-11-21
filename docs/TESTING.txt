@@ -2085,3 +2085,85 @@ this short fixture does not establish arbitrary third-party-chain performance.
 The previous regular binary is retained locally as
 build/VirtualDubQt.before-container-seeking-20261120. Physical devices and new
 distro/release packages were not tested or published by this navigation change.
+
+Matroska navigation and broader container regression checks (2026-11-21)
+-----------------------------------------------------------------------
+
+The 0.1.4 fast path covered MP4/MOV, not MKV. Remuxing the same HEVC stream into
+MKV reproduced the full decoded scan before a cold random seek. Native MKV block
+headers now supply actual timestamps, frame counts and cluster seek positions,
+without a movie-wide decode or average-FPS frame guesses. The preview adopts the
+same immutable map. FFmpeg's public keyframe index is seeded even without Cues;
+a real final non-key boundary avoids its last-index-entry EOF special case.
+
+Decoder regressions cover 3,000-picture HEVC MKV, exact variable-rate timing,
+missing Cues, random GOP boundaries, last-frame seeks, snapshot adoption and
+fresh error inspections. Reordered duplicate-PTS HEVC deliberately retains the
+verified-decoding fallback. Structural EBML fixtures cover alternate track IDs,
+audio-first tracks, unknown-size clusters, BlockGroups, fixed/Xiph/EBML laces,
+signed lace deltas, skipped large payloads, bad sizes, duplicate metadata,
+overflow and unsupported track encodings/scaling. A process-read-byte check also
+catches QFile prefetching compressed pictures after small header reads. Header
+files are opened unbuffered; caller byte counters alone did not catch read-ahead.
+
+The user's 36,373-picture, 1440x1080 10-bit HEVC MKV opens with exact navigation
+in approximately 0.19 seconds, decoding zero pictures and reading about 1.1 MB
+through read() from a 542 MB file (including normal FFmpeg probing). Five random
+positions, including the final frame, match an independent full sequential
+FFmpeg RGBA64 decode pixel for pixel. Each seek decodes 1-237 nearby dependency
+pictures rather than 36,373. The actual controller reaches frame 18,000 after
+rapid playhead changes, plays from there, and shows no indexing dialog. These
+are warm-cache workstation observations with two decoder threads, not portable
+wall-time guarantees or proof of arbitrarily short GOPs.
+
+container_navigation_tests generates 30 codec/container combinations covering
+MP4, MOV, 3GP, MKV, WebM, AVI, TS, M2TS, MPG, VOB, FLV, OGV, ASF, NUT and MXF.
+Independent bundled-FFmpeg BGRA frame hashes verify cold random seeks, frame zero,
+last frame, repeated rewind/playback and adoption by a fresh decoder. The test
+prints metadata availability and first-seek decoded-picture counts separately;
+successful opening is not accepted as evidence of fast navigation. CFR coverage
+here complements the separate VFR, duplicate-PTS and damaged-input regressions.
+
+This broader matrix exposed two additional real faults, both reproduced before
+repair. MPEG transport/program demuxers seek by DTS, whereas their reported
+start is a presentation timestamp. A successful timestamp rewind could miss
+the first GOP; late seeks could also land beyond their target. Byte rewind and
+seeking from a preceding verified GOP restore accurate beginning/tail frames.
+The bundled FLV1 decoder has no flush callback and retains reference history;
+a disposable initial picture could appear after rewind although it was absent
+on first open. Recreate only this codec after seeks and warm from a preceding
+GOP. A generated I/P stream with disposable P pictures reproduces the issue
+without including the user's media. FLV remains a low priority for further work.
+
+Read-only testing of all four files in the user's Testing directory compared
+nine scattered frames per file with independent full-decode hashes, followed by
+four seeks using a fresh decoder and an adopted snapshot. All match after repair.
+The same real-controller session opens each file, rapidly changes positions,
+plays from the middle, rewinds and plays from zero. User media, settings and
+running processes are untouched; diagnostic hashes/logs remain outside the repo.
+The rebuilt actual executable also exports a three-picture selection from the
+middle of each original file; all twelve output BGRA hashes match the independent
+reference. The existing actual-process MP4/native-AVS raw-export smoke also passes.
+
+  Sample container/codec    Pictures   First cold scrub   Later sampled seeks
+  AVI / MPEG-4 Part 2        46,048       12.08 seconds       1-37 ms
+  ASF / WMV3                10,259        3.47 seconds       1-102 ms
+  FLV / Sorenson Spark      25,516        3.28 seconds       0-11 ms
+  MPEG PS / MPEG-1          22,002        1.60 seconds       under 1 ms
+
+These four inputs still use a decoded navigation scan. Their accurate results
+do not resolve the original Windows-style first-scrub performance requirement.
+Other mappings such as VP8/VP9/AV1 WebM and VFW FFV1 MKV also retain this fallback.
+The 30-case matrix covers representative supported paths, not every possible
+container/codec combination. No new distro packages or GitHub release are
+published during this investigation. Hardware audio listening is not claimed.
+
+Validation: full Release 208/208 (121.03 seconds) and ASan/UBSan 104/104 (234.53
+seconds) pass; the established sanitizer preset disables leak detection. After
+the final read-ahead adjustment, 207 Release cases pass again (unchanged filter
+blur already covered by the full run), followed by 12 focused sanitizer cases
+covering header I/O, container pixels, decoder indexing, controller navigation,
+source/snapshot ownership and actual-process smoke. The regular executable is
+build/VirtualDubQt; its prior binary is retained as
+build/VirtualDubQt.before-mkv-container-fixes-20261121. Restart to load the new
+executable; an already running application was not interrupted or replaced in memory.
