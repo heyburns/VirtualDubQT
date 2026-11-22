@@ -2284,3 +2284,60 @@ and exports three original WMV pictures from the middle in approximately 0.38
 seconds; their BGRA hashes match the independent reference exactly. The previous
 executable is retained as build/VirtualDubQt.before-wmv-navigation-20261121.
 Restart the application to use the rebuilt executable.
+
+
+Limited Sorenson Spark FLV navigation (2026-11-21)
+-------------------------------------------------
+
+The low-priority FLV follow-up deliberately accelerates only Sorenson Spark
+(FLV1), including the user's sample. VDQtFlvTiming walks bounded tag headers and
+at most twelve bytes of each video payload, skipping audio, AMF metadata and
+compressed picture data. PreviousTagSize links, tag/file bounds, stream IDs,
+codec/key/disposable picture flags, fixed dimensions and increasing timestamps
+must agree. Header/tag/frame budgets bound work and allocation. No frame ordinal
+is inferred from average FPS or a possibly stale AMF frame-count/keyframe table.
+
+Spark emits its first I picture immediately, but its decoder skips disposable
+pictures until a second reference picture establishes last_picture. The map
+accounts for that startup rule instead of equating video tags with displayed
+frames. The existing recreate-on-seek and preceding-GOP warmup fixes remain;
+verified tag positions seed FFmpeg's public index, including missing AMF metadata,
+and survive snapshot adoption and fresh completed inspections. No decoder, cache,
+audio or playback-controller redesign is involved.
+
+flv_timing_tests cover startup disposables (including several in a row), normal
+and extended timestamps, tag positions, stable dimensions, duplicate/backward
+clocks, filtered tags, other codecs, bad PreviousTagSize links, oversized payloads
+and truncation. Failure leaves output unchanged. The independent-pixel container
+matrix requires navigation metadata for Spark, variable-rate Spark, absent AMF
+metadata, a nonzero timestamp origin and disposable pictures. AVC FLV retains its
+existing fallback. operation_flv_navigation checks cold keyframe controls, middle
+playback and rapid scrubbing without an indexing dialog.
+
+The user's 320x240 FLV contains 25,517 video tags but 25,516 displayed pictures.
+The startup disposable at 197 ms is omitted by both native decoding and the new
+map; all 25,516 predicted frame timestamps agree with normal FFmpeg decoding.
+All 25,516 application-decoded BGRA picture hashes match the independent full
+sequential reference. Nine scattered seeks and four adopted-snapshot seeks match
+as well; a fresh full health scan preserves the count and reusable seek positions.
+Warm-cache opening takes about 191-192 ms and reads 2.43 MB through read() from
+the 263.9 MB source, including ordinary FFmpeg probing. The first far seek takes
+10 ms and 80 nearby decoded pictures, versus the previous 3.28-second full
+navigation decode. The actual controller opens/displays in 237 ms, scrubs to the
+middle in 15 ms, plays, rewinds and plays from zero, with no indexing dialog.
+These are observations on this workstation with two decoder threads, not a
+portable latency guarantee. User media remains read-only and test settings are
+isolated; physical audio listening is outside this verification.
+
+H.264/AVC, VP6, screen video, enhanced FLV, resolution changes and ambiguous or
+damaged layouts keep the verified decoded fallback. Further FLV expansion is
+deferred because it does not justify major engineering for this format. No new
+release packages or GitHub push are included in this checkpoint.
+
+Final validation: Release 214/214 (123.88 seconds) and ASan/UBSan 110/110
+(234.64 seconds) pass, with leak detection disabled by the established preset.
+Both builds are warning-free. The rebuilt build/VirtualDubQt passes the maintained
+MP4/native-AviSynth smoke and exports three pictures from the original Spark FLV's
+middle in approximately 0.43 seconds; their BGRA hashes match the independent
+reference exactly. Its previous executable is retained as
+build/VirtualDubQt.before-flv-navigation-20261121. Restart to use the new build.

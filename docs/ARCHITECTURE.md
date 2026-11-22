@@ -239,6 +239,19 @@ ASF's fragment buffers; a raw byte seek would leave stale partial objects.
 Snapshots and completed inspections preserve packet positions. Reader limits
 bound frames, packet/object counts and header bytes; metadata is not decode proof.
 
+`VDQtFlvTiming` is a small acceleration for Sorenson Spark (FLV1), not a general
+FLV demuxer. It checks the complete PreviousTagSize chain and bounded Spark picture
+prefixes, skipping compressed video, audio and AMF metadata. Picture dimensions
+must remain stable; codec picture types must agree with FLV key/disposable flags,
+and timestamps must increase. The decoder displays the initial I picture but
+skips disposable pictures until a second reference establishes last_picture;
+the map excludes precisely those startup tags. Verified tag positions seed the
+public seek index and survive shared/inspected snapshots. Existing codec recreation
+and preceding-GOP warmup remain necessary for accurate Spark seeking. AVC, VP6,
+screen/enhanced video, filtered tags and ambiguous/damaged layouts retain decoded
+indexing. This intentionally narrow path avoids expanding a low-priority format
+into a second codec/demux implementation, and never certifies decode health.
+
 Complete immutable navigation snapshots are shared between worker and editor, including
 keyframe controls, export and audio-start timing. Matching open-source identity,
 stream/timebase/codec and recovery policy are required for adoption; generation

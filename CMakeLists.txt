@@ -105,6 +105,8 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtAviTiming.cpp
     src/VirtualDub/VDQtAsfTiming.h
     src/VirtualDub/VDQtAsfTiming.cpp
+    src/VirtualDub/VDQtFlvTiming.h
+    src/VirtualDub/VDQtFlvTiming.cpp
     src/VirtualDub/VDQtSourceDependencies.h
     src/VirtualDub/VDQtSourceDependencies.cpp
     src/VirtualDub/VDQtAudioPlayer.h
@@ -344,6 +346,14 @@ if (BUILD_TESTING)
     add_test(NAME asf_navigation_tests COMMAND asf_navigation_tests)
     set_tests_properties(asf_navigation_tests PROPERTIES
         LABELS "decoder;navigation;asf;pixels;contracts" TIMEOUT 120)
+
+    add_executable(flv_timing_tests tests/test_flv_timing.cpp src/VirtualDub/VDQtFlvTiming.cpp)
+    target_include_directories(flv_timing_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(flv_timing_tests PRIVATE Qt6::Core)
+    vdqt_enable_diagnostics(flv_timing_tests)
+    add_test(NAME flv_timing_tests COMMAND flv_timing_tests)
+    set_tests_properties(flv_timing_tests PROPERTIES
+        LABELS "decoder;navigation;flv;contracts" TIMEOUT 30)
 
     add_executable(decoder_error_policy_tests
         tests/test_decoder_error_policy.cpp tests/support/VDQtTestFixtures.cpp)
@@ -642,7 +652,7 @@ if (BUILD_TESTING)
             LABELS "packaging;release;contracts" TIMEOUT 15
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
-    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation matroska_navigation avi_navigation asf_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
+    foreach(operation_case IN ITEMS source snapshot audio audio_inclusion audio_export queue queue_persistence raw_lifetime vfr_jump resize_script external_encoder_logs waveform export_preview export_preview_fallback playback_transport outputs safety empty_timeline unknown_timeline sparse_eof index_reuse indexed_navigation matroska_navigation avi_navigation asf_navigation flv_navigation image_sequence filter_failure filter_context log_lifetime recovery edit_preview project_validation numeric_json numeric_script append_state)
         add_test(NAME operation_${operation_case}
             COMMAND application_baseline_tests --operation-test ${operation_case})
         set_tests_properties(operation_${operation_case} PROPERTIES
@@ -726,6 +736,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
         src/VirtualDub/VDQtAsfTiming.cpp
+        src/VirtualDub/VDQtFlvTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -759,6 +770,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
         src/VirtualDub/VDQtAsfTiming.cpp
+        src/VirtualDub/VDQtFlvTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )
@@ -796,6 +808,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
         src/VirtualDub/VDQtAsfTiming.cpp
+        src/VirtualDub/VDQtFlvTiming.cpp
         src/VirtualDub/VDQtSourceDependencies.cpp
         src/VirtualDub/VDQtVideoDecoder.h
     )

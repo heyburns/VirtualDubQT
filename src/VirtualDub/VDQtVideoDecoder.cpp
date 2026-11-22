@@ -7,6 +7,7 @@
 #include "VDQtMatroskaTiming.h"
 #include "VDQtAviTiming.h"
 #include "VDQtAsfTiming.h"
+#include "VDQtFlvTiming.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
@@ -1399,6 +1400,7 @@ bool VDQtVideoDecoder::buildContainerFrameIndex() {
         if (mFormatCtx->iformat == av_find_input_format("matroska")) return buildMatroskaFrameIndex();
         if (mFormatCtx->iformat == av_find_input_format("avi")) return buildAviFrameIndex();
         if (mFormatCtx->iformat == av_find_input_format("asf")) return buildAsfFrameIndex();
+        if (mFormatCtx->iformat == av_find_input_format("flv")) return buildFlvFrameIndex();
         if (mFormatCtx->iformat != av_find_input_format("mov")) return false;
         // These MOV codecs store a picture (or paired interlaced fields) per sample.
         // Do not generalize packet counts to codecs which can emit several pictures
@@ -1550,6 +1552,44 @@ bool VDQtVideoDecoder::buildAviFrameIndex() {
     } catch (const std::bad_alloc&) {
         if (demuxNeedsReset)
             mLastError = QStringLiteral("Not enough memory to restore the AVI stream after reading navigation metadata.");
+        return false;
+    }
+}
+
+bool VDQtVideoDecoder::buildFlvFrameIndex() {
+    try {
+        // Keep this low-priority format narrow: Spark has one picture per tag
+        // and no reordering. AVC, VP6, screen video and enhanced FLV retain the
+        // existing decoded path instead of growing another general demuxer.
+        const AVStream *stream = mFormatCtx->streams[mVideoStreamIndex];
+        if (mCodecCtx->codec_id != AV_CODEC_ID_FLV1 || mCodecCtx->has_b_frames
+            || stream->time_base.num != 1 || stream->time_base.den != 1000) return false;
+        QVector<VDQtFlvFrameTiming> timing;
+        if (!VDQtReadFlvTiming(mFilePath, mWidth, mHeight, &timing)
+            || timing.first().timestamp != mStreamStartTimestamp) return false;
+        const QFileInfo current(mFilePath);
+        if (current.size() != mOpenedFileSize
+            || current.lastModified().toMSecsSinceEpoch() != mOpenedFileModifiedMs) {
+            mLastError = QStringLiteral("The FLV source changed while its navigation metadata was being read. Please reopen it.");
+            return false;
+        }
+        QVector<FrameIndexEntry> entries;
+        entries.reserve(timing.size());
+        for (const auto& source : std::as_const(timing))
+            entries.append({source.timestamp, 0, source.seekPosition, source.keyFrame});
+        for (int frame = 0; frame + 1 < entries.size(); ++frame)
+            entries[frame].duration = entries.at(frame + 1).timestamp - entries.at(frame).timestamp;
+        mFrameIndex = std::move(entries);
+        mContainerIndexComplete = true;
+        if (!registerContainerSeekPoints()) {
+            invalidateContainerFrameIndex();
+            return false;
+        }
+        mFrameIndexComplete = false;
+        mFrameCount = boundedFrameCount(mFrameIndex.size());
+        mFrameCountStatus = FrameCountStatus::Exact;
+        return true;
+    } catch (const std::bad_alloc&) {
         return false;
     }
 }
@@ -1725,7 +1765,8 @@ bool VDQtVideoDecoder::registerContainerSeekPoints() {
     if (!mFormatCtx) return true;
     const bool asf = mFormatCtx->iformat == av_find_input_format("asf");
     const bool matroska = mFormatCtx->iformat == av_find_input_format("matroska");
-    if (!asf && !matroska) return true;
+    const bool flv = mFormatCtx->iformat == av_find_input_format("flv");
+    if (!asf && !matroska && !flv) return true;
     if (asf && !mFrameIndex.isEmpty() && mFrameIndex.first().seekPosition >= 0) {
         // A nonzero native seek loads ASF's optional coarse Simple Index first;
         // otherwise its later loading could overwrite exact keyframe positions.
@@ -1735,8 +1776,8 @@ bool VDQtVideoDecoder::registerContainerSeekPoints() {
         const int result = av_seek_frame(mFormatCtx, mVideoStreamIndex, probe, AVSEEK_FLAG_BACKWARD);
         if (!resetDecoderToStart() || result < 0) return false;
     }
-    // Use the demuxer's own public keyframe index so files without Cues remain
-    // seekable too. Bound its size; dense intra sources may decode a few extra
+    // Seed the public keyframe index even without Cues/AMF metadata. Bound its
+    // size; dense intra sources may decode a few extra
     // pictures from a coarser anchor rather than duplicate a movie-sized table.
     const qsizetype keys = std::count_if(mFrameIndex.cbegin(), mFrameIndex.cend(), [](const auto& frame) {
         return frame.keyFrame && frame.seekPosition >= 0;
@@ -1753,7 +1794,7 @@ bool VDQtVideoDecoder::registerContainerSeekPoints() {
     // seeker's last-entry special case otherwise reads to EOF (and can reject
     // the last GOP when Cues are absent), even though our header map is complete.
     // Omitting a key flag may decode from an earlier key; it cannot skip pictures.
-    if (matroska && mFrameIndex.size() > 1 && mFrameIndex.last().seekPosition >= 0) {
+    if ((matroska || flv) && mFrameIndex.size() > 1 && mFrameIndex.last().seekPosition >= 0) {
         const auto& last = mFrameIndex.last();
         if (av_add_index_entry(mFormatCtx->streams[mVideoStreamIndex], last.seekPosition,
                                last.timestamp, 0, 0, 0) < 0) return false;

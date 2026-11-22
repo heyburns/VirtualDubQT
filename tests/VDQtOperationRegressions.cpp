@@ -1808,10 +1808,12 @@ bool sparseEof(VDQtTestFixtures& fixtures) {
 
 bool indexedNavigation(VDQtTestFixtures& fixtures, const QString& container = "mp4") {
     const bool matroska = container == "mkv";
+    const QString codec = matroska ? "libx265" : container == "avi" ? "mpeg4"
+        : container == "wmv" ? "wmv2" : container == "flv" ? "flv" : "libx264";
     const QString source = fixtures.directory.filePath("key-navigation." + container);
     QStringList arguments{"-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10",
-                          "-frames:v", "48", "-c:v", matroska ? "libx265" : container == "avi" ? "mpeg4" : container == "wmv" ? "wmv2" : "libx264", "-g", "12",
-                          "-keyint_min", "12", "-sc_threshold", "0", "-bf", container == "wmv" ? "0" : "3",
+                          "-frames:v", "48", "-c:v", codec, "-g", "12",
+                          "-keyint_min", "12", "-sc_threshold", "0", "-bf", container == "wmv" || container == "flv" ? "0" : "3",
                           "-threads", "1", "-an"};
     if (matroska) arguments << "-preset" << "ultrafast" << "-x265-params"
         << "pools=1:frame-threads=1:log-level=error:keyint=12:min-keyint=12:scenecut=0";
@@ -2598,6 +2600,7 @@ bool VDQtRunOperationRegression(const QString& scenario, VDQtTestFixtures& fixtu
     if (scenario == "matroska_navigation") return indexedNavigation(fixtures, "mkv");
     if (scenario == "avi_navigation") return indexedNavigation(fixtures, "avi");
     if (scenario == "asf_navigation") return indexedNavigation(fixtures, "wmv");
+    if (scenario == "flv_navigation") return indexedNavigation(fixtures, "flv");
     if (scenario == "image_sequence") return importedImageTiming(fixtures);
     if (scenario == "filter_failure") return failedFilterPreview(fixtures);
     if (scenario == "filter_context") return editedFilterContext(fixtures);
