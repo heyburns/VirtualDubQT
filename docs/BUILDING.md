@@ -1,11 +1,11 @@
 # Building VirtualDubQT
 
-These instructions target version **0.1.4**, Ubuntu 24.04 and Fedora 43 on
-64-bit Intel/AMD Linux. You do not need to build FFmpeg: use the matching SDK
-download below. The application never uses distribution FFmpeg.
+These instructions target the current source on Ubuntu 24.04 and Fedora 43 on
+64-bit Intel/AMD Linux. Use the matching FFmpeg SDK from the 0.1.4 release.
 
 If you only want to run the app, use the [installation guide](INSTALLATION.md).
-AviSynth+ is a separate requirement for both packages and source builds.
+Source compilation uses the AviSynth+ C API headers. Current builds load the
+AviSynth+ runtime only when opening `.avs` files.
 
 ## Install build tools
 
@@ -30,9 +30,13 @@ Run commands in order. If a command fails, stop and keep its error text.
 
 ## Install AviSynth
 
-AviSynth+ 3.7.5 must be installed separately before launching the app, even when
-opening an ordinary video. The app links to its library. Installing the app does
-not install or replace AviSynth, VapourSynth, Python, or any script plugins.
+AviSynth+ 3.7.5 is the tested version for `.avs` input and the version required
+by the previously published 0.1.4 binaries. For source builds, CMake needs the
+headers. If you already have them in a separate SDK, pass
+`-DAVISYNTH_INCLUDE_DIR=/prefix/include` and skip the runtime installation unless
+you plan to use scripts or run the AviSynth tests. For `.avs` use, install a
+library with the same interface major as those headers. The upstream 3.7.5
+headers expect `libavisynth.so.11`.
 
 If AviSynth+ 3.7.5 is already installed and working, skip this build. Otherwise:
 
@@ -61,9 +65,9 @@ the matching headers needed to compile against it. It contains no script
 frameworks or Python installation. It requires glibc 2.38 or newer.
 
 ```bash
-git clone --branch v0.1.4 --depth 1 \
-    https://github.com/heyburns/VirtualDubQT.git "$HOME/src/VirtualDubQT-0.1.4"
-cd "$HOME/src/VirtualDubQT-0.1.4"
+git clone --depth 1 \
+    https://github.com/heyburns/VirtualDubQT.git "$HOME/src/VirtualDubQT"
+cd "$HOME/src/VirtualDubQT"
 curl --fail --location --remote-name \
     https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.4/VirtualDubQT-0.1.4-ffmpeg-sdk-x86_64.tar.xz
 curl --fail --location --remote-name \
@@ -88,7 +92,7 @@ cmake --build build --parallel 2
 ./build/VirtualDubQt
 ```
 
-The first command locates Qt, AviSynth and the private FFmpeg SDK. The runtime
+The first command locates Qt, the AviSynth headers and the private FFmpeg SDK. The runtime
 report must identify bundled-only FFmpeg and paths inside the selected bundle.
 An incomplete bundle or conflicting library stops startup; system FFmpeg is
 never a fallback.
@@ -142,16 +146,16 @@ publishing them. A matching `v0.1.4` tag publishes only after the Ubuntu DEB,
 AppImage and Fedora RPM pass clean-runtime export tests. When the exact tagged
 commit already passed on main and its artifacts are still available, it promotes
 those identical tested files; otherwise it builds and validates fresh packages.
-Those tests supply
-AviSynth as an independent fixture, not as part of the packages.
+The clean package tests verify ordinary video and MP3 export without AviSynth.
+They then expose a separate AviSynth fixture to test script input and export.
 
 ## Common build problems
 
 | Problem | What to check |
 | --- | --- |
 | CMake cannot find Qt | Install your distro's Qt development packages listed above. |
-| CMake cannot find AviSynth | Install its headers and library, then run `sudo ldconfig`. For a custom prefix, pass `-DAVISYNTH_INCLUDE_DIR=/prefix/include -DAVISYNTH_LIBRARY=/prefix/lib/libavisynth.so`. |
+| CMake cannot find the AviSynth headers | Install the headers or pass `-DAVISYNTH_INCLUDE_DIR=/prefix/include`. |
 | Missing private FFmpeg bundle | Download and extract the matching release SDK, or use the maintainer build above. System FFmpeg development packages do not replace it. |
-| Startup cannot find libavisynth | Complete the separate AviSynth installation and refresh the linker cache. |
+| Opening `.avs` cannot load AviSynth | Install the compatible Linux runtime and refresh the linker cache. For a custom prefix, make its library directory visible to the loader before launching VirtualDubQt. |
 | Missing/mixed FFmpeg runtime | Run `--runtime-info`; keep the complete bundle with the app and remove loader overrides that force another FFmpeg. Do not rename libraries to disguise incompatible versions. |
 | Missing AVS function or plugin | Test the blank script in the installation guide, then follow the plugin's native Linux setup instructions. |

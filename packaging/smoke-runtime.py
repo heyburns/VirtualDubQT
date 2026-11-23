@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 
-def run(command, environment=None):
+def run(command, environment=None, expected_error=None):
     """Bound every child; timeout cleanup targets only this helper's process group."""
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              env=environment, start_new_session=True)
@@ -32,7 +32,11 @@ def run(command, environment=None):
             pass
         stdout, stderr = child.communicate()
         raise RuntimeError(f"Timed out: {command[0]}\n{stderr.decode(errors='replace')}")
-    if child.returncode:
+    if expected_error is not None:
+        diagnostic = stderr.decode(errors='replace')
+        if child.returncode <= 0 or expected_error not in diagnostic:
+            raise RuntimeError(f"Expected {expected_error!r}, got exit {child.returncode}\n{diagnostic}")
+    elif child.returncode:
         raise RuntimeError(f"Command failed ({child.returncode}): {command}\n"
                            f"{stderr.decode(errors='replace')}")
     return stdout
@@ -83,13 +87,19 @@ def smoke(args):
 
         source = root / "source.mkv"
         run([fixture_ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
-             "testsrc2=size=64x48:rate=24", "-frames:v", "8", "-c:v", "ffv1",
-             "-threads", "2", "-an", str(source)])
+             "testsrc2=size=64x48:rate=24:duration=0.334", "-f", "lavfi", "-i",
+             "sine=frequency=440:sample_rate=48000:duration=0.334", "-frames:v", "8",
+             "-c:v", "ffv1", "-threads", "2", "-c:a", "pcm_s16le", str(source)])
         script = root / "source.avs"
         script.write_text('BlankClip(length=8, width=64, height=48, fps=24, '
                           'pixel_type="RGB24", audio_rate=0, color=$204080)\n',
                           encoding="utf-8")
-        for index, input_path in enumerate((source, script)):
+        if args.expect_missing_avisynth:
+            run([app, str(script), "--exit"], environment, expected_error="AviSynth+ could not be loaded")
+            print("Missing AviSynth produces an installation error when opening an AVS script")
+
+        inputs = (source, script) if args.check_avisynth else (source,)
+        for index, input_path in enumerate(inputs):
             for mode in ([3, 1] if args.check_fast_recompress else [3]):
                 raw = root / f"export-{index}-{mode}.bgra"
                 encoded = root / f"export-{index}-{mode}.mkv"
@@ -117,7 +127,18 @@ def smoke(args):
                 # does not establish that every exported frame is usable.
                 run([fixture_ffmpeg, "-nostdin", "-v", "error", "-i", str(encoded),
                      "-map", "0:v:0", "-f", "null", "-"])
-        print("Packaged application decoded FFV1/native AVS and exported 8-frame raw/FFV1 outputs")
+        mp3 = root / "export.mp3"
+        command = ('VirtualDub.audio.SetCompressionWithHint(85,48000,1,16,16000,1);'
+                   f'VirtualDub.SaveAudio("{sylia_path(mp3)}");')
+        run([app, str(source), "--command", command, "--exit"], environment)
+        codec_name = run([runtime_ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                          "stream=codec_name", "-of", "csv=p=0", str(mp3)], environment)
+        if codec_name.strip() != b"mp3":
+            raise RuntimeError(f"Expected MP3 audio, got {codec_name!r}")
+        run([fixture_ffmpeg, "-nostdin", "-v", "error", "-i", str(mp3), "-f", "null", "-"])
+        print("Packaged application opened ordinary media and exported raw video, FFV1 and MP3")
+        if args.check_avisynth:
+            print("Native AviSynth script input and export passed with the separate runtime")
         print(f"Application runtime PATH: {environment['PATH']}")
         print(f"Runtime ffprobe: {runtime_ffprobe}")
 
@@ -130,8 +151,12 @@ def main():
     parser.add_argument("--runtime-ffprobe", help="Packaged probe; mandatory in AppImage CI")
     parser.add_argument("--runtime-path", help="Application-only PATH; default is empty directory")
     parser.add_argument("--runtime-library-path", help="Explicit packaged library search path")
+    avi_synth = parser.add_mutually_exclusive_group()
+    avi_synth.add_argument("--check-avisynth", action="store_true", help="Also exercise native AVS scripts")
+    avi_synth.add_argument("--expect-missing-avisynth", action="store_true",
+                           help="Verify a clean AVS error on a host without AviSynth")
     parser.add_argument("--check-fast-recompress", action="store_true",
-                        help="Also verify Fast Recompress, including native AviSynth input")
+                        help="Also verify Fast Recompress for the selected inputs")
     args = parser.parse_args()
     try:
         smoke(args)

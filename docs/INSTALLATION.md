@@ -6,13 +6,19 @@ Every package includes its own matching FFmpeg tools and libraries. The app
 always uses this private backend and never falls back to system FFmpeg. The
 AppImage also includes Qt; native packages install Qt through your package manager.
 
-**AviSynth+ 3.7.5 must be installed separately before starting the app**, even for
-ordinary video files. Follow [Install AviSynth](BUILDING.md#install-avisynth) if
-you do not already have it. The packages do not install AviSynth, VapourSynth,
-Python, or script plugins. VapourSynth is optional, for `.vpy` input.
+**Ordinary video and audio work with the bundled media backend.** Current
+source builds load AviSynth+ for `.avs` input and VapourSynth for `.vpy` input.
+Install those frameworks and any plugins separately when you need them.
+
+**If you download the published 0.1.4 packages below**, install AviSynth+ 3.7.5
+before launching. Those binaries still require it at startup.
+[AviSynth setup](BUILDING.md#install-avisynth).
 
 Graphics, fonts, audio-system libraries and the C++ runtime come from your system
 so the app and separately installed script plugins can use a compatible platform.
+Native packages may pull in additional libraries through Qt Multimedia. Fedora
+installs its Qt media plugins and their FFmpeg and GStreamer libraries through
+DNF. The editor's media tools and codecs come from the private bundle.
 
 Use **Tools → System Information** to see the backend version and full paths.
 A missing or mismatched bundle produces an error instead of selecting another
@@ -25,7 +31,7 @@ explain which commands to use, what they do, and what success looks like.
 Choose one route:
 
 - **Run the app:** [download a package](#choose-a-package). The AppImage includes
-  Qt and the media backend; AviSynth remains a separate requirement.
+  Qt and the media backend.
 - **Build the app yourself:** follow [Building VirtualDubQT](BUILDING.md).
 - **Already installed, but AviSynth Fast Recompress fails:** see
   [FFmpeg and AviSynth](#ffmpeg-and-avisynth).
@@ -78,9 +84,8 @@ that does not automatically make its packages interchangeable.
 
 ### AppImage
 
-Install AviSynth first as described above. On a minimal Ubuntu installation,
-these host desktop libraries may also be needed (normal desktop installations
-often already have them):
+On a minimal Ubuntu installation, these host desktop libraries may be needed.
+Normal desktop installations often already have them:
 
 ```bash
 sudo apt install libgl1 libegl1 libopengl0 libdbus-1-3 libfontconfig1 \
@@ -109,7 +114,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./VirtualDubQT-0.1.4-x86_64.AppImage
 ```
 
 Next, try [your first open and export](#your-first-open-and-export). There is no
-need to build FFmpeg. Complete the separate AviSynth setup before launching.
+need to build FFmpeg.
 
 ### DEB on Ubuntu 24.04
 
@@ -152,9 +157,22 @@ result means the file does not match: download it again before using it.
 
 ## Your first open and export
 
-You can open an ordinary video with **File → Open video file…** (`Ctrl+O`).
-To try AviSynth without finding a sample video or installing extra plugins,
-run this command. It creates a plain-text script in a folder in your home directory:
+1. Open a video you already have using **File → Open video file…** (`Ctrl+O`).
+2. Select **Video → Full processing mode**. This is a useful starting mode for
+   applying filters and making a new video file.
+3. Select **Video → Compression…**, choose **FFV1**, and confirm. FFV1 is a
+   lossless encoder—a way to save the video without throwing away image detail.
+4. Select **File → Save video…** (`F7`). Set **Files of type** to **Matroska
+   (*.mkv)** and use **Browse…** to choose a destination such as `first-export.mkv`.
+   Save it, then reopen that output to check the result.
+
+**Save Project** saves your editing session so you can resume it later.
+**Save video…** makes the finished video file.
+
+### Optional AviSynth test
+
+After installing AviSynth, run this command to create a script that uses built-in
+functions:
 
 ```bash
 mkdir -p "$HOME/VirtualDubQT-examples"
@@ -162,23 +180,10 @@ printf '%s\n' 'BlankClip(length=48, width=320, height=240, fps=24, pixel_type="R
     > "$HOME/VirtualDubQT-examples/blank.avs"
 ```
 
-1. Open `blank.avs` from the `VirtualDubQT-examples` folder using **File → Open
-   video file…**. Expect a solid blue image: it is a two-second, silent clip.
-2. Select **Video → Full processing mode**. This is a useful starting mode for
-   applying filters and making a new video file.
-3. Select **Video → Compression…**, choose **FFV1**, and confirm. FFV1 is a
-   lossless encoder—a way to save the video without throwing away image detail.
-4. Select **File → Save video…** (`F7`). Set **Files of type** to **Matroska
-   (*.mkv)** and use **Browse…** to choose a destination such as `blank-test.mkv`.
-   Save it, then reopen that output to check the result.
-
-**Save Project** saves your editing session so you can resume it later.
-**Save video…** makes the finished video file.
-
-If this example works, move on to your own media and scripts. If a script needs
-an extra source reader or filter, follow that plugin's Linux installation
-instructions. AviSynth scripts are text files; they are opened by the app, not
-typed as terminal commands. A plugin's instructions may use a line such as
+Open `blank.avs` using **File → Open video file…**. Expect a solid blue,
+two-second silent clip. Use the same export steps to test it. For scripts that
+need an extra source reader or filter, follow that plugin's Linux installation
+instructions. A plugin's instructions may use a line such as
 `LoadPlugin("/full/path/to/plugin.so")` inside the `.avs` file. Replace that
 example path with the actual Linux plugin file. Windows plugin DLLs do not work.
 
@@ -188,10 +193,10 @@ The private backend supplies FFmpeg 6.1.6, ffprobe, expanded software codecs,
 and readers for AviSynth and VapourSynth. All packages use the same configuration.
 You do not need to install, replace, or build system FFmpeg for the app.
 
-AviSynth+ is a separate requirement. VirtualDubQT opens `.avs` scripts directly,
-while Fast Recompress also uses the bundled command's AviSynth reader. Both need
-a working native Linux AviSynth installation and whatever extra plugins the
-script calls. Windows plugin DLLs do not work.
+VirtualDubQT opens `.avs` scripts directly. Fast Recompress also uses the
+bundled FFmpeg command's AviSynth reader. Both need a compatible native Linux
+AviSynth installation and the plugins the script calls. For Fast Recompress,
+make `libavisynth.so` available in the normal Linux library search path.
 
 VapourSynth is separate and optional. The bundled reader uses VSScript API 3.2;
 installations that remove that legacy API are not supported by this reader.
@@ -199,15 +204,15 @@ The packages do not supply Python or VapourSynth.
 
 To inspect the selected backend, use **Tools → System Information**, or run
 `VirtualDubQt --runtime-info` for a native package. For an AppImage, run
-`./VirtualDubQT-0.1.4-x86_64.AppImage --runtime-info`. An AppImage also needs the
-separately installed AviSynth library to start.
+`./VirtualDubQT-0.1.4-x86_64.AppImage --runtime-info`.
 
 ## Common problems
 
 | What you see | What to do next |
 | --- | --- |
 | Downloaded filename: “No such file or directory” | Open a terminal in the download folder. Run `pwd` to show the current folder and `ls` to list its files; use the filename that is actually there. |
-| Startup: missing `libavisynth` | Follow the separate [AviSynth setup](BUILDING.md#install-avisynth), then run `sudo ldconfig`. |
+| Opening `.avs`: “AviSynth+ could not be loaded” | Follow the separate [AviSynth setup](BUILDING.md#install-avisynth). Restart the app after installing the library. |
+| Published 0.1.4 build: startup reports missing `libavisynth` | Install AviSynth+ 3.7.5 using the same guide and refresh the linker cache. |
 | AppImage: “Permission denied” | Run its `chmod +x` command above, then launch it again. |
 | AppImage: FUSE or `libfuse.so.2` error | Use the `APPIMAGE_EXTRACT_AND_RUN=1` command above. |
 | AppImage: `GLIBC_2.38 not found` | Your system's glibc is below this package's requirement. Use an appropriate system or a source build with compatible dependencies. |

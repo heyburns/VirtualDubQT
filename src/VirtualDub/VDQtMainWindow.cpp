@@ -1183,6 +1183,11 @@ bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
     } else {
         bool isScript = filePath.endsWith(".avs", Qt::CaseInsensitive) || filePath.endsWith(".vpy", Qt::CaseInsensitive);
         QString errorDetails = mVideoDecoder.getLastError();
+        if (mAutomationUnattended) {
+            // CLI callers need the actual diagnostic and cannot dismiss a dialog.
+            qWarning().noquote() << "Could not open" << filePath << errorDetails;
+            return false;
+        }
         if (isScript && !errorDetails.isEmpty()) {
             QMessageBox msgBox(this);
             msgBox.setWindowTitle("VirtualDub Error");

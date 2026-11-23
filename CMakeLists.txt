@@ -74,14 +74,9 @@ find_path(AVISYNTH_INCLUDE_DIR
     NAMES avisynth/avisynth_c.h
     HINTS "$ENV{HOME}/.local/include"
 )
-find_library(AVISYNTH_LIBRARY
-    NAMES avisynth
-    HINTS "$ENV{HOME}/.local/lib64" "$ENV{HOME}/.local/lib"
-)
-if (NOT AVISYNTH_INCLUDE_DIR OR NOT AVISYNTH_LIBRARY)
-    message(FATAL_ERROR "AviSynth+ development headers and library were not found")
+if (NOT AVISYNTH_INCLUDE_DIR)
+    message(FATAL_ERROR "AviSynth+ C API headers were not found. Set AVISYNTH_INCLUDE_DIR to their parent include directory. The runtime library is loaded only for scripts.")
 endif()
-get_filename_component(AVISYNTH_LIBRARY_DIR "${AVISYNTH_LIBRARY}" DIRECTORY)
 
 # Application modules are kept in one list so the production target and source
 # reviews have a single authoritative inventory. Tests below select the smaller
@@ -95,8 +90,11 @@ set(VIRTUALDUB_QT_SOURCES
     src/VirtualDub/VDQtCapturePolicy.cpp
     src/VirtualDub/VDQtFrameDecodeWorker.h
     src/VirtualDub/VDQtFrameDecodeWorker.cpp
+    src/VirtualDub/VDQtAviSynth.h
+    src/VirtualDub/VDQtAviSynthFunctions.inc
     src/VirtualDub/VDQtVideoDecoder.h
     src/VirtualDub/VDQtVideoDecoder.cpp
+    src/VirtualDub/VDQtAviSynth.cpp
     src/VirtualDub/VDQtMp4Timing.h
     src/VirtualDub/VDQtMp4Timing.cpp
     src/VirtualDub/VDQtMatroskaTiming.h
@@ -202,11 +200,10 @@ target_link_libraries(vdqt_core PUBLIC
     Qt6::Multimedia
     Qt6::DBus
     Qt6::Concurrent
-    ${AVISYNTH_LIBRARY}
     PkgConfig::FFMPEG
 )
 set_target_properties(VirtualDubQt PROPERTIES
-    BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
+    BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib"
     INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/virtualdubqt/ffmpeg-runtime/lib"
 )
 
@@ -446,7 +443,7 @@ if (BUILD_TESTING)
     target_link_libraries(application_baseline_tests PRIVATE vdqt_core)
     vdqt_enable_diagnostics(application_baseline_tests)
     set_target_properties(application_baseline_tests PROPERTIES
-        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}")
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib")
     add_test(NAME application_baseline_tests COMMAND application_baseline_tests)
     set_tests_properties(application_baseline_tests PROPERTIES
         LABELS "integration;baseline" TIMEOUT 120
@@ -624,8 +621,7 @@ if (BUILD_TESTING)
             LABELS "packaging;runtime;avs;contracts" TIMEOUT 30)
         add_test(NAME avs_plugin_runtime_tests
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-script-plugin-runtime.py
-                --application $<TARGET_FILE:VirtualDubQt> --runtime ${VDQT_FFMPEG_BUNDLE}
-                --framework-library-path ${AVISYNTH_LIBRARY_DIR})
+                --application $<TARGET_FILE:VirtualDubQt> --runtime ${VDQT_FFMPEG_BUNDLE})
         set_tests_properties(avs_plugin_runtime_tests PROPERTIES
             LABELS "packaging;runtime;avs;export;regression" TIMEOUT 180 SKIP_RETURN_CODE 77)
         add_test(NAME application_runtime_contract_tests
@@ -732,6 +728,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtPositionControl.cpp
         src/VirtualDub/VDQtPositionControl.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtAviSynth.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
@@ -755,17 +752,17 @@ if (BUILD_TESTING)
         Qt6::Widgets
         Qt6::Multimedia
         Qt6::Concurrent
-        ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
     vdqt_enable_diagnostics(stabilization_tests)
-    set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}")
+    set_target_properties(stabilization_tests PROPERTIES BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib")
     add_test(NAME stabilization_tests COMMAND stabilization_tests)
 
     # Focused guardrails stay separate so performance regressions are obvious.
     add_executable(playback_performance_tests
         src/VirtualDub/test_playback_performance.cpp
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtAviSynth.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
@@ -782,12 +779,11 @@ if (BUILD_TESTING)
     target_link_libraries(playback_performance_tests PRIVATE
         Qt6::Core
         Qt6::Gui
-        ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
     vdqt_enable_diagnostics(playback_performance_tests)
     set_target_properties(playback_performance_tests PROPERTIES
-        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib"
     )
     add_test(NAME playback_performance_tests COMMAND playback_performance_tests)
     set_tests_properties(playback_performance_tests PROPERTIES
@@ -804,6 +800,7 @@ if (BUILD_TESTING)
         src/VirtualDub/VDQtAudioFilterSystem.cpp
         src/VirtualDub/VDQtAudioFilterSystem.h
         src/VirtualDub/VDQtVideoDecoder.cpp
+        src/VirtualDub/VDQtAviSynth.cpp
         src/VirtualDub/VDQtMp4Timing.cpp
         src/VirtualDub/VDQtMatroskaTiming.cpp
         src/VirtualDub/VDQtAviTiming.cpp
@@ -822,12 +819,11 @@ if (BUILD_TESTING)
         Qt6::Core
         Qt6::Gui
         Qt6::Multimedia
-        ${AVISYNTH_LIBRARY}
         PkgConfig::FFMPEG
     )
     vdqt_enable_diagnostics(audio_backend_tests)
     set_target_properties(audio_backend_tests PROPERTIES
-        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib;${AVISYNTH_LIBRARY_DIR}"
+        BUILD_RPATH "$ORIGIN/ffmpeg-runtime/lib"
     )
     add_test(NAME audio_backend_tests COMMAND audio_backend_tests)
     set_tests_properties(audio_backend_tests PROPERTIES

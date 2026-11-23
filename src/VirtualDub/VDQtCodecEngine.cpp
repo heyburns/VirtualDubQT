@@ -629,22 +629,7 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
         return true;
     }
 
-    // Video export invokes FFmpeg directly, so only an FFmpeg encoder counts as
-    // available here. Standalone command-line encoders are handled separately by
-    // the dedicated audio-export workflow.
-    if (id == "libmp3lame" || id == "mp3") {
-        if (avcodec_find_encoder_by_name("libmp3lame") != nullptr) {
-            return true;
-        }
-        if (outError) {
-            *outError = QString("The MP3 audio encoder is not available on your system.\n\n"
-                                "• Your FFmpeg installation was built without 'libmp3lame' support.\n"
-                                "To resolve this:\n"
-                                "1. Select another audio codec (e.g. AAC, Opus, FLAC, or Uncompressed WAV).\n"
-                                "2. Or install/recompile FFmpeg with libmp3lame enabled.");
-        }
-        return false;
-    }
+    if (id == "mp3") id = QStringLiteral("libmp3lame");
 
     // Special case: Opus (native 'opus' or external-library 'libopus' in FFmpeg)
     if (id == "libopus" || id == "opus") {
@@ -652,10 +637,10 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
             return true;
         }
         if (outError) {
-            *outError = QString("The Opus audio encoder is not available in your FFmpeg installation.\n\n"
+            *outError = QString("The Opus audio encoder is not available in the bundled FFmpeg backend.\n\n"
                                 "To resolve this:\n"
                                 "1. Select another audio codec (e.g. AAC, FLAC, or Uncompressed WAV).\n"
-                                "2. Or install/recompile FFmpeg with Opus encoder support enabled.");
+                                "2. Check the app’s bundled backend in System Information.");
         }
         return false;
     }
@@ -666,10 +651,10 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
             return true;
         }
         if (outError) {
-            *outError = QString("The AAC audio encoder is not available in your FFmpeg installation.\n\n"
+            *outError = QString("The AAC audio encoder is not available in the bundled FFmpeg backend.\n\n"
                                 "To resolve this:\n"
                                 "1. Select another audio codec (e.g. FLAC or Uncompressed WAV).\n"
-                                "2. Or install/recompile FFmpeg with AAC support enabled.");
+                                "2. Check the app’s bundled backend in System Information.");
         }
         return false;
     }
@@ -681,10 +666,10 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
             return true;
         }
         if (outError) {
-            *outError = QString("The Vorbis audio encoder is not available in your FFmpeg installation.\n\n"
+            *outError = QString("The Vorbis audio encoder is not available in the bundled FFmpeg backend.\n\n"
                                 "To resolve this:\n"
                                 "1. Select another audio codec (e.g. AAC, Opus, FLAC, or Uncompressed WAV).\n"
-                                "2. Or install/recompile FFmpeg with Vorbis support enabled.");
+                                "2. Check the app’s bundled backend in System Information.");
         }
         return false;
     }
@@ -696,10 +681,10 @@ bool VDQtCodecEngine::checkAudioEncoderAvailable(const QString &codecId, QString
     }
 
     if (outError) {
-        *outError = QString("The audio encoder '%1' is not available in your FFmpeg installation.\n\n"
+        *outError = QString("The audio encoder '%1' is not available in the bundled FFmpeg backend.\n\n"
                             "To resolve this:\n"
                             "1. Choose an available audio codec (such as AAC, FLAC, or Uncompressed WAV).\n"
-                            "2. Or install/recompile FFmpeg with support for '%1' enabled.")
+                            "2. Check the app’s bundled backend in System Information.")
                     .arg(codecId);
     }
     return false;
@@ -725,10 +710,10 @@ bool VDQtCodecEngine::checkVideoEncoderAvailable(const QString &codecId, QString
     }
 
     if (outError) {
-        *outError = QString("The video encoder '%1' is not available in your FFmpeg installation.\n\n"
+        *outError = QString("The video encoder '%1' is not available in the bundled FFmpeg backend.\n\n"
                             "To resolve this:\n"
                             "1. Choose an available video codec (such as FFV1, HuffYUV, ProRes, or Uncompressed).\n"
-                            "2. Or install/recompile FFmpeg with support for '%1' enabled.")
+                            "2. Check the app’s bundled backend in System Information.")
                     .arg(codecId);
     }
     return false;

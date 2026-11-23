@@ -3,6 +3,7 @@
 // own decode-ahead threads, bounded buffers, timestamp repair, seek/restart
 // coordination, and sample-accurate export helpers.
 #include "VDQtAudioPlayer.h"
+#include "VDQtAviSynth.h"
 #include "VDQtMediaRuntime.h"
 #include "VDQtAudioFilterSystem.h"
 #include "VDQtVideoDecoder.h"
@@ -263,11 +264,11 @@ bool readAvsAsInt16(AVS_Clip *clip,
 
     switch (vi->sample_type) {
     case AVS_SAMPLE_INT16:
-        return avs_get_audio(clip, output, startSample, sampleCount) == 0;
+        return VDQtAviSynth::api().avs_get_audio(clip, output, startSample, sampleCount) == 0;
 
     case AVS_SAMPLE_FLOAT: {
         std::vector<float> input(static_cast<size_t>(valueCount));
-        if (avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
+        if (VDQtAviSynth::api().avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
         for (int i = 0; i < valueCount; ++i) {
             const float value = std::isfinite(input[i]) ? std::clamp(input[i], -1.0f, 1.0f) : 0.0f;
             destination[i] = static_cast<int16_t>(
@@ -278,7 +279,7 @@ bool readAvsAsInt16(AVS_Clip *clip,
 
     case AVS_SAMPLE_INT32: {
         std::vector<int32_t> input(static_cast<size_t>(valueCount));
-        if (avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
+        if (VDQtAviSynth::api().avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
         for (int i = 0; i < valueCount; ++i) {
             destination[i] = static_cast<int16_t>(input[i] >> 16);
         }
@@ -287,7 +288,7 @@ bool readAvsAsInt16(AVS_Clip *clip,
 
     case AVS_SAMPLE_INT24: {
         std::vector<uint8_t> input(static_cast<size_t>(valueCount) * 3U);
-        if (avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
+        if (VDQtAviSynth::api().avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
         for (int i = 0; i < valueCount; ++i) {
             const size_t offset = static_cast<size_t>(i) * 3U;
             const uint16_t highWord = static_cast<uint16_t>(input[offset + 1]) |
@@ -299,7 +300,7 @@ bool readAvsAsInt16(AVS_Clip *clip,
 
     case AVS_SAMPLE_INT8: {
         std::vector<uint8_t> input(static_cast<size_t>(valueCount));
-        if (avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
+        if (VDQtAviSynth::api().avs_get_audio(clip, input.data(), startSample, sampleCount) != 0) return false;
         for (int i = 0; i < valueCount; ++i) {
             destination[i] = static_cast<int16_t>((static_cast<int>(input[i]) - 128) << 8);
         }
@@ -3058,7 +3059,7 @@ bool VDQtAudioPlayer::exportAudioToFile(
             bool decoded = true;
             if (readableCount > 0) {
                 QMutexLocker<QRecursiveMutex> avsLock(mAvsAccessMutex);
-                decoded = avs_get_audio(
+                decoded = VDQtAviSynth::api().avs_get_audio(
                     mClip, buffer.data(), currentSample, readableCount) == 0;
             }
             if (readableCount < count) {

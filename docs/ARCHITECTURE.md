@@ -51,6 +51,12 @@ plug-ins keep process-global state and cannot safely be evaluated twice or
 entered concurrently. Always close the worker and audio pipeline synchronously
 before destroying or replacing that shared environment.
 
+`VDQtAviSynth` loads the installed C API on the first `.avs` open. It asks for
+the library major that matches the build headers and resolves the whole API
+before video or audio uses it. The loaded library stays resident while clips
+and workers come and go. Missing or mismatched runtimes produce a script-open
+error. Standard media uses the private FFmpeg backend from startup.
+
 Audio has its own bounded decode-ahead producer thread. `QAudioSink` pulls only
 already-converted PCM from a `QIODevice`; codec, resampler, and AviSynth graph
 work must never migrate into the real-time audio callback.

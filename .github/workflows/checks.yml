@@ -56,8 +56,7 @@ jobs:
         run: |
           cmake --preset "${{ matrix.preset }}" \
             -DVDQT_FFMPEG_BUNDLE="${RUNNER_TEMP}/media-runtime" \
-            -DAVISYNTH_INCLUDE_DIR="${RUNNER_TEMP}/media-sdk/include" \
-            -DAVISYNTH_LIBRARY="${RUNNER_TEMP}/media-sdk/lib/libavisynth.so"
+            -DAVISYNTH_INCLUDE_DIR="${RUNNER_TEMP}/media-sdk/include"
           cmake --build --preset "${{ matrix.preset }}" --parallel 2
 
       - name: Run isolated regressions (hardware excluded)
@@ -72,7 +71,7 @@ jobs:
             --ffprobe "${RUNNER_TEMP}/media-runtime/bin/ffprobe" \
             --runtime-ffprobe "${RUNNER_TEMP}/media-runtime/bin/ffprobe" \
             --runtime-path "" \
-            --runtime-library-path "${RUNNER_TEMP}/external-avisynth" --check-fast-recompress
+            --runtime-library-path "${RUNNER_TEMP}/external-avisynth" --check-avisynth --check-fast-recompress
 
       - name: Retain failed test diagnostics
         if: failure()

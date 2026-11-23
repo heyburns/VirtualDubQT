@@ -253,3 +253,23 @@ This does not resolve the unchecked follow-ups above.
 
 Checkpoint evidence and limitations live in docs/TESTING.txt.
 Do not remove working features or legacy ABI/reference source as a cleanup shortcut.
+
+Runtime dependency audit (2026-11-22)
+-------------------------------------
+[x] Remove the startup link to AviSynth. The C API headers remain a compile-time
+    requirement. Native script input loads the matching installed library on
+    demand. The original 0.1.4 release binaries still have the startup link.
+[x] Remove the standalone LAME command lookup. The private bundle supplies the
+    MP3 encoder for both audio and video exports.
+[x] Separate clean package smoke tests from script fixture tests. Ordinary media,
+    Full Processing, Fast Recompress and MP3 are exercised with empty PATH.
+    The clean package tests also check the missing-framework diagnostic.
+[ ] Qt Multimedia packaging footprint. It supplies live PCM playback. Fedora's
+    Qt package also pulls in distro FFmpeg libraries, GStreamer and Qt Quick 3D.
+    The published AppImage carries both Qt media plugins and bundled GStreamer
+    libraries. Trimming these requires testing playback on both supported distros.
+
+Optional capture controls use v4l2-ctl. Capture and format inspection can use
+the bundled FFmpeg. KWin scripting is a desktop integration. Hardware codecs
+need their drivers, while software encoding uses the bundled codecs. glibc,
+graphics, fonts and the audio system remain ordinary Linux desktop dependencies.

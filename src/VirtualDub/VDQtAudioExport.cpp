@@ -11,7 +11,6 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
-#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <algorithm>
 #include <cmath>
@@ -159,45 +158,8 @@ bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& inpu
     args << VDQtCodecEngine::buildFfmpegAudioEncodeArguments(codec);
     args << "-progress" << "pipe:1" << stagedPath;
 
-    // Preserve the existing standalone LAME path for hosts without FFmpeg's
-    // libmp3lame encoder. Effects are rendered before handing PCM to LAME.
-    QString program = VDQtMediaRuntime::ffmpeg();
-    const QString lame = QStandardPaths::findExecutable(QStringLiteral("lame"));
-    const bool useLame = (codec.codecId == "mp3" || codec.codecId == "libmp3lame")
-        && !avcodec_find_encoder_by_name("libmp3lame") && !lame.isEmpty();
-    if (useLame) {
-        QString lameInput = wav;
-        if (!graph.isEmpty()) {
-            lameInput = directory.filePath(QStringLiteral("filtered.wav"));
-            QProcess effects;
-            effects.start(VDQtMediaRuntime::ffmpeg(), {"-nostdin", "-v", "error", "-y", "-i", wav,
-                "-af", graph, "-c:a", "pcm_s16le", lameInput});
-            if (!effects.waitForStarted(5000))
-                return fail(errorMessage, QStringLiteral("Audio filter renderer could not start."));
-            while (effects.state() != QProcess::NotRunning && !effects.waitForFinished(50)) {
-                effects.readAllStandardError();
-                if (progress && !progress(75, 100)) {
-                    effects.kill(); effects.waitForFinished(3000);
-                    return fail(errorMessage, QStringLiteral("Audio export was cancelled."));
-                }
-            }
-            if (effects.exitStatus() != QProcess::NormalExit || effects.exitCode() != 0)
-                return fail(errorMessage, QStringLiteral("Audio filter rendering failed."));
-        }
-        program = lame;
-        args = {"--silent"};
-        if (codec.rateMode.compare("vbr", Qt::CaseInsensitive) == 0)
-            args << "-V" << QString::number(std::clamp(codec.vbrQuality, 0, 9));
-        else args << "-b" << QString::number(codec.bitrateKbps > 0 ? codec.bitrateKbps : 192);
-        if (codec.sampleRate > 0) args << "--resample" << QString::number(codec.sampleRate / 1000.0, 'f', 3);
-        if (codec.channels == 1) args << "-m" << "m";
-        else if (codec.channels == 2) args << "-m" << "j";
-        else if (codec.channels > 2)
-            return fail(errorMessage, QStringLiteral("MP3 supports at most two channels."));
-        args << lameInput << stagedPath;
-    }
     QProcess process;
-    process.start(program, args);
+    process.start(VDQtMediaRuntime::ffmpeg(), args);
     if (!process.waitForStarted(5000))
         return fail(errorMessage, QStringLiteral("The audio encoder could not start."));
     QByteArray diagnostic, output;

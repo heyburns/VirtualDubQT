@@ -2341,3 +2341,27 @@ MP4/native-AviSynth smoke and exports three pictures from the original Spark FLV
 middle in approximately 0.43 seconds; their BGRA hashes match the independent
 reference exactly. Its previous executable is retained as
 build/VirtualDubQt.before-flv-navigation-20261121. Restart to use the new build.
+
+Optional AviSynth runtime and dependency audit (2026-11-22)
+---------------------------------------------------------
+
+The rebuilt executable and a staged install have no AviSynth DT_NEEDED entry.
+The published 0.1.4 DEB still requires libavisynth.so.11 at startup. A local
+mount namespace hid both installed script frameworks and the separate Qt
+plugin's system FFmpeg libraries. With an empty executable PATH, startup and
+ordinary raw/FFV1/MP3 exports passed. An AVS open exited with the missing-library
+diagnostic. The private bundle verified 42 software encoder round trips and
+clean failures for unavailable AviSynth and VapourSynth.
+
+Native AVS and Fast Recompress passed with both the upstream 3.7.5 interface
+11 build and the local interface 12 build, each with its matching library.
+The local library also passed the L-SMASH video/audio and export checks.
+An interface 12 build with only interface 11 discoverable reported the missing
+library instead of initializing the older interface. Clean-package CI now
+runs ordinary media checks before adding the AviSynth fixture. Local tests
+exercise a staged installation. Physical audio playback and building new
+Ubuntu/Fedora release packages are separate checks.
+
+Verification passed all 214 Release tests. The full sanitizer run passed 110
+checks before the final ABI guard, then nine relevant checks and the isolated
+missing-framework smoke ran successfully with the rebuilt sanitizer executable.

@@ -32,9 +32,9 @@ a claim that every recent distribution has been tested.
 - **FFmpeg** handles media conversion; **ffprobe** inspects media files. All
   packages include matching tools and libraries, with expanded codec support.
   The app always uses this private backend, never your system FFmpeg.
-- **AviSynth+ 3.7.5** runs `.avs` scripts and must be installed separately before
-  starting the app, even for ordinary media. Follow the
-  [setup instructions](docs/BUILDING.md#install-avisynth).
+- **AviSynth+** is loaded when you open an `.avs` script. Install it separately
+  if you use those scripts. The published 0.1.4 packages still require it at
+  startup. [AviSynth setup](docs/BUILDING.md#install-avisynth).
 - **Extra script plugins** are separate downloads. Follow their Linux setup
   instructions; Windows plugin DLLs are not supported. The guide includes a
   first-use AviSynth example that needs no extra plugins.
@@ -81,8 +81,8 @@ a claim that every recent distribution has been tested.
 
 ## Build Instructions
 
-Follow [Building VirtualDubQT](docs/BUILDING.md) for the complete sequence:
-install the tools, build AviSynth+, download the app source, compile, and run.
+Follow [Building VirtualDubQT](docs/BUILDING.md) to install the build tools and
+headers, download the app source and FFmpeg SDK, compile, and run.
 The guide provides commands for Ubuntu 24.04 and Fedora 43 and explains the
 common build errors. Programming experience is not required to follow it.
 

@@ -138,8 +138,7 @@ jobs:
           cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_TESTING=ON \
             -DVDQT_FFMPEG_BUNDLE="${GITHUB_WORKSPACE}/.release-media/runtime" \
-            -DAVISYNTH_INCLUDE_DIR="${GITHUB_WORKSPACE}/.release-media/external-avisynth/include" \
-            -DAVISYNTH_LIBRARY="${GITHUB_WORKSPACE}/.release-media/external-avisynth/lib/libavisynth.so"
+            -DAVISYNTH_INCLUDE_DIR="${GITHUB_WORKSPACE}/.release-media/external-avisynth/include"
           cmake --build build-release --parallel 2
           desktop-file-validate packaging/virtualdubqt.desktop
 
@@ -150,8 +149,8 @@ jobs:
         run: ctest --test-dir build-release --output-on-failure --parallel 2 -LE hardware
 
       - name: Build Ubuntu DEB
-        # Explicit target-distro dependencies avoid requesting system FFmpeg or
-        # inventing a distro package for the separately installed AviSynth SDK.
+        # Declare desktop runtime libraries. The private media bundle ships
+        # separately from distro codecs and optional script frameworks.
         run: |
           mkdir -p dist
           cpack -G DEB -B dist --config build-release/CPackConfig.cmake \
@@ -165,13 +164,13 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install --no-install-recommends -y python3 /repo/dist/*.deb
-            export LD_LIBRARY_PATH=/repo/.release-media/external-avisynth/lib
             /usr/bin/VirtualDubQt --runtime-info
-            python3 /repo/packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \
-              --ffmpeg /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffmpeg \
-              --ffprobe /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
-              --runtime-ffprobe /usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
-              --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
+            smoke_args=(--application "/usr/bin/VirtualDubQt"
+              --ffmpeg "/usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffmpeg" --ffprobe "/usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe"
+              --runtime-ffprobe "/usr/lib/virtualdubqt/ffmpeg-runtime/bin/ffprobe" --check-fast-recompress)
+            python3 /repo/packaging/smoke-runtime.py "${smoke_args[@]}" --expect-missing-avisynth
+            python3 /repo/packaging/smoke-runtime.py "${smoke_args[@]}" --check-avisynth \
+              --runtime-library-path "/repo/.release-media/external-avisynth/lib"
           '
 
       - name: Build AppImage without bundling script frameworks
@@ -192,7 +191,6 @@ jobs:
               libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 \
               libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
             test ! -e /usr/bin/ffmpeg
-            export LD_LIBRARY_PATH=/repo/.release-media/external-avisynth/lib
             test_root=$(mktemp -d)
             cd "$test_root"
             "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" --appimage-extract > /dev/null
@@ -203,10 +201,12 @@ jobs:
             test -n "$xcb"
             if ldd "$xcb" | grep -q "not found"; then ldd "$xcb"; exit 1; fi
             media="$test_root/squashfs-root/usr/lib/virtualdubqt/ffmpeg-runtime/bin"
-            python3 /repo/packaging/smoke-runtime.py \
-              --application "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage" \
-              --ffmpeg "$media/ffmpeg" --ffprobe "$media/ffprobe" --runtime-ffprobe "$media/ffprobe" \
-              --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
+            smoke_args=(--application "/repo/dist/VirtualDubQT-${VERSION}-x86_64.AppImage"
+              --ffmpeg "$media/ffmpeg" --ffprobe "$media/ffprobe"
+              --runtime-ffprobe "$media/ffprobe" --check-fast-recompress)
+            python3 /repo/packaging/smoke-runtime.py "${smoke_args[@]}" --expect-missing-avisynth
+            python3 /repo/packaging/smoke-runtime.py "${smoke_args[@]}" --check-avisynth \
+              --runtime-library-path "/repo/.release-media/external-avisynth/lib"
           '
 
       - name: Archive exact SDK and external test-only AviSynth fixture
@@ -254,8 +254,7 @@ jobs:
           cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DBUILD_TESTING=OFF \
             -DVDQT_FFMPEG_BUNDLE="$PWD/media/runtime" \
-            -DAVISYNTH_INCLUDE_DIR="$PWD/media/external-avisynth/include" \
-            -DAVISYNTH_LIBRARY="$PWD/media/external-avisynth/lib/libavisynth.so"
+            -DAVISYNTH_INCLUDE_DIR="$PWD/media/external-avisynth/include"
           cmake --build build-release --parallel 2
           cpack -G RPM -B dist --config build-release/CPackConfig.cmake \
             -D CPACK_RPM_PACKAGE_AUTOREQPROV=OFF \
@@ -284,21 +283,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: media-sdk
-      - name: Install only runtime dependencies and the independent framework fixture
+      - name: Validate Fedora before and after exposing the script runtime
         shell: bash
         run: |
           dnf install -y python3 xz tar dist/*.rpm
           mkdir media
           tar -xJf media-sdk.tar.xz -C media
-          export LD_LIBRARY_PATH="$PWD/media/external-avisynth/lib"
           # Also record startup output directly: a loader-policy rejection must
           # not be lost behind package-manager progress output in the log.
           python3 -c 'import subprocess,sys; p=subprocess.run(["/usr/bin/VirtualDubQt", "--runtime-info"],capture_output=True,text=True); message=(p.stdout+p.stderr).replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print(("::error" if p.returncode else "::notice")+" title=Installed Fedora backend::"+message,flush=True); sys.exit(p.returncode)'
-          python3 packaging/smoke-runtime.py --application /usr/bin/VirtualDubQt \
-            --ffmpeg /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffmpeg \
-            --ffprobe /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
-            --runtime-ffprobe /usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe \
-            --runtime-library-path "$LD_LIBRARY_PATH" --check-fast-recompress
+          smoke_args=(--application "/usr/bin/VirtualDubQt"
+            --ffmpeg "/usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffmpeg" --ffprobe "/usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe"
+            --runtime-ffprobe "/usr/lib64/virtualdubqt/ffmpeg-runtime/bin/ffprobe" --check-fast-recompress)
+          python3 packaging/smoke-runtime.py "${smoke_args[@]}" --expect-missing-avisynth
+          python3 packaging/smoke-runtime.py "${smoke_args[@]}" --check-avisynth \
+            --runtime-library-path "$PWD/media/external-avisynth/lib"
 
   publish:
     name: Publish GitHub release
