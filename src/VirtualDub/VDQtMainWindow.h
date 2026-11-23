@@ -197,6 +197,8 @@ private:
     class SourceTransitionScope;
     class SessionRollbackScope;
     bool editorActionsBlocked() const;
+    // Private workflows can open their own source while they hold an operation
+    // guard. External callers use openVideoFile to honor editor availability.
     bool openVideoFileImpl(const QString& filePath);
     void closeVideoSource();
     void releaseVideoSource();
@@ -313,6 +315,9 @@ private:
     double mPlaybackClockFrameStartSeconds = 0.0;
     double mPlaybackFrameDurationSeconds = 1.0 / 29.97;
     double mPlaybackAudioOriginSeconds = -1.0;
+    // A rendered sequence may contain several filter phases for one timeline
+    // frame. Retain that frame alongside the images to prevent phase reuse on
+    // the next source request.
     QList<QImage> mDecodedPreviewFrames;
     int mDecodedPreviewTimelineFrame = -1;
 
@@ -378,6 +383,8 @@ private:
     QList<VDQtTimelineSegment> mTimelineClipboard;
     QList<qint64> mTimelineMarkers;
     int mRequestedTimelineFrame = 0;
+    // Only one playback request is in flight from the controller. The queued
+    // position represents the latest target while that request is outstanding.
     bool mFrameRequestPending = false;
     int mQueuedPlaybackFrame = -1;
     // Long-running controllers and queue state.
@@ -397,6 +404,9 @@ private:
     QString mAudioSourcePath;
     int mAudioStreamIndex = -1;
     bool mAudioDisabled = false;
+    // Operation and source-transition scopes serve separate purposes. The former
+    // blocks editor mutations during progress callbacks. The latter serializes
+    // media ownership changes and defers any reentrant request.
     int mOperationDepth = 0;
     bool mSourceTransitionActive = false;
     bool mAutomationRunning = false;

@@ -70,6 +70,8 @@ else()
 endif()
 message(STATUS "Exclusive bundled FFmpeg: ${VDQT_FFMPEG_BUNDLE}")
 
+# The C headers describe the script ABI at compile time. VDQtAviSynth loads
+# the matching shared library only when the user opens an AVS script.
 find_path(AVISYNTH_INCLUDE_DIR
     NAMES avisynth/avisynth_c.h
     HINTS "$ENV{HOME}/.local/include"
@@ -234,6 +236,8 @@ install(DIRECTORY "${VDQT_FFMPEG_BUNDLE}/"
     USE_SOURCE_PERMISSIONS
     PATTERN "include" EXCLUDE PATTERN "pkgconfig" EXCLUDE)
 
+# The release workflow provides the target distro's runtime library list.
+# The installation rule above contains the private media runtime payload.
 set(CPACK_PACKAGE_NAME "virtualdubqt")
 set(CPACK_PACKAGE_VENDOR "VirtualDubQT contributors")
 set(CPACK_PACKAGE_CONTACT "Alan Burns <alan.burns@icloud.com>")

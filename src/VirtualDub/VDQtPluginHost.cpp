@@ -87,6 +87,8 @@ QString pluginIdentifier(const QString& modulePath, const QString& name, int ind
               material, QCryptographicHash::Sha256).toHex());
 }
 
+// Copy registration data into host-owned definitions. Retain the module
+// while its callbacks, definitions or runtime instances remain reachable.
 VDXFilterDefinition *registerFilter(VDXFilterDefinition *definition,
                                     int definitionBytes,
                                     FilterModDefinition *filterMod,
@@ -303,6 +305,9 @@ bool bitmapSampleAspectRatio(const VDXFBitmap& bitmap, AVRational *ratio,
     return false;
 }
 
+// Describe the aligned image to both generations of the VDX interfaces.
+// Pitch and orientation must match the backing memory presented to native
+// callbacks for the duration of the frame.
 void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
                 VDXPixmap& pixmap, QImage& image, sint64 frameNumber,
                 const VDFilterFrameContext& context, AVRational sampleAspect) {
@@ -351,6 +356,9 @@ void fillBitmap(VDXFBitmap& bitmap, VDXPixmapLayout& layout,
 // callbacks in ABI order; destruction runs end/deinit before releasing module
 // ownership. process() serializes callbacks because legacy filters are commonly
 // stateful and do not promise thread safety.
+// Own a started filter instance and its working buffers. Reuse it only
+// when configuration, input geometry and stage timing are compatible,
+// so a discontinuous request can start with clean plug-in history.
 class VideoFilterRuntime {
 public:
     explicit VideoFilterRuntime(QSharedPointer<PluginDefinition> pluginDefinition)
@@ -709,6 +717,9 @@ bool isWindowsPortableExecutable(const QString& path) {
 } // namespace
 
 // Process-wide discovery cache and live-instance map hidden from the header.
+// The discovery catalog and the executing instances have different
+// lifetimes. Copy strong references out of catalog lookups before invoking
+// a filter so reloading the list cannot unload an active module.
 class VDQtPluginHost::Private {
 public:
     ~Private() { unload(); }
@@ -972,6 +983,9 @@ void VDQtPluginHost::reload() {
     d->load();
 }
 
+// Identify a runtime by both definition and pipeline instance. This keeps
+// a preview filter and an export filter using the same settings from
+// sharing native state.
 bool VDQtPluginHost::processVideoFilter(
     const QString& filterId, const QString& instanceId,
     const QByteArray& serializedConfiguration, const QImage& input,

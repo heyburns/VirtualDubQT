@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 
 
+# Give a regression subprocess the same loader paths and tool selection
+# as the intended private runtime without changing the user's environment.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test", required=True, type=Path)

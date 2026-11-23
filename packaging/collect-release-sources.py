@@ -18,6 +18,8 @@ def output(*args):
     return subprocess.check_output(args, text=True).strip()
 
 
+# Require one exact binary package owner before attaching notices and source
+# versions. Ambiguous paths cannot establish the provenance of a payload.
 def package_owner(name):
     lines = output("dpkg-query", "--search", "*/" + name).splitlines()
     owners = {line.rsplit(": ", 1)[0] for line in lines if ": " in line}
@@ -26,6 +28,8 @@ def package_owner(name):
     return owners.pop()
 
 
+# Record every packaged ELF's glibc floor, even if its source provenance
+# was already collected for the private media runtime.
 def collect(args):
     args.notices.mkdir(parents=True, exist_ok=True)
     args.sources.mkdir(parents=True, exist_ok=True)

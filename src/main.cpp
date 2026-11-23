@@ -55,6 +55,9 @@ void printUsage() {
 
 } // namespace
 
+// Choose unattended/platform behavior before creating QApplication.
+// Validate the bundled media runtime before constructing the editor, then
+// apply command-line actions through the same controller used by the GUI.
 int main(int argc, char *argv[]) {
     // Inspect the raw arguments before constructing QApplication. Headless Qt
     // platform selection must happen first or unattended jobs may try to open a

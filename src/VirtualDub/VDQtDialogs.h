@@ -29,6 +29,8 @@
 
 // Edits the ordered session video-filter chain. Configuration subdialogs work
 // on parameter copies and commit only when accepted.
+// Edits an ordered chain and opens specialized controls on its entries.
+// Original settings remain available to restore if the user cancels.
 class VDVideoFiltersDialog : public QDialog {
     Q_OBJECT
 public:
@@ -59,6 +61,7 @@ private:
 };
 
 // Reusable floating still-frame preview owned by a filter configuration dialog.
+// Read-only comparison view for images rendered with proposed settings.
 class VDFilterPreviewDialog : public QDialog {
     Q_OBJECT
 public:
@@ -78,6 +81,8 @@ private:
 };
 
 // Filter: Resize Configuration Dialog
+// Converts absolute or relative dimensions, aspect policies, framing and
+// alignment into the common resize parameter map.
 class VDResizeFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -141,6 +146,7 @@ private:
 };
 
 // Rotate Filter Dialog (Matching VirtualDub Screenshot)
+// Selects a preset right-angle rotation.
 class VDRotateFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -155,6 +161,7 @@ private:
 };
 
 // Brightness / Contrast Filter Dialog (Matching VirtualDub Screenshot)
+// Shows normalized controls and a preview of the corresponding color adjustment.
 class VDBrightnessContrastFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -180,6 +187,7 @@ private:
 };
 
 // Box Blur Filter Dialog (Matching VirtualDub Screenshot)
+// Controls the blur radius and power before committing a filter configuration.
 class VDBoxBlurFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -208,6 +216,7 @@ private:
 };
 
 // Sharpen Filter Dialog (Matching VirtualDub Screenshot)
+// Shows the edge adjustment on a preview of the current source picture.
 class VDSharpenFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -233,6 +242,7 @@ private:
 };
 
 // 6-Axis Color Correction Filter Dialog (Matching VirtualDub Screenshot)
+// Collects the global and hue-dependent settings used to build the Six Axis LUT.
 class VD6AxisFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -267,6 +277,8 @@ private:
 };
 
 // Bob Doubler Filter Dialog (Matching VirtualDub Screenshot)
+// Sets field order and reconstruction mode. The filter pipeline owns timing
+// and produces two frames per input when this filter is enabled.
 class VDBobDoublerFilterDialog : public QDialog {
     Q_OBJECT
 public:
@@ -299,6 +311,7 @@ private:
 };
 
 // Add Filter Selection Dialog
+// Presents filter types. Insertion and configuration belong to the chain editor.
 class VDVideoFilterAddDialog : public QDialog {
     Q_OBJECT
 public:
@@ -315,6 +328,8 @@ private:
 
 // Serializable frame-rate policy. sourceMode reinterprets input timing;
 // convMode actually drops/duplicates frames during export.
+// Keep source-rate interpretation separate from conversion and decimation.
+// The former changes elapsed time, while conversion chooses a new output grid.
 struct VDFrameRateConfig {
     int sourceMode = 0; // 0: No change, 1: Custom fps, 2: Match audio
     double customSourceFps = 0.0;
@@ -360,6 +375,7 @@ private:
 };
 
 // Controls decoder-to-QImage conversion, not the encoded export pixel format.
+// Values used to rebuild preview and decoder conversion settings together.
 struct VDDecompressionFormatConfig {
     QString formatName = "Autoselect";
     int colorSpace = 0;     // 0: No change, 1: Rec. 601 (SD), 2: Rec. 709 (HD)
@@ -406,6 +422,7 @@ struct VDDecoderErrorModeConfig {
     int errorMode = 0; // 0: Report all errors, 1: Conceal errors, 2: Decode even if garbled
 };
 
+// Configures decoder recovery policy used for subsequent seeks and reads.
 class VDDecoderErrorModeDialog : public QDialog {
     Q_OBJECT
 public:
@@ -428,6 +445,8 @@ private:
 #include "VDQtCodecEngine.h"
 
 // Save Audio Dialog with Codec Dropdown & Independent Full Processing Controls
+// Collects destination, format and range. The controller validates source
+// identity and constructs the export request after acceptance.
 class VDSaveAudioDialog : public QDialog {
     Q_OBJECT
 public:
@@ -465,6 +484,8 @@ private:
 };
 
 // Video Compression Dialog
+// Populate codec controls from the supported FFmpeg capabilities and
+// return their session values to the controller.
 class VDVideoCompressionDialog : public QDialog {
     Q_OBJECT
 public:
@@ -497,6 +518,7 @@ private:
 };
 
 // Audio Compression Dialog
+// Chooses an encoder and its supported sample/rate/channel settings.
 class VDAudioCompressionDialog : public QDialog {
     Q_OBJECT
 public:
@@ -519,6 +541,8 @@ private:
     QComboBox *mChannelsCombo;
 };
 
+// Raw streams carry no self-describing header. Keep pixel layout, alignment
+// and orientation together so the writer can reproduce the selected format.
 struct VDRawVideoExportConfig {
     QString pixelFormat = QStringLiteral("yuv420p");
     int scanlineAlignment = 4;
@@ -562,6 +586,8 @@ private:
 // VirtualDub-compatible position entry. Positions are expressed in edited
 // timeline coordinates; a leading + or - makes either field relative to the
 // current frame. The frame edit is selected initially for quick copy/replace.
+// Accept a frame ordinal or wall-clock position. A caller-supplied timeline
+// clock provides exact VFR/edited boundaries when available.
 class VDJumpToPositionDialog : public QDialog {
     Q_OBJECT
 public:
@@ -613,6 +639,8 @@ private:
 
 // Performance settings applied immediately to decoder instances and future
 // worker snapshots. decoderThreads=0 delegates thread choice to FFmpeg.
+// Editor-wide preferences. Per-source and per-export choices have their own
+// configuration values and lifetime.
 struct VDPreferencesConfig {
     int frameCacheMiB = 64;
     int decoderThreads = 0;
@@ -641,6 +669,8 @@ public:
 };
 
 // Log Console Window
+// Shared diagnostics presentation. The main window owns the widget, while
+// operational failures continue to be returned by their own subsystems.
 class VDLogWindow : public QDialog {
     Q_OBJECT
 public:
@@ -656,6 +686,8 @@ private:
 };
 
 // VDSaveVideoDialog (File -> Save video... F7 matching VirtualDub2 screenshot)
+// Collect a destination and container settings. Destination safety and
+// export execution are handled by the controller.
 class VDSaveVideoDialog : public QDialog {
     Q_OBJECT
 public:

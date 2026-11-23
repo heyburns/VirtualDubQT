@@ -37,6 +37,8 @@ inline bool VDQtResolveColorMatrix(const QString& name, int bitDepth,
     return true;
 }
 
+// Generate conversion and frame tags in the order FFmpeg evaluates them.
+// An RGB output gets full-range RGB tags even for a YUV matrix preference.
 inline QString VDQtOutputMatrixFilter(const QString& name, const QString& pixelFormat) {
     VDQtColorMatrixInfo info;
     const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(

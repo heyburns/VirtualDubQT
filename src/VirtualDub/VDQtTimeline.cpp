@@ -12,6 +12,8 @@ void setError(QString *errorMessage, const QString& message) {
     if (errorMessage) *errorMessage = message;
 }
 
+// The total is a count in edited space. A repeated source range contributes
+// its length each time it occurs. Check addition before any ordinal lookup.
 qint64 segmentTotal(const QList<VDQtTimelineSegment>& segments) {
     qint64 total = 0;
     for (const VDQtTimelineSegment& segment : segments) {
@@ -109,6 +111,8 @@ QList<VDQtTimelineSegment> VDQtTimeline::normalized(
     return result;
 }
 
+// Replacing the list establishes an explicit edit even when it happens to
+// match the unedited length. An empty explicit list represents a real edit.
 bool VDQtTimeline::replaceSegments(
     const QList<VDQtTimelineSegment>& segments,
     QString *errorMessage,
@@ -148,6 +152,8 @@ qint64 VDQtTimeline::mapOutputToSource(qint64 outputFrame) const {
     return -1;
 }
 
+// A mask holds the visible picture but retains its own source interval for
+// audio and time. Do not reuse the displayed-frame mapping for sound.
 qint64 VDQtTimeline::mapOutputToAudioSource(qint64 outputFrame) const {
     if (outputFrame < 0) return -1;
     if (mIdentity)
@@ -236,6 +242,8 @@ QList<VDQtTimelineSegment> VDQtTimeline::copyRange(
     return slice(startFrame, endFrameExclusive);
 }
 
+// Validate the proposed list before recording history. Undo and redo restore
+// identity intent along with the segments, including explicit empty edits.
 bool VDQtTimeline::applyEdit(const QList<VDQtTimelineSegment>& segments,
                              QString *errorMessage, bool identity) {
     const QList<VDQtTimelineSegment> compact = normalized(segments);

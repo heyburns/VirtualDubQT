@@ -60,6 +60,9 @@ qint64 alignedAudioBufferSize(const QAudioFormat& format,
     return std::max(bytesPerFrame, bytes);
 }
 
+// Apply the playback buffer target in sample-aligned bytes before start.
+// The sink pulls prepared PCM and can temporarily go idle while the
+// producer fills its separate queue.
 void configureLiveAudioSink(QAudioSink *sink, const QAudioFormat& format)
 {
     if (!sink) return;
@@ -179,6 +182,8 @@ int64_t timelineOriginForAudio(const AVFormatContext *formatContext,
     return 0;
 }
 
+// Use stream/container timing to keep a known gap in the output interval.
+// The audio decoder still determines how much actual PCM exists.
 int64_t timelineEndForAudio(const AVFormatContext *formatContext,
                             const AVStream *audioStream,
                             int64_t timelineOrigin)
@@ -243,6 +248,9 @@ bool checkedBufferSize(int64_t samples, int channels, int bytesPerChannel, qsize
     return true;
 }
 
+// Acquire the shared script mutex around GetAudio. The sink-facing PCM is
+// S16, so wider and floating AVS samples are converted at this boundary
+// without changing the source precision used by offline export.
 bool readAvsAsInt16(AVS_Clip *clip,
                     const AVS_VideoInfo *vi,
                     int64_t startSample,
@@ -374,6 +382,8 @@ public:
         if (mStreamIndex < 0) return fail("No decodable audio stream was found", mStreamIndex);
 
         mStream = mFormatContext->streams[mStreamIndex];
+        // Anchor timestamp-to-sample conversion to the chosen editor clock before
+        // seeking. Keep stream time-base units until deriving sample positions.
         mTimelineOriginTimestamp = timelineOriginForAudio(mFormatContext, mStream);
         const AVCodec *codec = avcodec_find_decoder(mStream->codecpar->codec_id);
         if (!codec) return fail("No decoder is available for the audio stream", AVERROR_DECODER_NOT_FOUND);
@@ -453,6 +463,9 @@ public:
         return true;
     }
 
+    // Return one converted chunk and its position in timeline-relative samples.
+    // Packet EOF and decoder EOF are separate from resampler EOF because
+    // each stage can retain samples after the previous stage is exhausted.
     bool nextChunk(QByteArray *pcm, int *sampleCount, int64_t *startSample)
     {
         if (!pcm || !sampleCount || !startSample || !mSwrContext || mFailed || mResamplerDrained) {
@@ -879,6 +892,8 @@ struct PcmOutputSpec {
     bool floatingPoint = false;
 };
 
+// Keep the source precision that the WAV path can carry. This offline
+// choice is separate from the narrower live sink format.
 PcmOutputSpec chooseOfflinePcmOutput(AVSampleFormat sourceFormat, int sourceBits)
 {
     PcmOutputSpec result;
@@ -1087,6 +1102,8 @@ bool reportProgress(const std::function<bool(int, int)> &callback,
     return callback(percent, 100);
 }
 
+// Use one joined PCM input for the effect graph. Conversion and final
+// encoding therefore see edit joins and effect tails in their natural order.
 bool transcodeTemporaryWav(const QString &wavPath,
                            const QString &outputPath,
                            const PcmOutputSpec& source,
@@ -1411,6 +1428,8 @@ private:
         }
     }
 
+    // Honor a real timeline gap in bounded increments. The silence byte
+    // depends on the packed sink format, including unsigned 8-bit PCM.
     bool appendSilence(int64_t *gapSamples)
     {
         if (!gapSamples || *gapSamples <= 0) return false;
@@ -1442,6 +1461,9 @@ private:
         return true;
     }
 
+    // A decoded chunk can be larger than the queue's available room. Retain
+    // the rest in producer-local storage and publish complete sample frames
+    // as the consumer makes space.
     bool appendPending(QByteArray *pending, qsizetype *pendingOffset)
     {
         if (!pending || !pendingOffset || *pendingOffset >= pending->size()) return false;
@@ -1477,6 +1499,8 @@ private:
     {
         QByteArray pending;
         qsizetype pendingOffset = 0;
+        // Compare decoded positions to the produced cursor. Drop overlapping
+        // preroll, synthesize gaps, then publish the remainder in playback order.
         int64_t gapSamples = 0;
         bool decoderFinished = false;
 
@@ -1592,6 +1616,8 @@ private:
             }
         }
 
+        // Prime the queue before the sink begins pulling. Waiting here is
+        // bounded and occurs outside the sink callback.
         mDecodeThread->start(QThread::HighPriority);
 
         QElapsedTimer timer;
@@ -1609,6 +1635,8 @@ private:
         return true;
     }
 
+    // Release the queue lock before joining. The producer may need that
+    // lock to observe cancellation and leave its wait loop.
     void stopDecodeThread()
     {
         QThread *thread = nullptr;
@@ -2115,6 +2143,8 @@ bool AVSAudioDevice::initialize()
     return startDecodeThreadAndPrime();
 }
 
+// Reset producer and buffered position together. Once the producer joins,
+// no PCM from the previous seek may be delivered after the new start.
 bool AVSAudioDevice::seekToSample(int64_t sample)
 {
     stopDecodeThread();
@@ -2195,6 +2225,9 @@ qint64 AVSAudioDevice::size() const
     return m_vi->num_audio_samples * bytesPerFrame;
 }
 
+// The sink callback consumes bytes that are ready. A temporary empty
+// buffer is distinct from producer EOF. Script evaluation stays on the
+// producer thread so a slow filter cannot block the callback.
 qint64 AVSAudioDevice::readData(char *data, qint64 maximumLength)
 {
     if (!m_clip || !m_vi || !avs_has_audio(m_vi) || !data ||
@@ -2248,6 +2281,9 @@ void AVSAudioDevice::compactBufferUnlocked()
     }
 }
 
+// Reserve the next sample interval under the queue lock, then release it
+// before entering the shared AVS graph. Publish only if the current
+// producer is still active.
 void AVSAudioDevice::decodeLoop()
 {
     constexpr int64_t kDecodeChunkSamples = 32768;
@@ -2322,6 +2358,8 @@ void AVSAudioDevice::decodeLoop()
     }
 }
 
+// Wait for a limited initial buffer before handing playback to the sink.
+// EOF and producer failure also wake the priming wait.
 bool AVSAudioDevice::startDecodeThreadAndPrime()
 {
     {
@@ -2472,6 +2510,9 @@ QList<VDAudioStreamInfo> VDQtAudioPlayer::probeAudioStreams(
     return streams;
 }
 
+// The clip and its video info are borrowed from the authoritative decoder.
+// Opening audio must not evaluate the script again. Close this player
+// before the decoder destroys its environment.
 bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip,
                                   const AVS_VideoInfo *vi,
                                   QRecursiveMutex *avsAccessMutex)
@@ -2535,6 +2576,9 @@ bool VDQtAudioPlayer::openAvsClip(AVS_Clip *clip,
     return true;
 }
 
+// Probe stream and clock metadata during open. Create the streaming
+// producer for playback when appropriate. Offline callers can reuse the
+// selected stream without requesting an audio device.
 bool VDQtAudioPlayer::openFile(const QString &filePath, int requestedStreamIndex)
 {
     close();
@@ -2720,6 +2764,8 @@ bool VDQtAudioPlayer::openFile(const QString &filePath, int requestedStreamIndex
     return true;
 }
 
+// Stop sink callbacks before releasing their source devices and then join
+// producers. This ordering also protects a borrowed native clip.
 void VDQtAudioPlayer::close()
 {
     mIsPlaying = false;
@@ -2829,6 +2875,9 @@ void VDQtAudioPlayer::seekToFrame(int frameIndex, double fps)
     seekToTimeSeconds(std::max(0, frameIndex) / fps);
 }
 
+// Translate editor time into the selected sample clock. Reset sink timing
+// and filter state around the seek so buffered PCM or effects from the
+// previous position cannot carry over.
 void VDQtAudioPlayer::seekToTimeSeconds(double timeSeconds)
 {
     if (!mHasAudio || !std::isfinite(timeSeconds) || mSampleRate <= 0) return;
@@ -2881,6 +2930,8 @@ double VDQtAudioPlayer::getCurrentAudioTimeSeconds() const
     return -1.0;
 }
 
+// This clock is based on audio processed by the device. It is distinct
+// from getCurrentAudioTimeSeconds, which can reflect queued samples.
 double VDQtAudioPlayer::getPlaybackTimeSeconds() const
 {
     // Idle follows the last drained sample, not just producer EOF: buffered
@@ -2921,6 +2972,9 @@ QString VDQtAudioPlayer::getAudioCompressionString() const
 // Offline audio export
 // ---------------------------------------------------------------------------
 
+// Decode the requested interval with source-appropriate precision. Define
+// the selected time region before writing data so timestamps and requested
+// silence retain the same meaning on either input path.
 bool VDQtAudioPlayer::exportAudioToFile(
     const QString &outputPath,
     int64_t startSample,
@@ -3308,6 +3362,9 @@ bool VDQtAudioPlayer::exportAudioToFile(
     return true;
 }
 
+// Concatenate the requested source sample ranges into one PCM stream.
+// Applying the graph to the joined stream preserves continuous filter
+// history at edit boundaries.
 bool VDQtAudioPlayer::exportAudioRangesToFile(
     const QString& outputPath,
     const QList<QPair<int64_t, int64_t>>& inputRanges,

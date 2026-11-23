@@ -59,6 +59,8 @@ inline bool VDQtCapAudioSampleRanges(const QList<QPair<int64_t, int64_t>>& range
     return true;
 }
 
+// Compact result for display. Store one aggregate peak per output
+// column together with the sample layout used to derive it.
 struct VDQtWaveformData {
     int sampleRate = 0;
     int channels = 0;
@@ -102,6 +104,8 @@ inline qint64 columnBoundary(qint64 frames, int column, int columns) {
 // reading the complete WAV. The actual output format/rate/duration come from
 // this WAV, since audio filters may change them after source extraction.
 // Progress is called once per input block and may return false to cancel.
+// Parse the bounded WAV/RF64 envelope, then reduce decoded PCM to
+// column peaks without retaining the original samples.
 inline bool VDQtReadWaveformPeaks(
     const QString& path, int columns, VDQtWaveformData *result,
     QString *error = nullptr,

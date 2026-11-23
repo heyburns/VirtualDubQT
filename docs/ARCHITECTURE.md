@@ -25,6 +25,32 @@ binary; consult the explicit CMake target first.
 `VDQtApplicationIcon.cpp` is generated embedded image data. Its payload should
 not be manually reformatted or annotated line by line.
 
+## Where to start
+
+Start with the entry point for the behavior you are changing. Follow the data
+into the shared implementation before making a change in a menu handler.
+
+| Behavior | First place to look | What to follow next |
+| --- | --- | --- |
+| Startup, CLI arguments, backend selection | [`main.cpp`](../src/main.cpp), [`VDQtMediaRuntime.cpp`](../src/VirtualDub/VDQtMediaRuntime.cpp) | Startup validates the private FFmpeg bundle before creating the editor. CLI actions run through the editor controller. |
+| Open, close, append, raw input and recovery | [`VDQtMainWindow.cpp`](../src/VirtualDub/VDQtMainWindow.cpp) | Start at `openVideoFileImpl()` and `releaseVideoSource()`. Check the operation, transition and rollback scopes before changing source ownership. |
+| Scrubbing, preview and playback | [`VDQtPositionControl.cpp`](../src/VirtualDub/VDQtPositionControl.cpp), [`VDQtFrameDecodeWorker.cpp`](../src/VirtualDub/VDQtFrameDecodeWorker.cpp) | Follow `updateFrameDisplay()` to the worker and `onDecodedFrameReady()` back to the controller. `onPlaybackTick()` chooses which frame or filter phase to present. |
+| Random access, frame counts and decode health | [`VDQtVideoDecoder.cpp`](../src/VirtualDub/VDQtVideoDecoder.cpp) | Start at `getFrameImage()`. `buildContainerFrameIndex()` dispatches the format readers. Explicit health scans use `scanVideoStream()`. |
+| Timing, edit ranges and masks | [`VDQtTimeline.cpp`](../src/VirtualDub/VDQtTimeline.cpp), [`VDQtFilterFrameContext.h`](../src/VirtualDub/VDQtFilterFrameContext.h) | Distinguish the source frame that supplies pixels from the source interval that supplies timing and audio. |
+| Filters and plugin execution | [`VDQtFilterSystem.cpp`](../src/VirtualDub/VDQtFilterSystem.cpp), [`VDQtPluginHost.cpp`](../src/VirtualDub/VDQtPluginHost.cpp) | `processFrameSequence()` runs the chain. Geometry and validation are shared with the dialogs. Native plugin instance state belongs to the executing pipeline. |
+| Sound, effects and audio saves | [`VDQtAudioPlayer.cpp`](../src/VirtualDub/VDQtAudioPlayer.cpp), [`VDQtAudioFilterSystem.cpp`](../src/VirtualDub/VDQtAudioFilterSystem.cpp), [`VDQtAudioExport.cpp`](../src/VirtualDub/VDQtAudioExport.cpp) | Separate device PCM, source samples and the joined offline effect graph. The editor clock and export clock both depend on the selected stream. |
+| Save modes, encoded and raw output, frame serving | [`VDQtVideoExporter.cpp`](../src/VirtualDub/VDQtVideoExporter.cpp), [`VDQtFrameServer.cpp`](../src/VirtualDub/VDQtFrameServer.cpp) | Start with the options and the processing snapshot. Trace eligibility before the render path or FFmpeg arguments. |
+| Output protection and replacement | [`VDQtSourceSafety.cpp`](../src/VirtualDub/VDQtSourceSafety.cpp), [`VDQtOutputTransaction.cpp`](../src/VirtualDub/VDQtOutputTransaction.cpp) | First determine which paths and identities to protect. Treat staged rendering and final replacement as different steps. |
+| Projects, saved settings, scripts and jobs | [`VDQtProjectFile.cpp`](../src/VirtualDub/VDQtProjectFile.cpp), [`VDQtScriptEngine.cpp`](../src/VirtualDub/VDQtScriptEngine.cpp), [`VDQtJobQueue.cpp`](../src/VirtualDub/VDQtJobQueue.cpp) | The parsers return values. The controller installs them or executes commands. Queue persistence and editor recovery have separate owners. |
+| Capture and inspection | [`VDQtMainWindow.cpp`](../src/VirtualDub/VDQtMainWindow.cpp), [`VDQtCapturePolicy.cpp`](../src/VirtualDub/VDQtCapturePolicy.cpp) | Device choices and progress run in the controller. Capture policy constructs the recording and preview output arguments. |
+| Build and packaging | [`CMakeLists.txt`](../CMakeLists.txt), [`packaging/`](../packaging), [`release.yml`](../.github/workflows/release.yml) | The pinned SDK, assembled runtime and installed packages are three separate artifacts. See the [build guide](BUILDING.md) for the matching commands. |
+
+Use the existing regression that matches the boundary you are changing.
+[`VDQtOperationRegressions.cpp`](../tests/VDQtOperationRegressions.cpp) drives
+the real window and controller. The format-reader, timing and filter tests in
+[`tests/`](../tests) can exercise the same contracts in isolation. The
+[verification log](TESTING.txt) records the fixtures and their limits.
+
 ## Process and thread model
 
 The Qt GUI thread owns `VDQtMainWindow`, visible widgets, the authoritative

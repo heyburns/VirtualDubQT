@@ -1,3 +1,5 @@
+// Confirm that runtime library ownership is resolved through the actual
+// linked function even when an executable exposes a canonical PLT entry.
 #include "VirtualDub/VDQtMediaRuntime.h"
 #include <QCoreApplication>
 #include <QFileInfo>

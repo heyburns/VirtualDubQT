@@ -61,6 +61,9 @@ public:
     }
 };
 
+// Resolve the selected stream and packet geometry from headers first.
+// One ASF packet can contain parts of several video or audio objects, so
+// build the frame map from complete selected objects, not packet count.
 class MapReader {
 public:
     Reader reader;
@@ -127,6 +130,8 @@ public:
         }
         return at == object.end; // Embedded stream descriptors use the fallback.
     }
+    // Visit direct header children and the one supported extension layer.
+    // Unknown objects are skipped by their validated length.
     bool headers(qint64 at, qint64 end, int depth = 0, qint64 expected = -1) {
         quint32 count = 0;
         while (at < end) {
@@ -146,6 +151,9 @@ public:
         }
         return expected < 0 || expected == count;
     }
+    // Check the complete packet span against the declared fixed size. Each
+    // packet resets its local payload bounds, while a selected video object
+    // can remain active across packet boundaries until the final fragment.
     bool packets(const Reader::Object& object) {
         QByteArray data;
         if (!reader.bytes(object.data, 26, object.end, &data) || data.left(16) != fileId

@@ -139,6 +139,9 @@ void VDQtFrameDecodeWorker::cancelPending(quint64 generation) {
     mRequestedFrame = -1;
 }
 
+// Take ownership of the latest request, then work without the mailbox
+// lock. Cancellation checkpoints and the final generation check keep an
+// obsolete decode from publishing image or navigation results.
 void VDQtFrameDecodeWorker::processPendingRequest() {
     Q_ASSERT(QThread::currentThread() == thread());
 

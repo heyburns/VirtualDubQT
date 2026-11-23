@@ -39,6 +39,8 @@ static const char* kDialogStyle =
 
 namespace {
 
+// Build controls from the shared numeric contract. Validate a candidate
+// parameter map before replacing the filter entry.
 bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
     if (!filter || (filter->params.isEmpty() && filter->stringParams.isEmpty()))
         return true;
@@ -93,10 +95,7 @@ bool configureGenericVideoFilter(VDFilterInstance *filter, QWidget *parent) {
 } // namespace
 
 // -----------------------------------------------------------------------------
-// VDVideoFiltersDialog Implementation
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// Filter-chain editor and individual filter configuration dialogs
+// Filter-chain table, insertion and configuration
 // -----------------------------------------------------------------------------
 
 VDVideoFiltersDialog::VDVideoFiltersDialog(int sourceWidth, int sourceHeight, const QImage &sourceFrame, QWidget *parent)
@@ -155,6 +154,8 @@ VDVideoFiltersDialog::VDVideoFiltersDialog(int sourceWidth, int sourceHeight, co
     refreshFilterTable();
 }
 
+// Propagate geometry through the enabled chain for the size column.
+// The table presents computed dimensions, while filters render later.
 void VDVideoFiltersDialog::refreshFilterTable() {
     mFilterTable->blockSignals(true);
     mFilterTable->setRowCount(0);
@@ -504,7 +505,7 @@ void VDVideoFiltersDialog::onConfigureClicked() {
 }
 
 // -----------------------------------------------------------------------------
-// VDResizeFilterDialog Implementation (Matching Screenshot 1)
+// Resize dimensions, aspect policy and framing
 // -----------------------------------------------------------------------------
 VDResizeFilterDialog::VDResizeFilterDialog(const QMap<QString, double>& params, int sourceW, int sourceH, QWidget *parent)
     : QDialog(parent), mSourceW(sourceW > 0 ? sourceW : 1440), mSourceH(sourceH > 0 ? sourceH : 1080) {
@@ -872,6 +873,8 @@ void VDResizeFilterDialog::onAbsHChanged(int val) {
     mUpdating = false;
 }
 
+// Use the same geometry planner as the actual resize stage, so framing
+// and alignment labels reflect the eventual output.
 void VDResizeFilterDialog::updateCalculatedDimensions() {
     if (radRelative->isChecked()) {
         int w = static_cast<int>(std::round(mSourceW * (spinRelW->value() / 100.0)));
@@ -956,7 +959,7 @@ QMap<QString, double> VDResizeFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDRotateFilterDialog Implementation (Matching Screenshot)
+// Preset right-angle rotation
 // -----------------------------------------------------------------------------
 VDRotateFilterDialog::VDRotateFilterDialog(const QMap<QString, double>& params, QWidget *parent)
     : QDialog(parent) {
@@ -1034,7 +1037,7 @@ QMap<QString, double> VDRotateFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDFilterPreviewDialog Implementation
+// Shared still-image filter preview
 // -----------------------------------------------------------------------------
 VDFilterPreviewDialog::VDFilterPreviewDialog(QWidget *parent)
     : QDialog(parent) {
@@ -1083,7 +1086,7 @@ void VDFilterPreviewDialog::closeEvent(QCloseEvent *event) {
 }
 
 // -----------------------------------------------------------------------------
-// VDBrightnessContrastFilterDialog Implementation (Matching Screenshot)
+// Brightness and contrast controls
 // -----------------------------------------------------------------------------
 VDBrightnessContrastFilterDialog::VDBrightnessContrastFilterDialog(const QMap<QString, double>& params, const QImage &sourceFrame, QWidget *parent)
     : QDialog(parent), mSourceFrame(sourceFrame), mPreviewDialog(nullptr) {
@@ -1284,7 +1287,7 @@ QMap<QString, double> VDBrightnessContrastFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDBoxBlurFilterDialog Implementation (Matching Screenshot)
+// Box blur radius, power and still-image preview
 // -----------------------------------------------------------------------------
 VDBoxBlurFilterDialog::VDBoxBlurFilterDialog(const QMap<QString, double>& params, const QImage &sourceFrame, QWidget *parent)
     : QDialog(parent), mSourceFrame(sourceFrame), mPreviewDialog(nullptr) {
@@ -1433,6 +1436,8 @@ void VDBoxBlurFilterDialog::onTogglePreviewClicked() {
     }
 }
 
+// This dialog's lightweight preview uses its current controls and source
+// image. The export filter executes separately on the saved parameters.
 void VDBoxBlurFilterDialog::updatePreviewImage() {
     if (mSourceFrame.isNull() || !mPreviewDialog) return;
 
@@ -1504,7 +1509,7 @@ QMap<QString, double> VDBoxBlurFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDSharpenFilterDialog Implementation (Matching Screenshot)
+// Sharpness amount and edge preview
 // -----------------------------------------------------------------------------
 VDSharpenFilterDialog::VDSharpenFilterDialog(const QMap<QString, double>& params, const QImage &sourceFrame, QWidget *parent)
     : QDialog(parent), mSourceFrame(sourceFrame), mPreviewDialog(nullptr) {
@@ -1677,7 +1682,7 @@ QMap<QString, double> VDSharpenFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VD6AxisFilterDialog Implementation (Matching Screenshot)
+// Six Axis hue adjustments and channel controls
 // -----------------------------------------------------------------------------
 static QWidget* createAxisSliderRow(const QString &title, QSlider *slider, QLabel *lblValue, const QString &gradientCss, const QString &minLabel = "0", const QString &midLabel = "0.5", const QString &maxLabel = "1") {
     QWidget *container = new QWidget();
@@ -1986,7 +1991,7 @@ QMap<QString, double> VD6AxisFilterDialog::getParams() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDBobDoublerFilterDialog Implementation (Matching Screenshot)
+// Bob Doubler field order and reconstruction settings
 // -----------------------------------------------------------------------------
 VDBobDoublerFilterDialog::VDBobDoublerFilterDialog(const QMap<QString, double>& params, const QImage &sourceFrame, QWidget *parent)
     : QDialog(parent), mSourceFrame(sourceFrame), mPreviewDialog(nullptr) {
@@ -2291,7 +2296,7 @@ QString VDVideoFilterAddDialog::getSelectedPluginId() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDFrameRateDialog Implementation (Matching Screenshot)
+// Source rate, output rate conversion and decimation
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Video processing and decoder policy dialogs
@@ -2467,6 +2472,9 @@ void VDFrameRateDialog::onConversionRadioToggled() {
     }
 }
 
+// Persist the mode choices as well as their numeric values. Source-rate
+// interpretation and output conversion can have different effects on
+// video duration and audio.
 VDFrameRateConfig VDFrameRateDialog::getConfig() const {
     VDFrameRateConfig cfg;
     if (radSourceCustom->isChecked()) {
@@ -2529,7 +2537,7 @@ int VDFrameRateDialog::getDecimateFactor() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDDecodeFormatDialog Implementation (Matching Screenshot)
+// Decode pixel layout and component range
 // -----------------------------------------------------------------------------
 VDDecodeFormatDialog::VDDecodeFormatDialog(const QString &decoderName, const QString &actualFormat, const VDDecompressionFormatConfig &initialConfig, QWidget *parent)
     : QDialog(parent), mDecoderName(decoderName.isEmpty() ? "AVIFile/Avisynth input driver (internal)" : decoderName),
@@ -2705,7 +2713,7 @@ VDDecompressionFormatConfig VDDecodeFormatDialog::getConfig() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDDecoderErrorModeDialog Implementation (Matching Screenshot)
+// Decoder recovery policy
 // -----------------------------------------------------------------------------
 VDDecoderErrorModeDialog::VDDecoderErrorModeDialog(const VDDecoderErrorModeConfig &initialConfig, QWidget *parent)
     : QDialog(parent), mConfig(initialConfig) {
@@ -2779,7 +2787,7 @@ VDDecoderErrorModeConfig VDDecoderErrorModeDialog::getConfig() const {
 }
 
 // -----------------------------------------------------------------------------
-// VDSaveAudioDialog Implementation (Full Processing Codec Selection)
+// Audio destination and per-encoder save controls
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Audio/video compression and export dialogs
@@ -3032,6 +3040,8 @@ VDSaveAudioDialog::VDSaveAudioDialog(const QString &defaultDir, const QString &d
 void VDSaveAudioDialog::onBrowseClicked() {
 }
 
+// Refresh rate, channel and encoding options for the chosen codec.
+// Only settings appropriate to that codec should reach the controller.
 void VDSaveAudioDialog::onCodecChanged(int index) {
     QString codecId = cboCodec->itemData(index).toString();
     bool isCompressed = (codecId != "pcm_s16le");
@@ -3442,6 +3452,8 @@ void VDVideoCompressionDialog::onPixelFormatClicked() {
     }
 }
 
+// Build this codec's dialog from its declared capabilities. Save control
+// values after acceptance so cancellation preserves the prior preset.
 void VDVideoCompressionDialog::onConfigureClicked() {
     QListWidgetItem *item = mCodecList->currentItem();
     if (!item) return;
@@ -4382,6 +4394,8 @@ bool VDJumpToPositionDialog::parseFramePosition(
                                minimumFrame, maximumFrame, result);
 }
 
+// Convert typed time into a timeline ordinal. When frame boundaries are
+// known, search those boundaries instead of multiplying by an average rate.
 bool VDJumpToPositionDialog::parseTimePosition(
     const QString& text,
     qint64 currentFrame,
@@ -4606,7 +4620,7 @@ void VDLogWindow::appendLog(const QString &text) {
 }
 
 // -----------------------------------------------------------------------------
-// VDSaveVideoDialog (Matching VirtualDub2 Save File (F7) Screenshot)
+// Video destination, container and queue submission
 // -----------------------------------------------------------------------------
 VDSaveVideoDialog::VDSaveVideoDialog(int videoMode, int audioMode, const QString &defaultDir, const QString &defaultBaseName, QWidget *parent)
     : QDialog(parent), mDefaultDir(defaultDir), mDefaultBaseName(defaultBaseName) {
@@ -4750,6 +4764,8 @@ void VDSaveVideoDialog::onBrowseClicked() {
     }
 }
 
+// Keep the proposed filename extension and container-specific controls
+// consistent with the selected format.
 void VDSaveVideoDialog::onFileTypeIndexChanged(int) {
     QString currentName = mFileNameEdit->text();
     QFileInfo fi(currentName);

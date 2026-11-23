@@ -87,6 +87,9 @@ QString avOperationError(const QString& operation, int errorCode) {
 // user's explicit override wins; only unspecified metadata uses the historic
 // SD/HD fallback. Compare the actual swscale state so ordinary playback does
 // not recreate a converter when matrix/range stay unchanged.
+// Use explicit stream metadata when available, with deterministic defaults
+// for untagged inputs. Apply the session override here so both native AVS
+// and FFmpeg frames reach the same conversion policy.
 bool configureConversionColors(SwsContext *context, AVPixelFormat format,
                                 int width, int height, int declaredMatrix,
                                 int declaredRange, int matrixOverride,
@@ -498,6 +501,9 @@ QString VDQtVideoDecoder::getPixFormat() const {
     return QStringLiteral("Unknown");
 }
 
+// Borrow AVS plane pointers only while its frame reference is retained.
+// Conversion writes into application storage so cached images can outlive
+// the clip and move across the preview queue.
 QImage VDQtVideoDecoder::renderAvsFrame(int frameIndex) {
     if (!mAvsClip || !mAvsVi) return QImage();
 
@@ -724,6 +730,9 @@ void VDQtVideoDecoder::setDecompressionConfig(const QString &formatName, int col
     }
 }
 
+// The decoder owns the graph after a successful open. Validate its headers
+// and conversion support before publishing the source as open. The worker
+// and audio player can borrow an AVS clip only after this point.
 bool VDQtVideoDecoder::openFile(const QString& filePath, const FrameIndexSnapshotPtr& navigation) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     close();
@@ -1204,6 +1213,9 @@ void VDQtVideoDecoder::close() {
     mIndexLookupWorkCount = 0;
 }
 
+// A real frame may change dimensions or pixel format after opening. Replace
+// format-dependent buffers and conversion context together, based on the
+// actual frame rather than only the codec parameters.
 bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
     if (!sourceFrame) {
         mLastError = QStringLiteral("Decoder returned an empty video frame.");
@@ -1299,6 +1311,9 @@ bool VDQtVideoDecoder::ensureConversionResources(const AVFrame *sourceFrame) {
     return true;
 }
 
+// Rewind reinitializes the demux/codec pipeline but retains source timing
+// knowledge. Clear pending packets, drain state and ordinal expectations
+// so the first returned picture can establish a new contiguous traversal.
 bool VDQtVideoDecoder::resetDecoderToStart() {
     if (!mFormatCtx || !mCodecCtx || mVideoStreamIndex < 0 || !mPacket) return false;
 
@@ -1401,6 +1416,9 @@ bool VDQtVideoDecoder::resetCodecAfterSeek() {
 // Seek/decode state machine and presentation-order frame indexing
 // ---------------------------------------------------------------------------
 
+// Format-specific readers may prove sample order without decoding the
+// movie. Unsupported or ambiguous layouts leave decoded indexing available.
+// An I/O state change during calibration must be reversed before fallback.
 bool VDQtVideoDecoder::buildContainerFrameIndex() {
     bool demuxNeedsReset = false;
     try {
@@ -1810,6 +1828,8 @@ bool VDQtVideoDecoder::registerContainerSeekPoints() {
     return true;
 }
 
+// Discard a contradicted map as a unit. Its cache and timestamp lookup
+// used the same ordinal assumptions, so neither can survive independently.
 void VDQtVideoDecoder::invalidateContainerFrameIndex() {
     if (!mContainerIndexComplete) return;
     mContainerIndexComplete = false;
@@ -1925,6 +1945,9 @@ bool VDQtVideoDecoder::seekToFrame(int frameIndex) {
     return true;
 }
 
+// Drive the FFmpeg send/receive protocol until a frame arrives. Retain an
+// unsent packet across EAGAIN, send a drain packet once at demux EOF, and
+// observe cancellation between operations that can make progress.
 bool VDQtVideoDecoder::decodeNextFrame(int *decodeErrors,
                                       const std::function<bool()>& shouldContinue) {
     if (!mCodecCtx || !mFormatCtx || !mFrame || !mPacket) return false;
@@ -2055,6 +2078,9 @@ void VDQtVideoDecoder::registerIndexedTimestamp(int64_t timestamp, int frameInde
     if (at == ordinals.end() || *at != frameIndex) ordinals.insert(at, frameIndex);
 }
 
+// Search the presentation map using its ordering guarantee, or use the
+// decoded index lookup when duplicates or partial observations are possible.
+// A seek anchor must identify one ordinal unambiguously.
 int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint, bool requireUnique) {
     if (timestamp == AV_NOPTS_VALUE || mFrameIndex.isEmpty()) return -1;
 
@@ -2101,6 +2127,9 @@ int VDQtVideoDecoder::findIndexedFrameByTimestamp(int64_t timestamp, int hint, b
     return hint - before < *after - hint ? before : *after;
 }
 
+// The predicted ordinal is enough on an ordinary sequential walk. After a
+// seek, reconcile the actual decoded timestamp before labeling the picture
+// or inserting it into a cache keyed by ordinal.
 int VDQtVideoDecoder::registerDecodedFrame() {
     int64_t timestamp = mFrame->best_effort_timestamp;
     if (timestamp == AV_NOPTS_VALUE) timestamp = mFrame->pts;
@@ -2214,6 +2243,9 @@ QImage VDQtVideoDecoder::convertDecodedFrameToImage() {
     return image;
 }
 
+// Sparse EOF proves that the current decode has ended, not that every
+// preceding picture was counted. Promote the frame count only with the
+// required contiguous traversal or existing complete index.
 void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     // Only a verified traversal from the start, or from a known prefix anchor,
     // can extend that prefix to EOF and establish the total. An approximate
@@ -2226,6 +2258,9 @@ void VDQtVideoDecoder::updateFrameCountAtEndOfStream() {
     mFrameIndexComplete = true;
 }
 
+// Publish completed navigation in an immutable, implicitly shared object.
+// The worker can borrow it without another file traversal or a second copy
+// of the presentation table.
 VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() try {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     if (mIsAvsNative || !hasFrameNavigation() || !mFormatCtx) return {};
@@ -2253,6 +2288,9 @@ VDQtVideoDecoder::FrameIndexSnapshotPtr VDQtVideoDecoder::frameIndexSnapshot() t
     return {};
 }
 
+// Ordinal and seek positions are valid only for the same source identity,
+// selected stream, and recovery policy. Restore the demuxer to the start
+// before adopting the complete map and registering its seek anchors.
 bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snapshot) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
     if (!snapshot || !mIsOpen || mIsAvsNative || !mFormatCtx || !mCodecCtx
@@ -2289,6 +2327,9 @@ bool VDQtVideoDecoder::adoptFrameIndexSnapshot(const FrameIndexSnapshotPtr& snap
     return true;
 }
 
+// Putting the correct pixels at the requested ordinal is the contract here.
+// Indexing and a seek are preparation steps. The decode loop may still have
+// to advance through dependencies or retry from the beginning.
 QImage VDQtVideoDecoder::getFrameImage(int frameIndex, bool preserveSequentialDecode,
                                       std::function<bool()> shouldContinue) {
     QMutexLocker<QRecursiveMutex> lock(&mAvsAccessMutex);
@@ -2568,6 +2609,9 @@ VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStream(
     return scanVideoStreamImpl(progressCallback, shouldContinue, false);
 }
 
+// The navigation fallback can resume a verified prefix. An explicit health
+// scan must visit the source from the beginning so it can report failures
+// that a sparse cache or container index would skip.
 VDQtVideoDecoder::VDScanResult VDQtVideoDecoder::scanVideoStreamImpl(
     const std::function<bool(int, int)>& progressCallback,
     const std::function<bool()>& shouldContinue, bool resumeVerifiedPrefix) {

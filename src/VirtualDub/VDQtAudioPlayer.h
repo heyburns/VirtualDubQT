@@ -109,9 +109,13 @@ public:
     explicit VDQtAudioPlayer(bool playbackEnabled = true);
     ~VDQtAudioPlayer();
 
+    // A nonnegative stream index explicitly selects one embedded audio track.
+    // The default selection uses the best decodable track.
     bool openFile(const QString& filePath, int requestedStreamIndex = -1);
     static QList<VDAudioStreamInfo> probeAudioStreams(
         const QString& filePath, QString *errorMessage = nullptr);
+    // The caller owns clip, video info and access mutex. They must remain
+    // valid until close has stopped playback and joined the producer.
     bool openAvsClip(AVS_Clip *clip,
                      const AVS_VideoInfo *vi,
                      QRecursiveMutex *avsAccessMutex = nullptr);
@@ -142,6 +146,8 @@ public:
     int getSampleRate() const { return mSampleRate; }
     int getChannels() const { return mChannels; }
     int getBitsPerSample() const { return mBitsPerSample; }
+    // The exposed unit is a sample frame across all channels. Convert to
+    // bytes only after choosing the packed output format.
     int64_t getTotalSamples() const { return mTotalSamples; }
     QString getSourcePath() const { return mFilePath; }
     int getSelectedStreamIndex() const { return mAudioStreamIndex; }

@@ -26,6 +26,9 @@ bool sampleBoundary(double seconds, int rate, qint64 *result) {
 }
 }
 
+// Audio follows the real intervals behind timeline edits and masks.
+// Compose the sample ranges in display order, using the decoder clock
+// for their duration. Masking a picture does not mask its audio.
 bool VDQtAudioRangesForTimeline(
     VDQtVideoDecoder& decoder, const QList<VDQtTimelineSegment>& edits,
     qint64 firstFrame, qint64 lastFrame, int sampleRate,
@@ -72,6 +75,8 @@ bool VDQtAudioRangesForTimeline(
     return true;
 }
 
+// Prepare one PCM source for the next stage. Choose a single-range fast
+// path or join several intervals before accounting for effect history.
 bool VDQtPrepareAudioWav(VDQtAudioPlayer& player, const QString& outputPath,
     const QList<QPair<int64_t, int64_t>>& inputRanges,
     const QList<VDAudioFilterInstance>& inputFilters,
@@ -99,6 +104,8 @@ bool VDQtPrepareAudioWav(VDQtAudioPlayer& player, const QString& outputPath,
         QStringLiteral("The requested audio ranges or effect chain could not be prepared."));
 }
 
+// Extract selected PCM, apply the requested graph and encode through the
+// private tool. Keep incomplete child output in staging until successful.
 bool VDQtExportAudio(VDQtAudioPlayer& player, const VDQtAudioExportRequest& input,
                     const std::function<bool(int, int)>& progress, QString *errorMessage) {
     const VDQtAudioExportRequest request = input; // Before any event-pumping callback.

@@ -130,6 +130,8 @@ void transformRgbPixels(QImage& image, bool highPrecision, Transform&& transform
     });
 }
 
+// The table is channel-major and uses the image's sample depth. Read it
+// through immutable storage while workers write disjoint rows.
 bool applyChannelLut(QImage& image, bool highPrecision, const QByteArray& bytes) {
     const int maximum = highPrecision ? 65535 : 255;
     if (bytes.size() != (maximum + 1) * static_cast<qsizetype>(sizeof(quint16))) return false;
@@ -188,6 +190,8 @@ VDQtFilterSystem::VDQtFilterSystem()
 
 VDQtFilterSystem::~VDQtFilterSystem() { forgetRuntimeInstances(); }
 
+// Prefix the serialized filter ID with this pipeline's identity. Preview
+// and export can then use independent plug-in instances of the same chain.
 QString VDQtFilterSystem::runtimeInstanceId(const QString& filterId) const {
     return mRuntimeNamespace + QLatin1Char('/') + filterId;
 }
@@ -220,6 +224,9 @@ void VDQtFilterSystem::clearFilters() {
     mTemporalStates.clear();
 }
 
+// Imported or duplicated filters may share IDs. Assign distinct ones before
+// building runtime state, since the ID is the key for plug-in instances and
+// frame history.
 QList<VDFilterInstance> VDQtFilterSystem::normalizeChainIds(QList<VDFilterInstance> chain) {
     QSet<QString> used;
     for (auto& filter : chain) {
@@ -242,6 +249,8 @@ void VDQtFilterSystem::replaceActiveChain(const QList<VDFilterInstance>& chain) 
     mTemporalStates.clear();
 }
 
+// Used by a detached processing pipeline with its own runtime namespace.
+// Leave the editor's catalog and saved settings out of frame processing.
 void VDQtFilterSystem::replaceActiveChainTransient(
     const QList<VDFilterInstance>& chain) {
     // Worker/export copies use the same filter descriptions but independent
@@ -257,6 +266,9 @@ VDQtFilterSystem& VDQtFilterSystem::instance() {
     return sys;
 }
 
+// Combine built-in definitions with discovered native modules. Filter info
+// is for presentation and selection, while VDFilterInstance holds the
+// settings of a filter actually inserted into a chain.
 QList<VDQtFilterSystem::FilterInfo> VDQtFilterSystem::getAvailableFilters() const {
     // Built-ins have stable enum identities. Plugin records are discovered at
     // runtime and carry pluginId because their display names are not guaranteed
@@ -711,6 +723,9 @@ QImage VDQtFilterSystem::failProcessing(const QString& message, const VDFilterIn
     return {};
 }
 
+// Derive output multiplicity before decoding or allocating images. Each
+// enabled Bob Doubler expands the previous stage, so chained doublers
+// compose rather than simply adding a second output.
 VDFilterTimingInfo VDQtFilterSystem::getTimingInfo() const {
     int bobFilters = 0;
     for (const auto& filter : mActiveChain) {
@@ -820,6 +835,9 @@ bool VDQtFilterSystem::processFrameSequence(
     return false;
 }
 
+// This function receives a single stage input and one requested output
+// phase. Apply range and crop metadata before the kernel, then opacity
+// and output metadata consistently for every built-in and native plug-in.
 QImage VDQtFilterSystem::processFilterForPhase(
     QImage inputFrame, quint64 bobPhaseMask,
     const VDFilterFrameContext& context, int filterIndex) try {
@@ -946,6 +964,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
                 return failProcessing(QStringLiteral("Not enough memory to apply the channel lookup table."), &filter);
             break;
         }
+        // Smooth the color difference while retaining each center pixel's luma.
+        // Keep the read image stable across the pass, including at clamped edges.
         case VDFilterType::ChromaSmoother: {
             const int radius = std::clamp(
                 static_cast<int>(filter.params.value("radius", 1)), 1, 8);
@@ -1264,6 +1284,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
         }
         case VDFilterType::NullTransform:
             break;
+        // Derive a projective transform between the image corners and the target
+        // quadrilateral. The original rectangle still defines the canvas extent.
         case VDFilterType::Perspective: {
             const qreal width = result.width();
             const qreal height = result.height();
@@ -1319,6 +1341,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             break;
         }
+        // Use a horizontal neighborhood for the color response, then attenuate
+        // alternating rows for the scanline effect. Match the two depth paths.
         case VDFilterType::Television: {
             const QImage source = result;
             const int radius = std::clamp(
@@ -1390,6 +1414,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
                                    Qt::SmoothTransformation);
             break;
         }
+        // Use luminance gradients from the unchanged input to choose neighboring
+        // color samples. Reading earlier writes would make results row-order dependent.
         case VDFilterType::WarpSharp: {
             const int amount = std::clamp(
                 static_cast<int>(filter.params.value("depth", 8)), 0, 64);
@@ -1448,6 +1474,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             break;
         }
+        // Decode the overlay only when its file identity changes. The cache retains
+        // owned images with a byte budget, and compositing happens on this frame.
         case VDFilterType::Logo: {
             const QString path = filter.stringParams.value("path");
             if (path.isEmpty())
@@ -1513,6 +1541,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             else result = result.convertToFormat(QImage::Format_RGB888);
             break;
         }
+        // Geometry determines the active image and any surrounding frame. The
+        // resampling path operates on the active image at its native RGB depth.
         case VDFilterType::Resize: {
             const int w = geometry.intermediateSize.width();
             const int h = geometry.intermediateSize.height();
@@ -1629,6 +1659,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
 #endif
             break;
 
+        // Output phase chooses which input field is retained. Reconstruct its
+        // missing parity according to the selected kernel and field order, then
+        // carry the phase timing forward through the rest of the chain.
         case VDFilterType::BobDoubler: {
             int fieldOrder = static_cast<int>(filter.params.value("field_order", 1)); // 0: TFF, 1: BFF
             int mode = static_cast<int>(filter.params.value("mode", 0));
@@ -1782,6 +1815,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
             break;
         }
 
+        // Apply hue-dependent controls in the editor's RGB domain. The high-depth
+        // path computes each result directly. The 8-bit path interpolates from a
+        // small table derived from the same controls.
         case VDFilterType::SixAxis: {
             // A neutral correction must be a true identity, including alpha
             // and native low bits. Skip its table and image detachment, but
@@ -2033,6 +2069,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
             });
             break;
         }
+        // Run separable horizontal and vertical kernels. Box blur uses a running
+        // sum, so increasing radius grows the support without rereading the full
+        // window at every output pixel.
         case VDFilterType::Blur: {
             int width = static_cast<int>(filter.params.value("width", 1));
             int power = static_cast<int>(filter.params.value("power", 1));
@@ -2203,6 +2242,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             break;
         }
+        // Preserve the selected field rows and reconstruct the other field at the
+        // original frame rate. Bob Doubling handles the separate two-phase case.
         case VDFilterType::Deinterlace: {
             const int mode = std::clamp(
                 static_cast<int>(filter.params.value("mode", 0)), 0, 2);
@@ -2458,6 +2499,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             result = result.copy(geometry.outputCrop);
             break;
         }
+        // Shift color information from a neighboring location while preserving
+        // the original pixel's brightness. Clamp edges to the available image.
         case VDFilterType::ChromaShift: {
             const int shiftX = std::clamp(
                 static_cast<int>(std::llround(filter.params.value("x", 0.0))),
@@ -2509,6 +2552,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
             }
             break;
         }
+        // A block is reduced to one color and filled with that result. Partial
+        // blocks at the right and bottom edges use their actual pixel count.
         case VDFilterType::Pixelate: {
             const int blockSize = std::clamp(
                 static_cast<int>(std::llround(filter.params.value("blockSize", 8.0))),
@@ -2610,6 +2655,9 @@ QImage VDQtFilterSystem::processFilterForPhase(
             result.invertPixels(QImage::InvertRgb);
             break;
         }
+        // Compute detail against neighbors in the stable source. Clamp the result
+        // after applying the amount so bright and dark edges retain the intended
+        // integer-channel behavior.
         case VDFilterType::Sharpen: {
             int v = static_cast<int>(filter.params.value("amount", 16));
             if (v <= 0) break;
@@ -2707,6 +2755,8 @@ QImage VDQtFilterSystem::processFilterForPhase(
         if (result.isNull()) return {};
 
         if (!opacitySource.isNull() && opacitySource.size() == result.size()) {
+            // Opacity keys use the stage input frame coordinate. The source snapshot
+            // kept before filtering supplies the background for partial contribution.
             struct OpacityPoint {
                 double x = 0.0;
                 double y = 1.0;

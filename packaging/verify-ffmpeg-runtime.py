@@ -58,6 +58,8 @@ def run(arguments, environment=None, timeout=45, allow_failure=False):
     return child.returncode, stdout, stderr
 
 
+# Compare the encoder registry exposed by the shared library to the CLI
+# registry. The application links the former and launches the latter.
 def library_encoders(root):
     # Public AVCodec prefix is stable for libavcodec 60; reject other ABI majors
     # before inspecting structures. This is never a substitute for media tests.
@@ -82,6 +84,8 @@ def library_encoders(root):
             names.add(entry.contents.name.decode("ascii"))
 
 
+# Use disposable generated streams to verify that the configured encoders
+# produce usable output. A capability listing alone cannot exercise them.
 def software_roundtrips(ffmpeg, ffprobe, manifest, environment, directory):
     # Each override is a codec's real format/container constraint, not an
     # invented alias. Tests keep thread use bounded on the user's workstation.
@@ -166,6 +170,8 @@ def software_roundtrips(ffmpeg, ffprobe, manifest, environment, directory):
     return tested
 
 
+# Exercise script support separately so it cannot disguise a framework
+# dependency in the ordinary startup or codec path.
 def framework_probes(ffmpeg, ffprobe, environment, directory):
     scripts = {
         "avisynth": ('blank.avs', 'BlankClip(length=8, width=128, height=96, fps=24, pixel_type="YV12", audio_rate=0)\n'),

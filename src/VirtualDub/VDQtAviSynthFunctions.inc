@@ -1,3 +1,6 @@
+// Shared inventory for typed declarations and runtime symbol lookup. Add
+// a C API entry here when a new native script call needs it. Inline header
+// helpers do not need runtime resolution.
 VDQT_AVS_FUNCTION(avs_bits_per_component)
 VDQT_AVS_FUNCTION(avs_create_script_environment)
 VDQT_AVS_FUNCTION(avs_delete_script_environment)

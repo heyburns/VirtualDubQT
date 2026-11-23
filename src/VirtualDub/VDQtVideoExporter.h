@@ -12,6 +12,8 @@
 #include "VDQtAudioFilterSystem.h"
 #include <optional>
 
+// Values are part of saved processing settings and Sylia commands.
+// Preserve their numeric meanings when changing the implementation.
 enum VideoProcessingMode {
     VideoMode_DirectStreamCopy = 0,
     VideoMode_FastRecompress   = 1,
@@ -88,6 +90,8 @@ public:
         bool hasExplicitTimeline() const { return timelineExplicit || !timelineSegments.isEmpty(); }
     };
 
+    // The caller specifies raw layout because the result has no header.
+    // Range and timing options follow the same timeline rules as video export.
     struct RawExportOptions {
         std::optional<ProcessingSnapshot> processing;
         QString inputPath;
@@ -113,6 +117,9 @@ public:
     // frameCallback runs for every rendered output picture. Its index is the
     // selected EDITED TIMELINE position, not the source decoder ordinal; Bob
     // phases can share an index. UI clients may throttle presentation locally.
+    // Callers that provide live media owners must keep them alive across
+    // callbacks and GUI event processing. Offline callers can use a private
+    // decoder through the same entry point.
     bool exportVideo(const ExportOptions& options,
                      VDQtVideoDecoder *activeDecoder = nullptr,
                      VDQtAudioPlayer *audioPlayer = nullptr,

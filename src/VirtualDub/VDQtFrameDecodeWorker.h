@@ -18,6 +18,8 @@ class VDQtFrameDecodeWorker final : public QObject {
 public:
     explicit VDQtFrameDecodeWorker(QObject *parent = nullptr);
 
+    // Source and filter configuration calls are dispatched on the worker
+    // thread. The request and cancel methods below are the cross-thread mailbox.
     bool openSource(const QString& filePath,
                     const QString& formatName,
                     int colorSpace,
@@ -33,6 +35,8 @@ public:
     void setFilterChain(const QList<VDFilterInstance>& chain);
     bool adoptFrameIndexSnapshot(const VDQtVideoDecoder::FrameIndexSnapshotPtr& snapshot);
 
+    // Update a single pending request and invalidate obsolete work by
+    // generation. The caller can submit from the GUI thread.
     void requestFrame(int frameIndex,
                       quint64 generation,
                       bool preserveSequentialDecode,
@@ -67,6 +71,8 @@ private Q_SLOTS:
     void processPendingRequest();
 
 private:
+    // Protect request scheduling and generation flags only. Keep decoding and
+    // filter execution outside this mutex.
     mutable QMutex mRequestMutex;
     int mRequestedFrame = -1;
     quint64 mRequestedGeneration = 0;

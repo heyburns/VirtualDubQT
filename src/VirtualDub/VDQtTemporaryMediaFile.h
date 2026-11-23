@@ -52,6 +52,8 @@ private:
 // making the registry itself retain old multi-gigabyte materializations. Never
 // manufacture an owner from an arbitrary filename: only create() registers
 // paths that this process actually owns.
+// Index generated files weakly by path so reopen can pin an existing
+// lease without making the registry the last owner of every file.
 class VDQtTemporaryMediaRegistry final {
 public:
     using Owner = VDQtTemporaryMediaFile::Owner;

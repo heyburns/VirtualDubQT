@@ -9,6 +9,8 @@
 namespace VDQtAviSynth {
 namespace {
 
+// Resolve the whole table before publishing it. A runtime missing one
+// required entry cannot safely serve any of the native script consumers.
 const char *resolve(void *library, Api& functions) {
 #define VDQT_AVS_FUNCTION(name) \
     functions.name = reinterpret_cast<decltype(functions.name)>(dlsym(library, #name)); \

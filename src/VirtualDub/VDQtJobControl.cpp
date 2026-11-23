@@ -320,6 +320,8 @@ QList<int> VDQtJobControlWindow::selectedRows() const {
     return result;
 }
 
+// Enable controls for the selected row set and current runner state. The
+// queue model remains the authority for legal mutations.
 void VDQtJobControlWindow::updateSelectionControls() {
     // Mutations that reorder or reload the queue are disabled while an export
     // is active because the runner identifies its current job by row index.
@@ -358,6 +360,8 @@ void VDQtJobControlWindow::updateRunState(bool running, int currentIndex) {
     }
 }
 
+// Progress refreshes the visible row without rebuilding the queue or
+// writing an autosave for every encoder callback.
 void VDQtJobControlWindow::updateCurrentProgress(int row) {
     if (!mQueue->isRunning() || row != mQueue->currentIndex()) return;
     const VDQtJobState *job = mQueue->jobAt(row);
@@ -446,6 +450,7 @@ void VDQtJobControlWindow::saveQueueAs() {
         QMessageBox::critical(this, QStringLiteral("Save Job List Error"), error);
 }
 
+// Window layout and column choices are separate from durable job data.
 void VDQtJobControlWindow::restoreUiState() {
     // Geometry is a user preference rather than project state and is therefore
     // the only Job Control information stored through QSettings.

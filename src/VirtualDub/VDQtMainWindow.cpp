@@ -362,6 +362,10 @@ bool writeImageSequenceManifest(const QString& path,
 
 } // namespace
 
+// Long operations can pump GUI events for progress and cancellation. The
+// outermost scope freezes editor mutations and drains preview before any
+// borrowed media owner can be used by the operation. Inner scopes only count
+// nesting so they cannot enable the editor prematurely.
 class VDQtMainWindow::OperationScope final {
 public:
     explicit OperationScope(VDQtMainWindow& window) : mWindow(window) {
@@ -412,6 +416,9 @@ private:
     QList<QPointer<QDialog>> mExistingDialogs;
 };
 
+// Source replacement has its own guard because closing a decoder may trigger
+// callbacks even outside an export or a modal operation. Deferred opens run
+// after both guards have unwound.
 class VDQtMainWindow::SourceTransitionScope final {
 public:
     explicit SourceTransitionScope(VDQtMainWindow& window) : mWindow(window) {
@@ -580,6 +587,8 @@ void VDQtMainWindow::finishSourceTransition() {
         updateFrameDisplay(mPositionControl->GetPosition());
 }
 
+// Replay on the next event-loop turn, where no caller still holds a reference
+// to the session being replaced. A temporary source stays pinned until replay.
 void VDQtMainWindow::scheduleDeferredSourceTransition() {
     if (!mDeferredSourcePending || mDeferredSourceScheduled || editorActionsBlocked())
         return;
@@ -1090,6 +1099,9 @@ bool VDQtMainWindow::openVideoFile(const QString& filePath) {
     return openVideoFileImpl(filePath);
 }
 
+// This internal entry point also serves project recovery and scripted jobs.
+// The public entry point handles editor availability. Here the source guard
+// serializes destruction and installation of the media owners themselves.
 bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
     if (filePath.isEmpty()) return false;
     const auto candidateMedia = mTemporaryMediaRegistry.pin(filePath);
@@ -1250,6 +1262,8 @@ void VDQtMainWindow::onFileOpen() {
     }
 }
 
+// Give the decoder one ordered source through a temporary concat manifest.
+// Keep the original paths and chosen rate for project saves and source checks.
 void VDQtMainWindow::onFileOpenImageSequence() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -1298,6 +1312,9 @@ void VDQtMainWindow::onFileOpenImageSequence() {
             .arg(images.size()).arg(frameRate, 0, 'f', 3));
 }
 
+// Raw input has no header from which to recover layout or timing. Wrap it
+// through the private FFmpeg backend and return a lease on the generated file.
+// The caller keeps that lease until every decoder of the wrapper is closed.
 bool VDQtMainWindow::materializeRawVideo(
     const QString& sourcePath,
     const QString& pixelFormat,
@@ -1520,6 +1537,9 @@ void VDQtMainWindow::onFileAppendSegment() {
             .arg(additions.size()).arg(mTimelineSources.size()));
 }
 
+// Append changes the underlying source as well as the edit list. Build and
+// check a new concat source before replacing the editor session. Saved source
+// coordinates remain relative to the existing prefix.
 bool VDQtMainWindow::appendVideoSegments(
     const QStringList& additions, QString *errorMessage) {
     OperationScope operation(*this);
@@ -1649,6 +1669,8 @@ void VDQtMainWindow::closeVideoSource() {
     releaseVideoSource();
 }
 
+// Release borrowers before the authoritative decoder and its temporary file.
+// This also invalidates any preview result still queued on the GUI thread.
 void VDQtMainWindow::releaseVideoSource() {
     mPlaybackTimer->stop();
     mPlaybackPausedFrame = -1;
@@ -1774,6 +1796,9 @@ VDQtProcessingState VDQtMainWindow::captureProcessingState() const {
     return state;
 }
 
+// Projects record original source choices and the editable session model.
+// An untouched timeline stores identity intent, including when its extent is
+// only estimated. Explicit edits store their segments, even if the list is empty.
 VDQtProjectState VDQtMainWindow::captureProjectState() const {
     VDQtProjectState project;
     project.sourcePaths = mTimelineSources;
@@ -1806,6 +1831,8 @@ VDQtProjectState VDQtMainWindow::captureProjectState() const {
     return project;
 }
 
+// Crash recovery shares the project representation. An inherited record
+// keeps its identity until the user restores or discards it.
 void VDQtMainWindow::saveRecoverySnapshot() {
     if (mRecoverySnapshotProtected || mAutomationUnattended || !mVideoDecoder.isOpen()
         || mRecoveryPath.isEmpty()) return;
@@ -1817,6 +1844,8 @@ void VDQtMainWindow::saveRecoverySnapshot() {
     }
 }
 
+// Install compatible settings into the live editor, then refresh consumers
+// that have their own decode configuration or filter snapshots.
 void VDQtMainWindow::applyProcessingState(const VDQtProcessingState& state) {
     mVideoMode = state.videoMode;
     mAudioMode = state.audioMode;
@@ -1878,6 +1907,9 @@ void VDQtMainWindow::applyProcessingState(const VDQtProcessingState& state) {
         updateFrameDisplay(mPositionControl->GetPosition());
 }
 
+// Translate editor state at the export boundary. The selection is half-open
+// in the widget, whereas ExportOptions expects an inclusive last frame and
+// uses -1 for the source end. Jobs and scripts use this same translation.
 VDQtVideoExporter::ExportOptions VDQtMainWindow::currentExportOptions(
     const QString& outputPath,
     const QString& containerType,
@@ -1921,6 +1953,8 @@ VDQtVideoExporter::ExportOptions VDQtMainWindow::currentExportOptions(
     return options;
 }
 
+// A job stores settings and source choices by value. Editing the active
+// project after queueing a job must not change what that job renders.
 VDQtJobState VDQtMainWindow::currentJobTemplate() const {
     VDQtJobState job;
     job.sourcePaths = mTimelineSources;
@@ -1965,6 +1999,9 @@ void VDQtMainWindow::onFileLoadProject() {
     loadProjectFile(path);
 }
 
+// Read and validate project values before touching the current editor. Some
+// checks need an opened decoder, so replacement also retains a full rollback
+// snapshot through the source-dependent validation and restore steps.
 bool VDQtMainWindow::loadProjectFile(const QString& path) {
     OperationScope operation(*this);
     VDQtProjectState project;
@@ -2294,6 +2331,9 @@ void VDQtMainWindow::onFileSaveProcessingSettings() {
         QString("Processing settings saved: %1").arg(QFileInfo(path).fileName()));
 }
 
+// Resolve the current audio selection in source samples before encoding.
+// Processed output and original compressed packets have different range and
+// format constraints. The save dialog supplies consent for the chosen path.
 void VDQtMainWindow::onFileSaveAudio() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -2456,6 +2496,9 @@ void VDQtMainWindow::onFileSaveAudio() {
 // Analysis and safe Sylia/VCF automation
 // ---------------------------------------------------------------------------
 
+// Measure all frames on the current timeline, including the output of each
+// enabled filter phase. Do not sample the preview cache, which may skip work
+// or contain only one phase.
 void VDQtMainWindow::onFileRunAnalysisPass() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -2570,6 +2613,8 @@ bool VDQtMainWindow::runAutomationScript(const QString& scriptPath,
     return executeAutomationProgram(program, errorMessage);
 }
 
+// Text from the script editor and the CLI enters the same parser. Source and
+// destination paths are interpreted against the caller-supplied base directory.
 bool VDQtMainWindow::runAutomationText(const QString& scriptText,
                                        const QString& baseDirectory,
                                        QString *errorMessage) {
@@ -2635,6 +2680,9 @@ bool VDQtMainWindow::exportAutomationVideo(const QString& outputPath,
     return result;
 }
 
+// Raw audio export preserves selected compressed packets when the chosen
+// stream supports it. Processed export uses the timeline-derived sample
+// ranges and the current encoder settings.
 bool VDQtMainWindow::exportAutomationAudio(const QString& outputPath,
                                            bool raw,
                                            QString *errorMessage) {
@@ -2834,6 +2882,10 @@ bool VDQtMainWindow::exportAutomationRawVideo(
     return result;
 }
 
+// The parser has already tokenized arguments. This dispatcher implements the
+// supported command semantics and validates arguments before changing the
+// project or calling an output workflow. Pending subset edits are applied at
+// operation boundaries so scripts can assemble an edit list incrementally.
 bool VDQtMainWindow::executeAutomationProgram(
     const VDQtScriptProgram& program, QString *errorMessage) {
     // Reject invalid numeric domains across the inert program before any Open,
@@ -4356,6 +4408,9 @@ void VDQtMainWindow::abortCurrentJob() {
     statusBar()->showMessage(QStringLiteral("Aborting the current job..."));
 }
 
+// The serial runner owns the active row while events continue to be delivered.
+// Stop leaves later jobs queued, while Abort asks the current job to cancel.
+// Persist transitions around execution so recovery can identify an interrupted job.
 void VDQtMainWindow::runPendingJobs() {
     if (!mJobQueue || mJobQueue->isRunning() || editorActionsBlocked()
         || mJobQueue->pendingCount() <= 0)
@@ -4487,6 +4542,8 @@ void VDQtMainWindow::runPendingJobs() {
     }
 }
 
+// Render from the stored job snapshot and private media consumers. This
+// keeps the open editor, its processing settings and its undo history intact.
 bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     const VDQtJobState *queuedJob = mJobQueue ? mJobQueue->jobAt(row) : nullptr;
     if (!queuedJob) {
@@ -4804,6 +4861,8 @@ bool VDQtMainWindow::executeQueuedJob(int row, QString *errorMessage) {
     return false;
 }
 
+// Treat all numbered output images as one family. Finish writing to staging
+// and check the destinations again before installing the rendered files.
 bool VDQtMainWindow::executeImageSequenceJob(
     VDQtJobState& job,
     VDQtVideoDecoder& decoder,
@@ -4968,6 +5027,8 @@ bool VDQtMainWindow::executeImageSequenceJob(
     return transaction.commit(staged, job.replaceExisting, errorMessage);
 }
 
+// Reload moves a job back into the editor for inspection or changes. Validate
+// its source and settings with the same rollback behavior as project loading.
 void VDQtMainWindow::reloadQueuedJob(int row) {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -5107,6 +5168,8 @@ void VDQtMainWindow::onFileStopFrameServer() {
     statusBar()->showMessage("Frame server stopped");
 }
 
+// Capture settings and validate the feed before starting its worker. The
+// controller owns any prepared audio file until the worker has stopped.
 bool VDQtMainWindow::startFrameServerAtPath(
     const QString& pipePath, QString *errorMessage) {
     if (!mVideoDecoder.isOpen()) {
@@ -5237,6 +5300,9 @@ bool VDQtMainWindow::startFrameServerAtPath(
     return true;
 }
 
+// Close coordinates the queue, recovery record and media owners. An active
+// queue defers closure until it stops. A persistence failure leaves the user
+// a chance to keep the session open and recover their work.
 void VDQtMainWindow::closeEvent(QCloseEvent *event) {
     if (mJobQueue && mJobQueue->isRunning()) {
         const auto answer = QMessageBox::question(
@@ -5282,6 +5348,8 @@ void VDQtMainWindow::closeEvent(QCloseEvent *event) {
 
 #include "VDQtVideoExporter.h"
 
+// The historic action name is retained for the File menu. The selected
+// container and processing modes determine the actual export pipeline.
 void VDQtMainWindow::onFileSaveAVI() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -5492,6 +5560,9 @@ void VDQtMainWindow::onFileSaveSegmentedAVI() {
         QStringLiteral("The AVI segments were exported successfully."));
 }
 
+// Choose and stage the entire numbered family before publication. Segment
+// limits and the chosen padding belong to this orchestration layer, while
+// each segment uses the regular exporter.
 bool VDQtMainWindow::exportSegmentedVideo(
     const QString& outputPath, int sizeLimitMb, int frameLimit,
     int digitCount, int segmentCount, QString *errorMessage) {
@@ -5787,6 +5858,8 @@ void VDQtMainWindow::onFileExportAnimatedPNG() {
     exportAnimatedImage(true);
 }
 
+// Filmstrip has its own frame/pixel layout and output constraints. It still
+// uses the common timeline mapping and destination protection.
 void VDQtMainWindow::onFileExportFilmstrip() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -6105,6 +6178,9 @@ void VDQtMainWindow::onFileExportViaEncoderSet() {
                              QString("Output saved to:\n%1").arg(outputPath));
 }
 
+// Render a lossless temporary source with the editor settings, then run the
+// selected encoder template on it. Treat the external process output as
+// uncommitted until the exit status and destination checks succeed.
 bool VDQtMainWindow::exportViaEncoderSet(
     const QString& outputPath, const QString& setName, QString *errorMessage) {
     OperationScope operation(*this);
@@ -6243,6 +6319,8 @@ bool VDQtMainWindow::exportViaEncoderSet(
     return true;
 }
 
+// Use a private processing snapshot for GIF/APNG. Image timing and encoder
+// settings specific to the animation belong to this export, not the editor.
 void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()) {
@@ -6397,6 +6475,9 @@ void VDQtMainWindow::exportAnimatedImage(bool animatedPng) {
     }
 }
 
+// Decide the full destination family before rendering the first output.
+// This gives overwrite consent and alias checks the same set of paths that
+// will eventually be committed.
 void VDQtMainWindow::onFileSaveImageSequence() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -6670,6 +6751,9 @@ void VDQtMainWindow::onEditSelectAll() {
     mPositionControl->SetSelection(mPositionControl->GetRangeBegin(), mPositionControl->GetRangeEnd() + 1);
 }
 
+// The dialog receives a timeline position. Time-based jumps use composed
+// frame boundaries when available, so source timestamps in an edited or VFR
+// clip do not get mistaken for timeline time.
 void VDQtMainWindow::onEditJumpToPosition() {
     if (editorActionsBlocked() || !mVideoDecoder.isOpen()
         || mTimeline.frameCount() <= 0)
@@ -6737,6 +6821,9 @@ int VDQtMainWindow::audioSourceFrameForTimelineFrame(qint64 timelineFrame) const
         ? static_cast<int>(mapped) : -1;
 }
 
+// After an edit, rebase the visible range and requested frame to the current
+// timeline. Marker values and preview generations must correspond to that
+// same timeline before the next frame is displayed.
 void VDQtMainWindow::updateTimelineView(qint64 preferredPosition,
                                         bool clearSelection) {
     // An edit changes the source mapping even when the output playhead remains
@@ -6795,6 +6882,9 @@ void VDQtMainWindow::refreshTimelineMarkers() {
     mPositionControl->SetMarkers(displayed);
 }
 
+// Selections describe boundaries between frames. Validate or resolve a
+// provisional source extent before callers turn the selection into a range
+// of actual frames.
 bool VDQtMainWindow::selectedTimelineRange(
     qint64 *startFrame,
     qint64 *endFrameExclusive,
@@ -6829,6 +6919,8 @@ void VDQtMainWindow::onEditRedo() {
     statusBar()->showMessage(QStringLiteral("Timeline edit redone"));
 }
 
+// The clipboard stores source segment references from this session. Copying
+// an edit does not allocate decoded images or touch the source file.
 void VDQtMainWindow::onEditCopy() {
     if (editorActionsBlocked()) return;
     qint64 start = 0;
@@ -7033,6 +7125,9 @@ void VDQtMainWindow::onEditClearTimelineZoom() {
     statusBar()->showMessage(QStringLiteral("Full timeline is visible."));
 }
 
+// Scene search compares decoded source pictures while stepping through the
+// composed timeline. Its synchronous operation owns the decoder until the
+// search completes or the user cancels.
 void VDQtMainWindow::findSceneChange(bool forward) {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen()
@@ -7104,6 +7199,9 @@ void VDQtMainWindow::findSceneChange(bool forward) {
     }
 }
 
+// Operations that need a definite boundary share this path. Reuse a validated
+// container map when possible. Decoded traversal is the fallback when the
+// container alone cannot establish the frame order.
 bool VDQtMainWindow::ensureExactFrameRange(const QString& operationLabel) {
     OperationScope operation(*this);
     if (!mVideoDecoder.isOpen())
@@ -7367,6 +7465,9 @@ void VDQtMainWindow::onViewLogWindow() {
     VDLogWindow::instance(this)->raise();
 }
 
+// The waveform is a bounded preview of the selected audio source. Keep
+// source ownership across modal progress while extracting and reducing PCM.
+// The preview cap counts edited samples rather than the span of their source.
 void VDQtMainWindow::onViewAudioWaveform() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -7702,6 +7803,8 @@ void VDQtMainWindow::onVideoCopyOutputFrameNum() {
     statusBar()->showMessage(QString("Output frame number %1 copied to clipboard").arg(frame));
 }
 
+// This command tests decodability across the source. A complete navigation
+// map gives correct ordinals but cannot establish decode health.
 void VDQtMainWindow::onVideoScanErrors() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -7834,6 +7937,8 @@ void VDQtMainWindow::onVideoFrameRate() {
     }
 }
 
+// Model no audio, a selected embedded track, and a separate source explicitly.
+// A native AVS clip owns its graph, so its audio is borrowed from that clip.
 void VDQtMainWindow::onAudioSource() {
     if (editorActionsBlocked()) return;
     if (!mVideoDecoder.isOpen()) {
@@ -8499,6 +8604,8 @@ void VDQtMainWindow::onToolsHexViewer() {
     dialog.exec();
 }
 
+// Report the capabilities of the selected private FFmpeg. A listed hardware
+// encoder may still depend on a usable device and driver at runtime.
 void VDQtMainWindow::onToolsBackendCatalog() {
     if (editorActionsBlocked()) return;
     VDQtPluginHost::instance().reload();
@@ -8646,6 +8753,9 @@ void VDQtMainWindow::onToolsSystemInformation() {
     dialog.exec();
 }
 
+// Capture is a child-process workflow. The dialog gathers Linux device and
+// format choices. The capture policy builds output arguments and the loop
+// handles progress, preview, timed stop and the child exit status.
 void VDQtMainWindow::onCaptureVideo() {
     if (editorActionsBlocked()) return;
     OperationScope operation(*this);
@@ -9322,6 +9432,10 @@ void VDQtMainWindow::performTransportAction(int actionCode) {
     }
 }
 
+// This tick advances the presentation clock, which may run ahead of the
+// last delivered frame. The decoder still processes required dependencies
+// and the display may skip frames when late. An edit discontinuity rebases
+// both clocks against the new audio source position.
 void VDQtMainWindow::onPlaybackTick() {
     if (!mVideoDecoder.isOpen()) {
         mPlaybackTimer->stop();
@@ -9434,6 +9548,9 @@ void VDQtMainWindow::onPlaybackTick() {
 
 #include "VDQtFilterSystem.h"
 
+// Translate a timeline position into the source frame to decode. Keep the
+// timeline coordinate too, since repeats and masks can request the same source
+// image at positions with different filter context.
 void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
     if (!mVideoDecoder.isOpen() || !mFrameDecodeWorker) return;
 
@@ -9461,6 +9578,9 @@ void VDQtMainWindow::updateFrameDisplay(int frameIndex) {
         mTimeline.isIdentity() ? QList<VDQtTimelineSegment>() : mTimeline.segments());
 }
 
+// A queued result is eligible only for the active generation. Use its frame
+// count observation to refine an untouched timeline, and its phase images to
+// update the panes at the desired playback position.
 void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
                                          quint64 generation,
                                          const QImage& inputImage,
@@ -9571,6 +9691,9 @@ void VDQtMainWindow::onDecodedFrameReady(int frameIndex,
     }
 }
 
+// An obsolete or cancelled request says nothing about the source length.
+// Only the active request may update the range or stop transport, and EOF
+// observations keep their distinction from an exact frame count.
 void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
                                                quint64 generation,
                                                const QString& errorMessage,
@@ -9611,6 +9734,9 @@ void VDQtMainWindow::onDecodedFrameUnavailable(int frameIndex,
         updateFrameDisplay(queuedFrame);
 }
 
+// Preview opens a separate FFmpeg decoder and adopts the known navigation
+// snapshot. AviSynth preview borrows the existing graph. Worker calls that
+// change source ownership run synchronously on its thread.
 bool VDQtMainWindow::openInteractiveDecoder(const QString& filePath, QString *errorMessage) {
     if (!mFrameDecodeWorker || !mFrameDecodeThread || !mFrameDecodeThread->isRunning()) {
         if (errorMessage) *errorMessage = QStringLiteral("The frame decoding worker is unavailable.");
@@ -9655,6 +9781,9 @@ void VDQtMainWindow::syncInteractiveFrameIndex() {
         Qt::BlockingQueuedConnection);
 }
 
+// Invalidate result delivery, then wait for the worker to release its current
+// source. This barrier keeps native clip release ordered after any active
+// preview callback.
 void VDQtMainWindow::closeInteractiveDecoder() {
     if (!mFrameDecodeWorker) return;
     mFrameDecodeWorker->cancelPending(++mFrameRequestGeneration);

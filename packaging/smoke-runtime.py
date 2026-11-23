@@ -58,6 +58,9 @@ def sylia_path(path):
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
+# Use the packaged app and its bundled media tools with a controlled PATH.
+# The untouched baseline checks ordinary media first. A second invocation
+# can supply the separately installed AviSynth test fixture.
 def smoke(args):
     app = executable(args.application, "VirtualDubQt")
     fixture_ffmpeg = executable(args.ffmpeg, "ffmpeg")

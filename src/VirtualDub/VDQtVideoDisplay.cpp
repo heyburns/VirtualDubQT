@@ -73,6 +73,8 @@ void VDVideoDisplayWidget::setAspectRatioMode(AspectRatioMode mode) {
     update();
 }
 
+// Derive presentation geometry from source size, sample aspect and zoom.
+// The bounded size goes to Qt without modifying the decoded image.
 QSize VDVideoDisplayWidget::calculateScaledSize() const {
     if (mFrameImage.isNull()) return QSize(0, 0);
 
@@ -147,6 +149,9 @@ QSize VDVideoDisplayWidget::calculateScaledSize() const {
     }
 }
 
+// Paint the current immutable frame and overlays. Scaled presentation
+// cache entries are derived from image identity and presentation size,
+// so they never replace source pixels used for export or clipboard work.
 void VDVideoDisplayWidget::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
     QPainter p(this);

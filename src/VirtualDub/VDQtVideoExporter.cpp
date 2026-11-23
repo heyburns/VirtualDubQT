@@ -53,6 +53,8 @@ constexpr qint64 kMaxQueuedFfmpegBytes = 8 * 1024 * 1024;
 constexpr int kProcessPollMs = 25;
 constexpr int kMaxDiagnosticBytes = 1024 * 1024;
 
+// Convert time boundaries to integer sample positions. Use an exclusive end
+// so consecutive edits do not encode the same sample twice.
 bool audioSampleRange(double startSeconds, double durationSeconds, int rate,
                       int64_t *first, int64_t *count) {
     if (!std::isfinite(startSeconds) || !std::isfinite(durationSeconds)
@@ -181,6 +183,9 @@ void appendInputFile(QStringList& arguments, const QString& path) {
     arguments << "-i" << path;
 }
 
+// Find embedded audio and resolve the video start relative to the container.
+// FFmpeg command-line seeks are container-relative, so a video-relative
+// selection must include this offset when passing in/out times.
 AudioStreamProbe probeAudioStream(const QString& path) {
     AudioStreamProbe probe;
     AVFormatContext* formatContext = nullptr;
@@ -271,6 +276,8 @@ void appendImageAspectArguments(QStringList& arguments, AVRational aspect) {
     else arguments << "-vf" << filter;
 }
 
+// Declare the encoder time-base explicitly for variable timestamps. Retain
+// the nominal rate as an encoder hint without forcing CFR resampling.
 void appendVfrEncoderClock(QStringList& arguments, const QString& codecId, double nominalRate) {
     const auto clock = VDQtCodecEngine::getVideoEncoderClock(codecId, nominalRate);
     // The encoder clock may have a codec-specific denominator, but forcing an
@@ -281,6 +288,9 @@ void appendVfrEncoderClock(QStringList& arguments, const QString& codecId, doubl
               << "-avoid_negative_ts" << "disabled";
 }
 
+// Translate the stable application codec settings into options specific to
+// the selected FFmpeg encoder. This is also where color conversion and
+// rate-related output flags are assembled.
 bool appendVideoEncoderArguments(QStringList& args,
                                  const VDVideoCodecParams& params,
                                  int sourceBitDepth,
@@ -473,6 +483,8 @@ bool waitForProcess(QProcess& process, QProgressDialog& progress,
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
 }
 
+// A producer and consumer are connected by a pipe. Each can fail
+// independently. Drain both diagnostics and stop both on cancellation.
 bool waitForProcessPair(QProcess& producer,
                         QProcess& consumer,
                         QProgressDialog& progress,
@@ -505,6 +517,8 @@ bool waitForProcessPair(QProcess& producer,
         && consumer.exitCode() == 0;
 }
 
+// Write a packed image to the child pipe with bounded backpressure. Check
+// the child and cancellation while waiting for outstanding bytes to drain.
 bool writeFrame(QProcess& process, const QImage& image,
                 QProgressDialog& progress, QByteArray& diagnostics,
                 bool& cancelled) {
@@ -1019,6 +1033,8 @@ VDQtVideoExporter::VDQtVideoExporter() {}
 
 VDQtVideoExporter::~VDQtVideoExporter() {}
 
+// Copy editable settings before event processing or worker startup. The
+// render uses private filter instances, including private temporal history.
 VDQtVideoExporter::ProcessingSnapshot VDQtVideoExporter::captureProcessingSnapshot() {
     ProcessingSnapshot snapshot;
     snapshot.videoCodec = VDQtCodecEngine::instance().getVideoParams();
@@ -1028,6 +1044,9 @@ VDQtVideoExporter::ProcessingSnapshot VDQtVideoExporter::captureProcessingSnapsh
     return snapshot;
 }
 
+// Raw export owns its byte layout, padding and pixel conversion. It
+// shares timeline/filter mapping with encoded export, then commits only
+// a complete result at the destination.
 bool VDQtVideoExporter::exportRawVideo(
     const RawExportOptions& request,
     VDQtVideoDecoder *activeDecoder,
@@ -1408,6 +1427,9 @@ bool VDQtVideoExporter::exportRawVideo(
 // Container/video export mode selection and pipeline execution
 // ---------------------------------------------------------------------------
 
+// This is the common transaction for GUI, script and job video export.
+// Resolve source and timeline policy before selecting remux, native FFmpeg
+// recompress or an image render, then stage and verify the resulting file.
 bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
                                     VDQtVideoDecoder *activeDecoder,
                                     VDQtAudioPlayer *audioPlayer,
@@ -1643,6 +1665,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     bool indexedForExport = !decoder.isAvsNative() && decoder.hasFrameNavigation();
     const bool explicitFrameRange = options.endFrame >= 0
                                  && options.endFrame >= options.startFrame;
+    // Frame-number selections and edit lists need exact correspondence
+    // between picture ordinals and presentation time. Whole-source operations
+    // can often reuse known timing and avoid pre-decoding the input.
     const bool needsNavigation = !decoder.isAvsNative()
         && (videoMode != VideoMode_DirectStreamCopy || explicitFrameRange
             || editedTimeline || selectedAudioIsSeparateSource);
@@ -1761,6 +1786,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     double shortestFrameDuration = std::numeric_limits<double>::infinity();
     double longestFrameDuration = 0.0;
     const bool hasFrameSelection = startFrame > 0 || endFrame < timelineFrames - 1;
+    // Packet copy can represent an edit list only where its cuts can be
+    // expressed on safe compressed-stream boundaries. Otherwise normal
+    // rendering can make the requested exact cuts.
     bool smartEditedDirectCopy = false;
     QList<VDQtTimelineSegment> smartCopySegments;
     if (options.smartRendering
@@ -1959,6 +1987,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
         presentationTimestampsUsable = false;
         variableFrameTiming = false;
     }
+    // Keep native VFR timing where the requested mode and encoder path
+    // can represent it. Other choices explicitly recreate or reinterpret the
+    // output clock.
     const bool preserveNativeVfr = variableFrameTiming
         && presentationTimestampsUsable
         && !options.convertFpsPreserveDuration
@@ -2740,6 +2771,8 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
     QString twoPassLogPath;
     QStringList firstPassArgs;
     QStringList secondPassArgs;
+    // Build the options shared by single-pass and final two-pass encoders.
+    // Input ordering determines which optional audio stream can be mapped.
     const auto appendFinalEncoding = [&](QStringList& target,
                                          bool includeEncodedAudio) -> bool {
         target << "-map" << "0:v:0";
@@ -2890,6 +2923,9 @@ bool VDQtVideoExporter::exportVideo(const ExportOptions& request,
 
     int doneCount = 0;
     qint64 lastEncoderTimestamp = -1;
+    // The render phase uses the selected codec clock, independent from widget
+    // painting. A filter may emit multiple images per input, each with its own
+    // output timestamp and aspect metadata.
     const auto encoderClock = VDQtCodecEngine::getVideoEncoderClock(
         vParams.codecId, sourceFps * filterFramesPerInput);
     for (int inputIndex = 0; inputIndex < inputFramesToProcess; ++inputIndex) {

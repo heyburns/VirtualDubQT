@@ -38,6 +38,9 @@ inline double kernel(double distance, int mode) {
     return 0;
 }
 
+// Precompute source taps for each destination coordinate. The adaptive
+// modes widen support when shrinking to reduce aliasing. Fixed-support
+// and nearest modes retain their original sampling behavior.
 inline Axis axis(int source, int destination, int mode) {
     Axis result(destination);
     const double ratio = source / static_cast<double>(destination);

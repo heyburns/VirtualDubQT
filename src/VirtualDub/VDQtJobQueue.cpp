@@ -84,6 +84,8 @@ VDQtJobState *VDQtJobQueue::mutableJobAt(int index) {
     return index >= 0 && index < mJobs.size() ? &mJobs[index] : nullptr;
 }
 
+// Recover saved starting/running/aborting records as interrupted. A process
+// can persist a transition but cannot carry its encoder into a new session.
 void VDQtJobQueue::normalizeNewJob(VDQtJobState *job) {
     if (!job) return;
     if (job->id.trimmed().isEmpty())
@@ -135,6 +137,8 @@ void VDQtJobQueue::boundDiagnostics(QList<VDQtJobState> *jobs) {
     }
 }
 
+// Reserve document space for future diagnostics. A structurally large queue
+// cannot rely on having no errors or logs at the time it is admitted.
 bool VDQtJobQueue::validateAdmission(const QList<VDQtJobState>& jobs,
                                     QString *errorMessage,
                                     const QString& proposedPath) const {
@@ -158,6 +162,8 @@ bool VDQtJobQueue::validateAdmission(const QList<VDQtJobState>& jobs,
     return true;
 }
 
+// Validate the candidate queue before publishing any new rows. The batch
+// wizard submits a group so an invalid row cannot leave half the batch queued.
 bool VDQtJobQueue::addJobs(const QList<VDQtJobState>& jobs,
                            QString *errorMessage) {
     if (jobs.isEmpty()) return true;
@@ -421,6 +427,8 @@ void VDQtJobQueue::setAutoRunEnabled(bool enabled) {
     if (mAutoRun && !mRunning && pendingCount() > 0) Q_EMIT runRequested();
 }
 
+// Associate a queue and recovery file with a held lock. Competing editors
+// use separate paths rather than rewriting one another's active state.
 bool VDQtJobQueue::setAutosavePath(const QString& path, QString *errorMessage) {
     const QString requested = path.isEmpty() ? QString() : ownedPath(path);
     if (requested == mAutosavePath && mAutosaveLock) return true;
@@ -513,6 +521,9 @@ void VDQtJobQueue::reportPersistence(const QString& error) {
     Q_EMIT persistenceStatusChanged(error);
 }
 
+// The runner uses this as a durability boundary. A reported persistence
+// error remains visible to the controller instead of being cleared by a UI
+// refresh or an in-memory status change.
 bool VDQtJobQueue::flush(QString *errorMessage) {
     if (mAutosavePath.isEmpty()) return true;
     QString error;

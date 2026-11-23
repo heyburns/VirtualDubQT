@@ -39,6 +39,8 @@ public:
         // All table callers validate the run count/size before allocating.
         return file.read(box.end - box.data - 8);
     }
+    // A box may use 32-bit or extended size. Constrain either form to the
+    // parent extent and keep the returned payload and end positions separate.
     bool box(qint64 at, qint64 end, Box *out) {
         uchar data[16];
         if (++headers > 100000 || !bytes(at, reinterpret_cast<char*>(data), 8, end)) return false;
@@ -75,6 +77,8 @@ public:
     }
 };
 
+// Select the same track and time base as FFmpeg, then verify the sample
+// count and composition-offset table before mapping DTS to presentation.
 bool readTrack(Reader& reader, const Box& track, int trackId, int timeScale,
                int samples, QVector<qint64> *offsets, bool *matches) {
     *matches = false;

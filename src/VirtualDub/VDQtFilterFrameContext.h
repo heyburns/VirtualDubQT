@@ -35,6 +35,9 @@ inline VDFilterFrameContext VDQtFilterContextForFrame(
         if (!segment.masked) heldSource = segment.sourceStartFrame + segment.frameCount - 1;
         cursor += segment.frameCount;
     }
+    // A source-rate override scales the edited timeline clock. The true
+    // source timestamp still identifies the decoded picture for plug-ins and
+    // timestamp-aware effects.
     const double rateScale = context.frameRate > 0 && decoder.getFps() > 0
         ? decoder.getFps() / context.frameRate : 1.0;
     context.timestampSeconds = seconds * rateScale;

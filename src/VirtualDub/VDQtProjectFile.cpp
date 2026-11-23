@@ -108,6 +108,9 @@ bool readReal(const QJsonObject& object, const char *key, double *destination,
     return true;
 }
 
+// Older projects could represent an untouched timeline with an ordinary
+// segment list. The explicit flag in recent files preserves that distinction
+// even for estimated sources or an intentionally empty edit.
 bool parseTimelineIntent(const QJsonObject& object, int version,
                          bool *explicitTimeline, QString *errorMessage) {
     const QJsonValue segments = object.value("timelineSegments");
@@ -224,6 +227,9 @@ bool audioCodecFromJson(const QJsonObject& object, VDAudioCodecParams *destinati
     return true;
 }
 
+// Use the same processing representation in projects, job snapshots and
+// standalone settings. Its values describe intent and contain no live
+// codec, filter, dialog or script-engine objects.
 QJsonObject processingToJson(const VDQtProcessingState& state) {
     // Processing state is source-independent. It is reused by settings files,
     // projects, and every queued job, so all three document types must pass
@@ -311,6 +317,8 @@ QJsonObject processingToJson(const VDQtProcessingState& state) {
     return object;
 }
 
+// Build a validated settings candidate. Check the numeric and filter
+// contracts before the controller applies any values to an active session.
 bool parseProcessing(const QJsonObject& object,
                      VDQtProcessingState *state,
                      QString *errorMessage) {
@@ -511,6 +519,8 @@ bool parseProcessing(const QJsonObject& object,
     return true;
 }
 
+// Keep validation and atomic save in the same path used for user-initiated
+// saves and autosaves. A failed commit must leave the old document usable.
 bool writeSerializedDocument(const QString& path,
                              const QByteArray& serialized,
                              QString *errorMessage) {
@@ -675,6 +685,9 @@ bool VDQtProjectFile::saveProject(
     return writeDocument(path, root, errorMessage);
 }
 
+// Resolve persisted paths and decode into a candidate project. File
+// validation is independent of opening media or evaluating scripts, which
+// the controller owns through its source rollback scope.
 bool VDQtProjectFile::loadProject(
     const QString& path,
     VDQtProjectState *state,
@@ -841,6 +854,8 @@ bool VDQtProjectFile::saveJobQueue(
         && writeSerializedDocument(path, serialized, errorMessage);
 }
 
+// Expose the same serialization to the admission check and disk writes.
+// The queue can account for a candidate job using its real serialized size.
 bool VDQtProjectFile::serializeJobQueue(
     const QString& path,
     const QList<VDQtJobState>& jobs,

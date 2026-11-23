@@ -76,6 +76,9 @@ bool codedVop(const QByteArray& prefix, int start, int resolution, int pictureTy
 // Native index and declared count can both be stale. Check every movie chunk
 // header, including OpenDML AVIX segments and record lists, without touching
 // picture/audio payload. This prevents a truncated index hiding valid tail video.
+// Verify that native index entries describe the actual selected stream
+// chunks in RIFF order, including nested record lists and later AVIX
+// segments. This catches a stale index that omits valid tail data.
 class MovieHeaders {
 public:
     QFile& file;
@@ -139,6 +142,9 @@ public:
 };
 } // namespace
 
+// Use native index entries as storage positions. For MPEG-4, the picture
+// header separately establishes display order and excludes packed or
+// uncoded slots that would invalidate a one-picture-per-entry assumption.
 bool VDQtReadAviFrameOrder(const QString& path, AVStream *stream, VDQtAviFrameOrder *output) {
     if (!output || !stream || !stream->codecpar || !framePerChunk(stream->codecpar->codec_id)
         || stream->index < 0 || stream->index > 99 || stream->time_base.num <= 0

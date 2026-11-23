@@ -1,3 +1,5 @@
+// Use disposable hard links, symlinks and prospective output names to
+// verify duplicate destination detection before an export touches any file.
 #include "VirtualDub/VDQtPathIdentitySet.h"
 
 #include <QCoreApplication>

@@ -1,3 +1,6 @@
+// Use temporary generated media and settings for reproducible regressions.
+// Shared fixtures cover the normal workflow and deliberate edge cases
+// without requiring a local plugin installation or a user's media.
 #include "VDQtTestFixtures.h"
 
 #include <QDirIterator>

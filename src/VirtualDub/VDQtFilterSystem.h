@@ -65,6 +65,9 @@ enum class VDFilterType {
 
 // Serializable configuration for one stage of the active filter chain.
 // Runtime state and cached assets live in VDQtFilterSystem, never in this value.
+// Serializable chain entry. Parameter maps are consumed by dialogs and
+// kernels. Cached images, plug-in runtime objects and temporal history
+// are owned by the executing pipeline.
 struct VDFilterInstance {
     QString id;
     QString name;
@@ -87,6 +90,9 @@ struct VDFilterTimingInfo {
 // ordinal. Source identity stays separate, especially for held/masked images.
 // Output-phase fields are filled by rate-changing processing. Negative means
 // the caller could not establish that piece of timing.
+// The source ordinal identifies original media. The stage ordinal and
+// timestamp describe the actual stream entering a filter, including
+// repeated edits and phases from any preceding rate expansion.
 struct VDFilterFrameContext {
     qint64 frameNumber = -1;
     double timestampSeconds = -1.0;
@@ -203,6 +209,8 @@ private:
     QImage processFilterForPhase(QImage inputFrame, quint64 phase,
                                 const VDFilterFrameContext& context, int filterIndex);
 
+    // Associate previous-image state with the stage frame ordinal so a scrub
+    // or discontinuity cannot accidentally blend unrelated input frames.
     struct TemporalState {
         qint64 lastFrameNumber = -1;
         QImage previousFrame;

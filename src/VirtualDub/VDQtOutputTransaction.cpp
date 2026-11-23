@@ -93,6 +93,8 @@ VDQtOutputTransaction::VDQtOutputTransaction(
 
 VDQtOutputTransaction::~VDQtOutputTransaction() = default;
 
+// Take the approval snapshot before rendering. Store destination and
+// parent directory identities so commit can detect changes made afterward.
 bool VDQtOutputTransaction::inspect(QString *errorMessage) {
     if (errorMessage) errorMessage->clear();
     if (mState->attempted) {
@@ -172,6 +174,9 @@ bool VDQtOutputTransaction::removeFile(const QString& path, QString *errorMessag
     return false;
 }
 
+// Verify all staged files and revalidate the approved destinations first.
+// Then move originals aside and install the new files. Restore the originals
+// on failure, and retain a recovery map if rollback is incomplete.
 bool VDQtOutputTransaction::commit(
     const QStringList& stagedPaths, bool replaceExisting, QString *errorMessage) {
     if (errorMessage) errorMessage->clear();

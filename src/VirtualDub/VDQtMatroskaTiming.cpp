@@ -102,6 +102,9 @@ public:
     }
 };
 
+// Collect timestamps from only the selected track. Blocks carry time
+// relative to their Cluster. Laces may represent multiple pictures and
+// need their own per-picture timing before the decoder can use real ordinals.
 class MapReader {
 public:
     Reader reader;
@@ -190,6 +193,9 @@ public:
         return true;
     }
 
+    // Compare the track VINT first so unrelated streams can be skipped.
+    // Decode lacing sizes within the element boundary and assign time using
+    // the known duration and track scale.
     bool block(const Element& element, qint64 clusterTime, qint64 clusterPosition,
                bool groupKey, bool simple, quint64 duration, bool unsupported) {
         quint64 number;
@@ -266,6 +272,8 @@ public:
         return true;
     }
 
+    // A BlockGroup can describe timing and seek eligibility in sibling elements.
+    // Read those before accounting for the block itself.
     bool group(const Element& parent, qint64 clusterTime, qint64 clusterPosition) {
         Element picture;
         bool havePicture = false, haveDuration = false, key = true, unsupported = false;
@@ -287,6 +295,8 @@ public:
         return havePicture && block(picture, clusterTime, clusterPosition, key, false, duration, unsupported);
     }
 
+    // All block offsets are relative to this Cluster's timestamp. Return the
+    // next sibling position when an unknown-size Cluster ends at a level change.
     bool cluster(const Element& parent, qint64 *next) {
         qint64 time = -1;
         for (qint64 at = parent.data; at < parent.end;) {

@@ -10,6 +10,9 @@ bool isOneOf(const QString& key, std::initializer_list<const char *> keys) {
 }
 }
 
+// Centralize the ranges shared by generic widgets, project/VCF import and
+// kernels. Integer-valued parameters are still stored as doubles, so the
+// contract must be checked before narrowing them.
 VDQtFilterParameterSpec VDQtFilterParameter(VDFilterType type, const QString& key) {
     if (key == "_sylia.range.start") return {0, 9007199254740991.0, true};
     if (key == "_sylia.range.end") return {-1, 9007199254740991.0, true};

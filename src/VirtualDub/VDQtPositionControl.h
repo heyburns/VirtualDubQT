@@ -58,6 +58,8 @@ public:
     qint64 GetRangeEnd() const { return mRangeHi; }
     qint64 GetPosition() const { return mPosition; }
     void SetPosition(qint64 pos);
+    // Update the playhead without a user seek notification. Used after
+    // programmatic state changes and accepted decoder results.
     void SetPositionSilent(qint64 pos);
     void SetCurrentFrameKey(bool keyFrame) { mCurrentFrameIsKey = keyFrame; UpdateStatusText(); }
     bool GetSelection(qint64& start, qint64& end) const { start = mSelStart; end = mSelEnd; return mSelStart < mSelEnd; }

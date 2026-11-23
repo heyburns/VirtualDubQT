@@ -11,6 +11,8 @@ VDQtCodecSettings::VDQtCodecSettings() {
 VDQtCodecSettings::~VDQtCodecSettings() {
 }
 
+// The editor owns these preferences for the lifetime of its process.
+// Closing a source leaves them intact for the next Save dialog.
 VDQtCodecSettings& VDQtCodecSettings::instance() {
     static VDQtCodecSettings sInst;
     return sInst;

@@ -19,10 +19,14 @@ inline bool VDQtCheckedRoundedNonnegative(long double value, Integer *result) {
     return true;
 }
 
+// Start at the first source frame. Count a final partial step if its
+// leading picture still lies within the input.
 inline int VDQtDecimatedFrameCount(int frames, int step) {
     return frames <= 0 ? 0 : 1 + (frames - 1) / std::max(1, step);
 }
 
+// Translate a relative position within an inclusive range before
+// narrowing to the editor's frame-number type.
 inline int VDQtSourceFrameAtOffset(int first, int last, long double offset) {
     first = std::max(0, first);
     last = std::max(first, last);

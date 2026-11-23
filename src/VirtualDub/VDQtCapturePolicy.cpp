@@ -1,11 +1,15 @@
 #include "VDQtCapturePolicy.h"
 #include <cmath>
 
+// The dialog clock is in milliseconds and the configured limit in seconds.
+// A zero duration means the user stops the capture.
 bool VDQtCaptureTimeExpired(double durationSeconds, qint64 elapsedMilliseconds) {
     return std::isfinite(durationSeconds) && durationSeconds > 0
         && elapsedMilliseconds >= durationSeconds * 1000.0;
 }
 
+// The caller has already constructed its device inputs. Append an explicit
+// primary stream map and, when requested, a second pipe output for preview.
 QStringList VDQtCaptureOutputArguments(const VDQtCaptureOutputConfig& config, QString *errorMessage) {
     if (errorMessage) errorMessage->clear();
     if (config.path.isEmpty() || config.videoCodec.isEmpty()

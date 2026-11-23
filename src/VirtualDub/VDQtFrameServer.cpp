@@ -73,6 +73,8 @@ VDQtFrameServer::~VDQtFrameServer() {
     delete mThread;
 }
 
+// Validate the requested local FIFO and snapshot before launching the
+// worker. The copied config stays valid after the caller returns.
 bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
     // Validate and create the FIFO synchronously so callers either receive a
     // usable endpoint or an immediate error. Decoding starts only after this.
@@ -128,6 +130,8 @@ bool VDQtFrameServer::start(const Config& config, QString *errorMessage) {
     return true;
 }
 
+// Request cancellation and join before the controller can release any
+// prepared audio file or other resource referenced by the worker.
 void VDQtFrameServer::stop() {
     // run() polls this flag during scans, decode, and pipe writes. Waiting here
     // makes destruction safe and guarantees the worker no longer touches this.

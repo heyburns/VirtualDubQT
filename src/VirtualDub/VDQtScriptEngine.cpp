@@ -23,6 +23,8 @@ constexpr int kMaximumArguments = 256;
 constexpr int kMaximumExpressionDepth = 64;
 constexpr qsizetype kMaximumStringCharacters = 1024 * 1024;
 
+// Parsing work is bounded across statements and expression recursion.
+// A project can load generated settings without running general-purpose code.
 struct ScriptBudget {
     // Shared across all statements: short scripts can otherwise repeatedly
     // double scalar strings or repeat expensive expressions without a byte cap.
@@ -119,6 +121,9 @@ bool decodeQuotedString(const QString& token, QString *value,
 // grammar accepted in VCF files. It has no function calls, loops, filesystem,
 // or object access; identifiers resolve only against previously assigned scalar
 // variables supplied by parseText().
+// Recognize the supported scalar expression grammar with precedence.
+// Retain typed values so integer validation does not depend on a rounded
+// floating-point conversion for large literals.
 class ValueExpressionParser {
 public:
     ValueExpressionParser(const QString& text,
@@ -579,6 +584,8 @@ struct Statement {
     int line = 0;
 };
 
+// Track quote, comment and bracket state while splitting. A semicolon
+// inside a string literal is data, and diagnostics retain the source line.
 bool splitStatements(const QString& text, QList<Statement> *statements,
                      QString *errorMessage) {
     QString current;
@@ -668,6 +675,8 @@ bool VDQtScriptEngine::readInteger(const QVariant& value, qint64 minimum,
     return true;
 }
 
+// Command-specific limits sit at the execution boundary. The grammar can
+// accept a large numeric value even when a particular operation cannot.
 bool VDQtScriptEngine::validateExecutionNumbers(const VDQtScriptCommand& command,
                                                QString *errorMessage) {
     constexpr qint64 intMin = std::numeric_limits<int>::min();

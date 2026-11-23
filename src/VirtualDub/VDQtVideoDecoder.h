@@ -48,6 +48,8 @@ public:
 
     // Transactional: an unsuccessful open leaves the object closed and frees
     // all partially constructed FFmpeg/AviSynth resources.
+    // A snapshot is an acceleration hint for the same file. An incompatible
+    // snapshot is ignored and normal source-open timing discovery proceeds.
     bool openFile(const QString& filePath, const FrameIndexSnapshotPtr& navigation = {});
     void close();
 
@@ -56,6 +58,8 @@ public:
     int getFrameCount() const { return mFrameCount; }
     FrameCountStatus getFrameCountStatus() const { return mFrameCountStatus; }
     bool isFrameCountExact() const { return mFrameCountStatus == FrameCountStatus::Exact; }
+    // For ordinary media, this records a full decoded index. A validated
+    // container map can supply exact navigation without proving decode health.
     bool hasCompleteFrameIndex() const {
         return mIsOpen && (mIsAvsNative || mFrameIndexComplete);
     }

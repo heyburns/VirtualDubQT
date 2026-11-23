@@ -1,3 +1,6 @@
+// Feed chosen audio and elapsed-time observations into the playback clock.
+// This checks handoff and frame-boundary behavior without sleeping or
+// depending on a physical device.
 #include "VirtualDub/VDQtPlaybackClock.h"
 #include "VirtualDub/VDQtTimingMath.h"
 #include <iostream>

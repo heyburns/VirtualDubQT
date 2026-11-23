@@ -206,6 +206,8 @@ void VDQtBatchWizardDialog::addFiles() {
         QStringLiteral("Video, Media, and Scripts (*.avi *.mp4 *.mkv *.mov *.webm *.flv *.wmv *.nut *.avs *.AVS *.vpy *.VPY);;All Files (*)")));
 }
 
+// Turn chosen media into proposed rows. Retain an editable output name
+// separately from the source path so routing changes can rebuild destinations.
 void VDQtBatchWizardDialog::addSourceFiles(const QStringList& paths) {
     // Canonical absolute names prevent the same source from being added twice
     // through different relative spellings. Symlink identity is checked later
@@ -248,6 +250,8 @@ void VDQtBatchWizardDialog::removeSelected() {
     for (int row : rows) mTable->removeRow(row);
 }
 
+// Apply the name transformation to the active rows. The original media
+// paths still determine where conversion reads its data.
 void VDQtBatchWizardDialog::filterOutputNames() {
     if (mTable->rowCount() == 0
         || selectedOperation() == VDQtJobOperation::VideoAnalysis) return;
@@ -370,6 +374,8 @@ void VDQtBatchWizardDialog::setRowOutputName(int row, const QString& name) {
     }
 }
 
+// Combine wizard row choices with a copy of the processing template.
+// Check the resulting destinations as a group before any job is submitted.
 QList<VDQtJobState> VDQtBatchWizardDialog::buildJobs(
     QString *errorMessage) const {
     // mTemplate is a snapshot of the main window's current processing state.

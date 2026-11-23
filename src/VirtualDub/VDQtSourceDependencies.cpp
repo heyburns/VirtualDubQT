@@ -20,6 +20,8 @@ constexpr qsizetype kPathCountLimit = 100000;
 constexpr qsizetype kPathBytesLimit = 32 * 1024 * 1024;
 constexpr int kDepthLimit = 32;
 
+// Check the opened descriptor as well as the pathname. An audit must not
+// block reading from a pipe or treat a device as a script.
 bool openRegularFile(QFile& file, const QString& path) {
     // A path can change after QFileInfo's check. Nonblocking open + fstat
     // prevents a replaced FIFO/device from hanging a safety audit indefinitely.
@@ -76,6 +78,9 @@ bool concatToken(QStringView line, qsizetype *position, QString *token) {
     return present && !quoted;
 }
 
+// Track visited paths and cumulative work across the entire operation.
+// A cycle, unresolved literal or unsupported command marks the report
+// incomplete while preserving everything already discovered.
 class Walker {
 public:
     VDQtScriptDependencyReport report;
@@ -223,6 +228,8 @@ private:
         if (!found) unresolvedPath(absolute);
     }
 
+    // Follow literal entries relative to the manifest. Preserve top-level order
+    // for the session, while the recursive audit separately protects nested files.
     void concat(const QString& content, const QString& directory, int depth) {
         static const QSet<QString> safeDirectives{
             "duration", "inpoint", "outpoint", "file_packet_meta", "file_packet_metadata",
@@ -257,6 +264,8 @@ private:
         if (files == 0) incomplete("The concat manifest contains no file entries.");
     }
 
+    // Inspect literal paths in supported script forms without running the graph.
+    // Unknown expressions leave the dependency set explicitly incomplete.
     void script(const QString& content, const QString& directory, int depth) {
         static const QRegularExpression literal(R"vdq("((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)')vdq");
         static const QRegularExpression imports(R"(\bImport\s*\()", QRegularExpression::CaseInsensitiveOption);

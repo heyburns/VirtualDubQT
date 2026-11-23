@@ -29,6 +29,8 @@ QString number(double value) {
     return QString::number(value, 'f', 8);
 }
 
+// Decompose tempo changes into steps in the supported range. Each step
+// preserves pitch, and their product gives the requested speed.
 QStringList atempoChain(double factor) {
     // FFmpeg's atempo node accepts only 0.5..2.0. Factor the requested rate into
     // a legal chain so extreme but supported values behave predictably.
@@ -47,6 +49,8 @@ QStringList atempoChain(double factor) {
 
 } // namespace
 
+// Validate external settings before generating FFmpeg graph text. The
+// same numeric limits apply to live playback and offline processing.
 bool VDQtValidateAudioFilters(const QList<VDAudioFilterInstance>& chain, QString *errorMessage) {
     const auto fail = [&](const QString& message) {
         if (errorMessage) *errorMessage = message;
@@ -95,6 +99,9 @@ bool VDQtValidateAudioFilters(const QList<VDAudioFilterInstance>& chain, QString
 // Libavfilter emits complete packed frames; this adapter exposes a byte stream
 // without discarding short input fragments or output tails. No decoder work is
 // moved back into the sink callback: the upstream devices remain decode-ahead.
+// Feed packed PCM to the libavfilter source and pull processed frames from
+// its sink. Buffer any excess output, and drain once at source EOF so
+// filters with delay can return their tail.
 struct VDQtAudioFilterDevice::GraphProcessor {
     AVFilterGraph *graph = nullptr;
     AVFilterContext *source = nullptr;
@@ -139,6 +146,8 @@ struct VDQtAudioFilterDevice::GraphProcessor {
                                                              QString::fromUtf8(detail)));
     }
 
+    // A new graph starts at sample zero. Negotiate packed output compatible
+    // with the sink and keep any rate conversion inside the graph.
     bool configure(const QList<VDAudioFilterInstance>& chain,
                    int requestedSampleRate,
                    int requestedChannels, const QAudioFormat& requestedOutput) {
@@ -252,6 +261,8 @@ struct VDQtAudioFilterDevice::GraphProcessor {
         return true;
     }
 
+    // Consume all graph output currently available. An exhausted graph can
+    // mark the sink finished even while a partial consumer read remains pending.
     void drainSink() {
         // libavfilter may emit zero, one, or several frames per input block.
         // Convert that push behavior into pending bytes consumed by readData().
@@ -285,6 +296,8 @@ struct VDQtAudioFilterDevice::GraphProcessor {
         av_frame_free(&frame);
     }
 
+    // A source may return part of a packed sample frame. Retain those bytes
+    // for the next read. Send end of input only after the source reaches EOF.
     bool feed(QIODevice *input, qint64 preferredBytes) {
         if (!source || !input || sourceFlushed || !error.isEmpty()) return false;
         const qint64 frameBytes = channels * sizeof(qint16);
@@ -405,6 +418,8 @@ VDQtAudioFilterDevice::VDQtAudioFilterDevice(
 
 VDQtAudioFilterDevice::~VDQtAudioFilterDevice() = default;
 
+// Replace the graph at the boundary between playback runs. The old graph
+// may contain delayed samples from the previous settings or position.
 bool VDQtAudioFilterDevice::setFilterChain(
     const QList<VDAudioFilterInstance>& chain) {
     const auto snapshot = chain; // resetProcessor may pass our own mChain.
@@ -583,6 +598,9 @@ bool VDQtAudioFilterSystem::hasEnabledFilters() const {
 }
 
 // All live/offline effects share this translation and parameter validation.
+// Serialize the enabled stages into the same graph language consumed by
+// both the live processor and bundled FFmpeg. Keep the running sample rate
+// when a filter changes it so later stages receive correct parameters.
 QString VDQtAudioFilterSystem::ffmpegFilterGraph(int sourceSampleRate, QString *errorMessage) const {
     if (!VDQtValidateAudioFilters(mActiveChain, errorMessage)) return {};
     // This output is parsed both by libavfilter and ffmpeg(1); do not introduce

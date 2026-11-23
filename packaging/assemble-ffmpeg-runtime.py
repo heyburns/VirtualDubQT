@@ -45,6 +45,9 @@ def needed_libraries(output):
     return set(NEEDED.findall(output))
 
 
+# Use the direct NEEDED set when walking an ELF dependency closure. A full
+# ldd listing also includes descendants of desktop libraries deliberately
+# provided by the host.
 def dependencies(output, needed=None):
     if "not found" in output:
         raise RuntimeError(f"Unresolved shared library:\n{output}")
@@ -72,6 +75,8 @@ def elf(path):
         return stream.read(4) == b"\x7fELF"
 
 
+# Keep the SONAME and development alias local to the payload. A conflict
+# means two distinct files would be selected through the same name.
 def alias(directory, name, target):
     destination = directory / name
     if destination == target:
@@ -85,6 +90,9 @@ def alias(directory, name, target):
         destination.symlink_to(target.name)
 
 
+# Collect the linked codec closure from one build prefix and set its loader
+# paths relative to the new bundle. The editor and the command-line tools
+# then resolve the same library identities after installation.
 def assemble(prefix, output):
     prefix = prefix.resolve(strict=True)
     output = output.absolute()

@@ -14,6 +14,8 @@ void appendUnique(QStringList& destination, const QStringList& values) {
 }
 }
 
+// Keep both path spellings and device/inode pairs. A destination can alias
+// an open source through a hard link even if the path strings differ.
 struct VDQtSourceSafetySnapshot::Data {
     QStringList roots;
     QStringList knownConcatSources;
@@ -36,6 +38,8 @@ bool VDQtSourceSafety::isScriptPath(const QString& path) {
         || kind == VDQtSourceDependencies::Kind::UnsupportedList;
 }
 
+// Freeze the dependency set for an operation. Many outputs may be checked
+// against the same snapshot, for example all frames in an image sequence.
 VDQtSourceSafetySnapshot VDQtSourceSafety::captureSources(
     const QStringList& directlyLoadedSources, const QString& scriptPath,
     const QStringList& knownConcatSources) {
@@ -79,6 +83,8 @@ VDQtSourceSafetySnapshot VDQtSourceSafety::captureSources(
     return result;
 }
 
+// Always reject known aliases. An incomplete script audit also precludes
+// replacement of an existing file because a hidden dependency could use it.
 VDQtOutputSafetyReport VDQtSourceSafetySnapshot::evaluateOutputPath(const QString& outputPath) const {
     VDQtOutputSafetyReport result;
     if (!mData) {
@@ -105,6 +111,9 @@ VDQtOutputSafetyReport VDQtSourceSafetySnapshot::evaluateOutputPath(const QStrin
     return result;
 }
 
+// Recheck before installation while preserving the earlier paths and inode
+// identities. A source replaced on disk may still be open through its
+// old inode, so the refreshed view cannot forget it.
 void VDQtSourceSafetySnapshot::refresh() {
     if (!mData) return;
     const auto fresh = VDQtSourceSafety::captureSources(mData->roots, {}, mData->knownConcatSources);

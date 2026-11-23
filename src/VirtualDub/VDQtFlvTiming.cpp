@@ -10,6 +10,8 @@ quint32 uint24(const uchar *data) {
     return (quint32(data[0]) << 16) | (quint32(data[1]) << 8) | data[2];
 }
 
+// Spark header fields are MSB-first and can cross byte boundaries. Keep
+// reads within the small prefix already fetched from the tag.
 struct Bits {
     const uchar *data;
     int end;
@@ -26,6 +28,8 @@ struct Bits {
     }
 };
 
+// Verify a single Spark picture header and recover its coded type.
+// The frame map requires a stable geometry and agreement with the tag.
 bool picture(const uchar *data, int size, int width, int height, unsigned *type) {
     Bits bits{data, size * 8};
     unsigned start, version, ignored, format, w, h, quantizer;

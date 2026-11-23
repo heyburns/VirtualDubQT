@@ -67,6 +67,8 @@ VDVideoCodecCapabilities VDQtCodecEngine::getVideoCapabilities(const QString& co
     return result;
 }
 
+// Some encoders accept only a list of frame rates. Let callers select
+// the corresponding clock and map the rendered stream to it.
 VDVideoEncoderClock VDQtCodecEngine::getVideoEncoderClock(const QString& codecId, double nominalFrameRate) {
     const QString id = codecId.trimmed().toLower();
     if (id == "mpeg4") return {1, 60000}; // MPEG-4's denominator is limited to 16 bits.
@@ -103,6 +105,9 @@ VDVideoEncoderClock VDQtCodecEngine::getVideoEncoderClock(const QString& codecId
 // Runtime encoder catalog
 // -----------------------------------------------------------------------------
 
+// Report presets backed by a registered encoder, then expose useful
+// encoder families not covered by the curated list. Availability here
+// does not imply that a hardware device has been opened.
 QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
     // Preferred encoders appear first with richer capability metadata. They are
     // still filtered against the local FFmpeg build; the UI must never promise
@@ -147,8 +152,8 @@ QList<VDVideoCodecInfo> VDQtCodecEngine::getAvailableVideoCodecs() const {
         }
     }
 
-    // Preserve access to less common distribution-provided encoders by adding
-    // everything else after the curated list in alphabetical order.
+    // Expose the remaining bundled encoders in alphabetical order after
+    // the curated list.
     QList<VDVideoCodecInfo> discovered;
     void *iterator = nullptr;
     const AVCodec *codec = nullptr;

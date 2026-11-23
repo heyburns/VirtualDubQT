@@ -64,6 +64,8 @@ bool fail(QString *error, const QString& reason) {
 }
 }
 
+// Resolve the backend relative to the application layout. Build-tree and
+// installed layouts differ, but both select a private bundle beside the app.
 QString VDQtMediaRuntime::root() {
     // Resolve relative to the executable, never its current directory, PATH,
     // APPDIR or an inherited environment override. These are the only layouts.
@@ -84,6 +86,8 @@ QString VDQtMediaRuntime::ffprobe() {
     return QDir(root()).filePath(QStringLiteral("bin/ffprobe"));
 }
 
+// Send ffmpeg and ffprobe templates to the private tools, even if the
+// configured name includes a path. Other encoder commands retain their path.
 QString VDQtMediaRuntime::encoderProgram(const QString& configuredProgram) {
     const QString name = QFileInfo(configuredProgram).fileName();
     if (name == QStringLiteral("ffmpeg")) return ffmpeg();
@@ -91,6 +95,9 @@ QString VDQtMediaRuntime::encoderProgram(const QString& configuredProgram) {
     return configuredProgram;
 }
 
+// Confirm where each FFmpeg symbol actually came from and compare the
+// tools' build identities before starting the editor. This catches mixed
+// loader search paths even when another library reports a similar version.
 bool VDQtMediaRuntime::validate(QString *errorMessage) {
     const QString canonicalRoot = QFileInfo(root()).canonicalFilePath();
     if (canonicalRoot.isEmpty()) return fail(errorMessage, QStringLiteral("missing directory %1").arg(root()));

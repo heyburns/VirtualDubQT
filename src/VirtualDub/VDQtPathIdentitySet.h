@@ -30,6 +30,8 @@ inline bool VDQtReadFileIdentity(const QString& path, VDQtFileIdentity *identity
     return true;
 }
 
+// Resolve as much of the parent path as exists. Proposed outputs can
+// collide through an existing symlink even before their leaf files exist.
 inline QString VDQtOutputPathKey(const QString& path) {
     // QFileInfo::absoluteFilePath() cleans '..' before resolving directory
     // symlinks. Preserve the raw traversal until the directory is canonical.

@@ -17,6 +17,8 @@
 // Everything that changes how frames/audio are processed, but not which media
 // is loaded or how the timeline is edited. This split allows the same JSON
 // representation to back processing-settings files, projects, and jobs.
+// A value snapshot shared by the editor, saved projects and jobs. It
+// records processing intent independently of any opened decoder.
 struct VDQtProcessingState {
     int videoMode = VideoMode_FullProcessing;
     int audioMode = AudioMode_DirectStreamCopy;
@@ -36,6 +38,8 @@ struct VDQtProcessingState {
 // Complete restorable editing session. Paths are stored in portable JSON and
 // resolved by the loader; sourcePaths contains appended sources while
 // sourcePath remains the primary/backward-compatible field.
+// Source references, edit intent and visible session state. The controller
+// reopens and validates these references when it restores a project.
 struct VDQtProjectState {
     QString sourcePath;
     QStringList sourcePaths;
@@ -88,6 +92,8 @@ enum class VDQtJobStatus {
 
 // Durable queue record. Runtime-only exporter/decoder objects never enter this
 // structure, which is why interrupted jobs can be recovered after a restart.
+// An independent render request plus its durable execution status. A
+// worker can resume the queue without restoring the editor that created it.
 struct VDQtJobState {
     QString id;
     QString name;

@@ -27,6 +27,8 @@ enum class VDAudioFilterType {
     Count
 };
 
+// Portable configuration for one audio graph stage. The executing device
+// owns any libavfilter graph and buffered samples generated from it.
 struct VDAudioFilterInstance {
     QString id;
     QString name;

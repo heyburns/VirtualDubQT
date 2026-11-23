@@ -254,6 +254,8 @@ void VDQtPositionControlWidget::SetPosition(qint64 pos) {
     }
 }
 
+// Update the controls from an accepted frame response without scheduling
+// another decode or issuing a second position notification.
 void VDQtPositionControlWidget::SetPositionSilent(qint64 pos) {
     if (mPosition != pos) {
         mPosition = pos;
@@ -287,6 +289,8 @@ void VDQtPositionControlWidget::onSliderValueChanged(int value) {
     }
 }
 
+// Publish the most recent slider position through the throttled path.
+// This bounds notification pressure without losing the final target.
 void VDQtPositionControlWidget::DispatchPendingScrub() {
     if (mPendingScrubPos < 0)
         return;

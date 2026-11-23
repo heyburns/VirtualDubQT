@@ -54,6 +54,8 @@ public:
 
     explicit VDVideoDisplayWidget(const QString& title, QWidget *parent = nullptr);
 
+    // Retain the decoded frame as a shared image. Display modes and scaling
+    // are applied when painting and never change the stored picture.
     void setFrameImage(const QImage& img);
     void setLabelText(const QString& text);
     void clearDisplay();
