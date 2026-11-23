@@ -1,7 +1,7 @@
 # Building VirtualDubQT
 
 These instructions target the current source on Ubuntu 24.04 and Fedora 43 on
-64-bit Intel/AMD Linux. Use the matching FFmpeg SDK from the 0.1.4 release.
+64-bit Intel/AMD Linux. Use the matching FFmpeg SDK from the 0.1.5 release.
 
 If you only want to run the app, use the [installation guide](INSTALLATION.md).
 Source compilation uses the AviSynth+ C API headers. Current builds load the
@@ -30,9 +30,8 @@ Run commands in order. If a command fails, stop and keep its error text.
 
 ## Install AviSynth
 
-AviSynth+ 3.7.5 is the tested version for `.avs` input and the version required
-by the previously published 0.1.4 binaries. For source builds, CMake needs the
-headers. If you already have them in a separate SDK, pass
+AviSynth+ 3.7.5 is the tested version for `.avs` input. For source builds,
+CMake needs the headers. If you already have them in a separate SDK, pass
 `-DAVISYNTH_INCLUDE_DIR=/prefix/include` and skip the runtime installation unless
 you plan to use scripts or run the AviSynth tests. For `.avs` use, install a
 library with the same interface major as those headers. The upstream 3.7.5
@@ -69,12 +68,12 @@ git clone --depth 1 \
     https://github.com/heyburns/VirtualDubQT.git "$HOME/src/VirtualDubQT"
 cd "$HOME/src/VirtualDubQT"
 curl --fail --location --remote-name \
-    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.4/VirtualDubQT-0.1.4-ffmpeg-sdk-x86_64.tar.xz
+    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.5/VirtualDubQT-0.1.5-ffmpeg-sdk-x86_64.tar.xz
 curl --fail --location --remote-name \
-    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.4/SHA256SUMS
+    https://github.com/heyburns/VirtualDubQT/releases/download/v0.1.5/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 mkdir -p dist/ffmpeg-runtime-locked
-tar -xJf VirtualDubQT-0.1.4-ffmpeg-sdk-x86_64.tar.xz -C dist/ffmpeg-runtime-locked
+tar -xJf VirtualDubQT-0.1.5-ffmpeg-sdk-x86_64.tar.xz -C dist/ffmpeg-runtime-locked
 ```
 
 Expect the SDK filename followed by `OK` before extracting it. Stop if the
@@ -142,7 +141,7 @@ separate frameworks and host platform libraries. DEB and RPM builds use their
 own distro's Qt with the same private backend.
 
 The GitHub workflow builds packages on packaging-related pushes to main, without
-publishing them. A matching `v0.1.4` tag publishes only after the Ubuntu DEB,
+publishing them. A matching version tag publishes only after the Ubuntu DEB,
 AppImage and Fedora RPM pass clean-runtime export tests. When the exact tagged
 commit already passed on main and its artifacts are still available, it promotes
 those identical tested files; otherwise it builds and validates fresh packages.

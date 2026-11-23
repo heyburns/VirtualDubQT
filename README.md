@@ -33,8 +33,7 @@ a claim that every recent distribution has been tested.
   packages include matching tools and libraries, with expanded codec support.
   The app always uses this private backend, never your system FFmpeg.
 - **AviSynth+** is loaded when you open an `.avs` script. Install it separately
-  if you use those scripts. The published 0.1.4 packages still require it at
-  startup. [AviSynth setup](docs/BUILDING.md#install-avisynth).
+  if you use those scripts. [AviSynth setup](docs/BUILDING.md#install-avisynth).
 - **Extra script plugins** are separate downloads. Follow their Linux setup
   instructions; Windows plugin DLLs are not supported. The guide includes a
   first-use AviSynth example that needs no extra plugins.
