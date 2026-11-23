@@ -36,6 +36,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
+#include <QTextStream>
 #include <QProgressDialog>
 #include <QProcess>
 #include <QWindow>
@@ -1196,8 +1197,10 @@ bool VDQtMainWindow::openVideoFileImpl(const QString& filePath) {
         bool isScript = filePath.endsWith(".avs", Qt::CaseInsensitive) || filePath.endsWith(".vpy", Qt::CaseInsensitive);
         QString errorDetails = mVideoDecoder.getLastError();
         if (mAutomationUnattended) {
-            // CLI callers need the actual diagnostic and cannot dismiss a dialog.
-            qWarning().noquote() << "Could not open" << filePath << errorDetails;
+            // Qt logging may go to the system journal. CLI callers need the
+            // decoder's error on stderr, even when the logging rules silence it.
+            QTextStream(stderr) << "Could not open " << filePath << '\n'
+                                << errorDetails << '\n';
             return false;
         }
         if (isScript && !errorDetails.isEmpty()) {

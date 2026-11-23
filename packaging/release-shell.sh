@@ -16,9 +16,12 @@ vdqt_release_failure() {
     # leave tee behind and hide the short, important startup error at the end.
     exec 1>&3 2>&3
     wait "$vdqt_release_tee_pid" || true
-    tail -n 60 "$vdqt_release_log" | python3 -c '
+    # GitHub caps annotation messages at 4096 bytes. Preserve the end of
+    # the output so a long install log cannot displace the actual error.
+    tail -c 3500 "$vdqt_release_log" | python3 -c '
 import sys
-message = sys.stdin.read().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+message = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 print("::error title=Release build diagnostics::" + message)
 '
     exit "$vdqt_status"

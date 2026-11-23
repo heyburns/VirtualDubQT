@@ -98,7 +98,11 @@ def smoke(args):
                           'pixel_type="RGB24", audio_rate=0, color=$204080)\n',
                           encoding="utf-8")
         if args.expect_missing_avisynth:
-            run([app, str(script), "--exit"], environment, expected_error="AviSynth+ could not be loaded")
+            # Fedora can send Qt messages to the journal. Verify the CLI
+            # reports the error on stderr independently of Qt's log handling.
+            error_environment = {**environment, "QT_LOGGING_RULES": "*.warning=false"}
+            run([app, str(script), "--exit"], error_environment,
+                expected_error="AviSynth+ could not be loaded")
             print("Missing AviSynth produces an installation error when opening an AVS script")
 
         inputs = (source, script) if args.check_avisynth else (source,)

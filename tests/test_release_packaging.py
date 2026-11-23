@@ -95,13 +95,13 @@ class ReleasePackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vdqt-release-shell-") as directory:
             env = dict(os.environ, BASH_ENV=str(ROOT / "packaging/release-shell.sh"), RUNNER_TEMP=directory)
             env.pop("VDQT_RELEASE_SHELL_ACTIVE", None)
-            script = "for ((i=0;i<2000;i++)); do printf 'noisy install output %08d\\n' $i; done; printf 'expected test failure\\n'; (exit 7)"
+            script = "for ((i=0;i<2000;i++)); do printf 'noisy install output %0100d\\n' $i; done; printf 'expected test failure\\n'; (exit 7)"
             child = subprocess.run(["bash", "-e", "-c", script],
                                    env=env, text=True, capture_output=True, timeout=10)
             self.assertEqual(child.returncode, 7, child.stderr)
             self.assertIn("::error title=Release build diagnostics::", child.stdout)
             annotation = child.stdout.split("::error title=Release build diagnostics::", 1)[1]
-            self.assertIn("expected test failure%0A", annotation)
+            self.assertIn("expected test failure%0A", annotation[:4096])
 
     def test_success_is_not_annotated_as_failure(self):
         with tempfile.TemporaryDirectory(prefix="vdqt-release-shell-") as directory:
